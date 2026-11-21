@@ -333,13 +333,13 @@ async def test_core_audit_is_newest_first_and_cut_to_the_window(
     await stop(env)
 
 
-async def test_core_audit_omits_client_entries_and_flags_a_full_read(
+async def test_core_audit_reads_the_ring_whole_and_omits_client_entries(
     core_disks, tmp_path
 ) -> None:
     env = await cm_env(core_disks, tmp_path, options={})
     base = env.clock.utc()
     env.api.register_event_prefix("wifi_rf.", module="wifi_rf")
-    for i in range(src.AUDIT_READ_LIMIT + 20):
+    for i in range(520):  # more than the old read limit of 500
         env.core.audit.emit(
             "wifi_rf.channel_changed",
             source="wifi_rf",
@@ -358,13 +358,19 @@ async def test_core_audit_omits_client_entries_and_flags_a_full_read(
         )
     since, until = base.timestamp(), base.timestamp() + 3600
     result = await read(env.hass, "core_audit", request(since, until))
-    assert result.truncated is True  # the general ring hit the read limit
+    # the ring is read whole (the read limit is above its capacity, 1.50.0
+    # review S2): nothing cut, client entries counted, not shown
+    assert src.AUDIT_READ_LIMIT > core_audit.AUDIT_MAX_EVENTS
+    assert result.truncated is False and result.unreachable is False
     assert result.omitted_client == 3
     assert "cli_" not in json.dumps(result.marks)
-    # the newest 500 of the ring were read; the client entries among them
-    # are counted, not shown
-    assert src.AUDIT_READ_LIMIT - 10 <= len(result.marks) <= src.SOURCE_MARK_CAP
-    assert all(m["kind"] == "rf_event" for m in result.marks)
+    rf = [m for m in result.marks if m["kind"] == "rf_event"]
+    assert len(rf) == 520
+    # with a read limit below the ring (patched) the read is cut at its
+    # oldest entry of the window
+    with patch.object(src, "AUDIT_READ_LIMIT", 100):
+        cut = await read(env.hass, "core_audit", request(since, until))
+    assert cut.truncated is True and cut.edge == min(m["ts"] for m in cut.marks)
     await stop(env)
 
 

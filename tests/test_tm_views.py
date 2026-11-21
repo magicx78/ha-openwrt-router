@@ -268,6 +268,19 @@ async def test_a_body_is_refused(core_disks, tmp_path) -> None:
     await close(world)
 
 
+async def test_a_body_over_4_kib_is_413(core_disks, tmp_path) -> None:
+    world = await full_env(core_disks, tmp_path)
+    async with http(world.env.hass) as h:
+        resp = await h.get(
+            data=b"{" + b" " * 5000 + b"}",
+            headers={"Content-Type": "application/json"},
+        )
+    assert resp.status == 413
+    assert resp.data["code"] == "body_too_large"
+    assert resp.headers["Cache-Control"] == "no-store"
+    await close(world)
+
+
 # --- off stays off ----------------------------------------------------------------------
 
 

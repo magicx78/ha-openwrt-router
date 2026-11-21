@@ -263,10 +263,14 @@ def test_a_cut_source_bounds_the_page() -> None:
     )
     events = result("ni_events", [mark(2, NOW - 50), mark(3, NOW - 500)])
     body = tq.merge([audit, events], q(), admin=True, now=NOW)
-    assert [m["ts"] for m in body["marks"]] == [NOW - 50, NOW - 100]
-    assert body["next_until"] == NOW - 100 and body["truncated"] is True
+    # the edge's millisecond goes whole to the next page (review K4)
+    assert [m["ts"] for m in body["marks"]] == [NOW - 50]
+    assert body["next_until"] == src.ms_next(NOW - 100)
+    assert body["truncated"] is True
     by_source = {s["id"]: s for s in body["sources"]}
     assert by_source["core_audit"]["truncated"] is True
+    assert by_source["core_audit"]["cut"] == "next_page"
+    assert by_source["core_audit"]["state"] == "ok"  # cut, not quiet
     assert by_source["ni_events"]["count"] == 1
 
 
@@ -283,6 +287,7 @@ def test_an_unreadable_source_makes_the_answer_partial() -> None:
         "count": 0,
         "oldest": None,
         "truncated": False,
+        "cut": None,
     }
 
 

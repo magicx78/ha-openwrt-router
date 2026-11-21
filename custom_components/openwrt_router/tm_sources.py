@@ -8,16 +8,27 @@ into timeline marks (§5.1).
 
 Sources and their read functions:
 
-* ``core_audit``: ``ConfigurationApi.events`` per audit ring (it has no
-  ``until`` and returns oldest first although its docstring says "newest
-  first"; both are handled here, the core is not changed).
+* ``core_audit``: ``ConfigurationApi.events`` per audit ring (oldest first,
+  ``limit`` keeps the newest, no ``until``). Each ring is read whole (the
+  read limit is above the ring's capacity) and cut to the window here, so
+  every entry of the window is reachable page by page.
 * ``config_versions``: ``ConfigurationApi.async_list_backups`` (newest
-  first, no ``until`` either).
+  first, no ``until`` either; read limit 500).
 * ``ni_events`` / ``ni_incidents``: ``net_query.events_page`` and
   ``net_query.incidents_page``, the functions behind the Network
-  Intelligence routes.
+  Intelligence routes, each with a limit above the store's capacity.
+  Incidents come in status/severity order without a time filter: they are
+  all read and filtered by time here.
 * ``security_timeline``: ``SecurityCenter.overview`` with the masked
-  (non-admin) view; only its ``timeline`` is used.
+  (non-admin) view; only its ``timeline`` is used (read limit above its
+  capacity).
+
+Times are on a millisecond grid: a mark's ``ts`` is its source time
+rounded *down* to the millisecond (``ms_floor``), the window check uses
+that value and ``tm_query`` puts the query's bounds on the same grid, so a
+mark lies in exactly one page window. A read that hit its limit reports
+its ``edge`` (the oldest read entry of the window, client entries
+included): above it the source is complete.
 
 Privacy (plan §6, F3/F4/F5): a mark carries no MAC, IP, host name, SSID or
 WLAN netdev name. Routers appear only as the contract ``router_id`` plus the
@@ -48,17 +59,21 @@ from typing import Any, Final
 
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, SEC_TIMELINE_MAX
 from .core_errors import ConfigApiError
 from .core_masking import redact_text
 from .core_models import (
+    AUDIT_MAX_EVENTS,
     MAX_LIST_LIMIT,
     OPTION_CONFIG_BACKUP_ENABLED,
+    SECURITY_AUDIT_MAX_EVENTS,
     AuditRing,
     BackupRecord,
     CoreEvent,
     VersionStatus,
 )
+from .net_events import MAX_EVENTS as NI_MAX_EVENTS
+from .net_events import MAX_INCIDENTS as NI_MAX_INCIDENTS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,17 +187,23 @@ NON_ADMIN_GROUPS: Final = frozenset(
 
 # --- limits -----------------------------------------------------------------------------
 
-# Hard caps per source when reading (the source's own list maximum).
-AUDIT_READ_LIMIT: Final = MAX_LIST_LIMIT  # per audit ring
+# Read limits per source. Above the capacity of the source's store (1.50.0
+# review S1-S3), so a read is whole and client entries or another ring can
+# never use it up; a read that still hits its limit is cut (``truncated``,
+# ``edge``). Only the configuration versions keep the core's list maximum.
+AUDIT_READ_LIMIT: Final = max(AUDIT_MAX_EVENTS, SECURITY_AUDIT_MAX_EVENTS) + 1
 VERSIONS_READ_LIMIT: Final = MAX_LIST_LIMIT
-NI_EVENTS_READ_LIMIT: Final = 500  # net_query.EVENTS_LIMIT_MAX
-NI_INCIDENTS_READ_LIMIT: Final = 200  # net_query.INCIDENTS_LIMIT_MAX
-SECURITY_READ_LIMIT: Final = 500
-# Marks one source contributes to an answer at most (newest kept).
+NI_EVENTS_READ_LIMIT: Final = NI_MAX_EVENTS + 1
+NI_INCIDENTS_READ_LIMIT: Final = NI_MAX_INCIDENTS + 1
+SECURITY_READ_LIMIT: Final = SEC_TIMELINE_MAX + 1
+# Marks of one source on one page at most (a page holds MAX_LIMIT = 500).
 SOURCE_MARK_CAP: Final = 500
-# Time budget of one source (seconds): asyncio timeout around its awaits
-# plus a monotonic deadline checked inside its loops.
+# Time budget of one source (seconds): an asyncio timeout around its awaits
+# plus a monotonic deadline checked inside its own loops. A synchronous read
+# function of a source module is not interrupted; the deadline is checked
+# after it returns.
 SOURCE_BUDGET_S: Final = 2.0
+MS: Final = 0.001  # the time grid of marks and page bounds
 PARAMS_MAX: Final = 8
 TEXT_MAX: Final = 120
 NAME_MAX: Final = 64
@@ -238,6 +259,13 @@ class SourceResult:
     omitted_client: int = 0
     truncated: bool = False
     oldest: float | None = None
+    # A cut read (``truncated``): the oldest read entry of the window, client
+    # entries included; the source is complete above it. None when the cut
+    # leaves no entry of the window (``unreachable``).
+    edge: float | None = None
+    # Older entries of the window cannot be read at all (no ``until`` in the
+    # read function, or a read without time order).
+    unreachable: bool = False
 
 
 class SourceOff(Exception):
@@ -306,6 +334,31 @@ def build_router_map(hass: HomeAssistant) -> RouterMap:
             by_entry[entry_id] = router_id
             names[router_id] = display_name(getattr(entry, "title", None))
     return RouterMap(by_entry, names)
+
+
+def ms_floor(value: float) -> float:
+    """``value`` rounded down to the millisecond grid (``k / 1000``)."""
+    k = math.floor(value * 1000)
+    if k / 1000 > value:
+        k -= 1
+    elif (k + 1) / 1000 <= value:
+        k += 1
+    return k / 1000
+
+
+def ms_ceil(value: float) -> float:
+    """``value`` rounded up to the millisecond grid (``k / 1000``)."""
+    k = math.ceil(value * 1000)
+    if (k - 1) / 1000 >= value:
+        k -= 1
+    elif k / 1000 < value:
+        k += 1
+    return k / 1000
+
+
+def ms_next(value: float) -> float:
+    """The grid point after ``value`` (a grid value)."""
+    return (round(value * 1000) + 1) / 1000
 
 
 def epoch(value: datetime) -> float:
@@ -415,7 +468,7 @@ def make_mark(
     """One timeline mark (plan §5.1); see ``docs/time-machine.md``."""
     return {
         "id": mark_id(source, source_id, variant),
-        "ts": round(float(ts), 3),
+        "ts": ms_floor(float(ts)),
         "source": source,
         "kind": kind,
         "group": KIND_GROUP[kind],
@@ -437,28 +490,41 @@ def _check(deadline: float) -> None:
 
 
 def _finish(
-    source: str, marks: list[dict[str, Any]], omitted: int, truncated: bool
+    source: str,
+    marks: list[dict[str, Any]],
+    omitted: int,
+    truncated: bool,
+    read: Iterable[float] = (),
+    *,
+    unreachable: bool = False,
 ) -> SourceResult:
+    """The result of one read. ``read`` holds the grid times of every entry
+    of the window that was read (client entries included): a cut read ends
+    at the oldest of them (``edge``). All marks stay; rights, filters and
+    the page size are applied by ``tm_query.merge``."""
     marks.sort(key=lambda m: (-m["ts"], m["id"]))
-    if len(marks) > SOURCE_MARK_CAP:
-        del marks[SOURCE_MARK_CAP:]
-        truncated = True
+    times = list(read)
+    edge = min(times) if truncated and times and not unreachable else None
     return SourceResult(
         source,
-        STATE_OK if marks else STATE_EMPTY,
+        STATE_OK if marks or truncated else STATE_EMPTY,
         None,
         marks,
         omitted,
         truncated,
         marks[-1]["ts"] if marks else None,
+        edge,
+        truncated and edge is None,
     )
 
 
 def _in_window(ts: Any, req: ReadRequest) -> bool:
+    """On the grid: ``since <= ms_floor(ts) < until`` (see the module doc)."""
     return (
         isinstance(ts, int | float)
         and not isinstance(ts, bool)
-        and req.since <= ts < req.until
+        and math.isfinite(ts)
+        and req.since <= ms_floor(float(ts)) < req.until
     )
 
 
@@ -534,19 +600,34 @@ async def read_core_audit(
         raise SourceOff(REASON_ADMIN_ONLY)
     api = await _config_api(hass)
     since = to_utc(req.since)
+    limit = AUDIT_READ_LIMIT
     events: dict[str, CoreEvent] = {}
-    truncated = False
+    truncated = unreachable = False
+    edges: list[float] = []
     for ring in (AuditRing.GENERAL, AuditRing.SECURITY):
-        # ``events`` has no ``until`` and sorts oldest first; both rings are
-        # read with the list maximum and cut to the window here.
-        batch = api.events(since=since, ring=ring, limit=AUDIT_READ_LIMIT)
+        # ``events`` has no ``until`` and sorts oldest first; ``limit`` keeps
+        # the newest. The limit is above the ring's capacity: the ring is
+        # read whole and cut to the window here.
+        batch = api.events(since=since, ring=ring, limit=limit)
         if not isinstance(batch, tuple | list):
             raise SourceUnreadable(REASON_BAD_FORMAT)
-        truncated = truncated or len(batch) >= AUDIT_READ_LIMIT
+        times: list[float] = []
         for event in batch:
             if not isinstance(event, CoreEvent):
                 raise SourceUnreadable(REASON_BAD_FORMAT)
             events.setdefault(event.event_id, event)
+            if _in_window(epoch(event.ts), req):
+                times.append(ms_floor(epoch(event.ts)))
+        if len(batch) >= limit:
+            # A cut ring is complete above its oldest read entry; the edge
+            # of the source is the newest of these edges (review S2). With
+            # no entry of the window read, the older ones of this ring are
+            # out of reach (no ``until``).
+            truncated = True
+            if times:
+                edges.append(min(times))
+            else:
+                unreachable = True
     marks: list[dict[str, Any]] = []
     omitted = 0
     for event in events.values():
@@ -583,7 +664,10 @@ async def read_core_audit(
                 ),
             )
         )
-    return _finish(SOURCE_CORE_AUDIT, marks, omitted, truncated)
+    result = _finish(SOURCE_CORE_AUDIT, marks, omitted, truncated)
+    result.edge = max(edges) if edges else None
+    result.unreachable = unreachable
+    return result
 
 
 # --- configuration versions --------------------------------------------------------------
@@ -613,6 +697,7 @@ async def read_config_versions(
     if not isinstance(records, tuple | list):
         raise SourceUnreadable(REASON_BAD_FORMAT)
     marks: list[dict[str, Any]] = []
+    read: list[float] = []
     for record in records:
         _check(deadline)
         if not isinstance(record, BackupRecord):
@@ -620,6 +705,7 @@ async def read_config_versions(
         ts = epoch(record.created_at)
         if not _in_window(ts, req):
             continue
+        read.append(ms_floor(ts))
         marks.append(
             make_mark(
                 source=SOURCE_CONFIG_VERSIONS,
@@ -637,7 +723,7 @@ async def read_config_versions(
             )
         )
     return _finish(
-        SOURCE_CONFIG_VERSIONS, marks, 0, len(records) >= VERSIONS_READ_LIMIT
+        SOURCE_CONFIG_VERSIONS, marks, 0, len(records) >= VERSIONS_READ_LIMIT, read
     )
 
 
@@ -719,6 +805,7 @@ async def read_ni_events(
     if not isinstance(events, list):
         raise SourceUnreadable(REASON_BAD_FORMAT)
     marks: list[dict[str, Any]] = []
+    read: list[float] = []
     omitted = 0
     for event in events:
         _check(deadline)
@@ -730,6 +817,7 @@ async def read_ni_events(
             raise SourceUnreadable(REASON_BAD_FORMAT)
         if not _in_window(ts, req):
             continue
+        read.append(ms_floor(float(ts)))
         if isinstance(subject, Mapping) and any(k in subject for k in _CLIENT_KEYS):
             omitted += 1
             continue
@@ -755,14 +843,19 @@ async def read_ni_events(
             )
         )
     return _finish(
-        SOURCE_NI_EVENTS, marks, omitted, page.get("next_before") is not None
+        SOURCE_NI_EVENTS, marks, omitted, page.get("next_before") is not None, read
     )
 
 
 async def read_ni_incidents(
     hass: HomeAssistant, req: ReadRequest, routers: RouterMap, deadline: float
 ) -> SourceResult:
-    """Opening, reopening and resolving of NI incidents inside the window."""
+    """Opening, reopening and resolving of NI incidents inside the window.
+
+    ``incidents_page`` sorts by status, severity and ``last_seen`` and has no
+    time filter: every stored incident is read (the limit is above the
+    store's capacity) and the steps are filtered by time here (review S3).
+    """
     from .net_query import engine_now, incidents_page
 
     engine = _ni_engine(hass)
@@ -827,7 +920,10 @@ async def read_ni_incidents(
                     ref=ref_of("network_intelligence", "incident", inc_id),
                 )
             )
-    return _finish(SOURCE_NI_INCIDENTS, marks, omitted, total > len(incidents))
+    # Not in time order: a cut read gives no edge; older steps are out of
+    # reach (the store holds at most its capacity, so this does not happen).
+    cut = total > len(incidents)
+    return _finish(SOURCE_NI_INCIDENTS, marks, omitted, cut, unreachable=cut)
 
 
 # --- security center --------------------------------------------------------------------
@@ -873,6 +969,7 @@ async def read_security_timeline(
     if not isinstance(rows, list):
         raise SourceUnreadable(REASON_BAD_FORMAT)
     marks: list[dict[str, Any]] = []
+    read: list[float] = []
     omitted = 0
     occurrences: dict[str, int] = {}
     for row in reversed(rows):  # oldest first: stable occurrence numbers
@@ -884,6 +981,7 @@ async def read_security_timeline(
             raise SourceUnreadable(REASON_BAD_FORMAT)
         if not _in_window(ts, req):
             continue
+        read.append(ms_floor(float(ts)))
         if row.get("has_client") or row.get("client_ref"):
             omitted += 1
             continue
@@ -921,7 +1019,11 @@ async def read_security_timeline(
             )
         )
     return _finish(
-        SOURCE_SECURITY_TIMELINE, marks, omitted, len(rows) >= SECURITY_READ_LIMIT
+        SOURCE_SECURITY_TIMELINE,
+        marks,
+        omitted,
+        len(rows) >= SECURITY_READ_LIMIT,
+        read,
     )
 
 

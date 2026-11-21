@@ -5,22 +5,32 @@ requested sources one after the other through ``tm_sources`` (no listener,
 no task, no store), keeps what the user may see and returns one stable,
 versioned answer (``v`` 1, see ``docs/time-machine.md``):
 
-* the window is half-open, ``[from, until)`` in epoch seconds; 24 h by
-  default, 14 days at most;
+* the window is half-open, ``[from, until)`` in epoch seconds, both bounds
+  rounded up to the millisecond grid of the marks (``tm_sources.ms_floor``);
+  24 h by default, 14 days at most;
 * marks are sorted newest first, ties by mark id (stable);
 * a page holds at most ``limit`` marks and never splits marks of the same
-  second (unless one second alone holds more): ``next_until`` is the
+  timestamp (unless one timestamp alone holds more): ``next_until`` is the
   ``until`` of the next page;
-* a source that was cut by its read limit bounds the page: marks older than
-  its oldest read entry are left for the next page, so a gap of one source
-  never looks like a quiet time.
+* a source whose read was cut bounds the page: it is complete only above
+  its ``edge`` (the oldest read entry of the window, client entries
+  included). The page keeps the marks after the edge's millisecond and
+  ``next_until`` is the millisecond after the edge, so the next page reads
+  that millisecond whole (review K4); only when the edge's millisecond is
+  the last one of the window, the page keeps it and the rest of it is cut.
+  ``next_until`` is set even when the page holds no mark (review S1), and
+  the source says ``cut`` (``next_page`` / ``unreachable``), so a gap of one
+  source never looks like a quiet time.
 
 Rights (plan §6, F4/F5): administrators see every mark of Phase A. Other
 users (only while the panel is open to all; the route checks that) see the
 groups ``NON_ADMIN_GROUPS``; the core audit and the configuration versions
-are not read for them (``off`` / ``admin_only``). Client marks do not exist
-in Phase A: the sources' client entries are only counted, and only
-administrators get that count (``omitted_client_marks`` is 0 for others).
+are not read for them (``off`` / ``admin_only``). Each source's ``state``,
+``count`` and ``oldest`` are taken after the rights (review K2): a non-admin
+learns neither that marks he may not see exist nor when. Client marks do
+not exist in Phase A: the sources' client entries are only counted, and
+only administrators get that count (``omitted_client_marks`` is 0 for
+others).
 """
 
 from __future__ import annotations
@@ -44,6 +54,8 @@ from .tm_sources import (
     SEVERITIES,
     SEVERITY_RANK,
     SOURCE_IDS,
+    STATE_EMPTY,
+    STATE_OK,
     STATE_UNREADABLE,
     ReadFn,
     ReadRequest,
@@ -51,6 +63,8 @@ from .tm_sources import (
     async_read_source,
     build_router_map,
     domain_entries,
+    ms_ceil,
+    ms_next,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,6 +73,10 @@ API_VERSION: Final = 1
 STATUS_OK: Final = "ok"
 STATUS_PARTIAL: Final = "partial"  # at least one requested source unreadable
 STATUS_OFF: Final = "off"
+# ``cut`` of a source in the answer (additive, 1.50.0 review): its read was
+# cut; older entries of the window come on the next page / cannot be read.
+CUT_NEXT_PAGE: Final = "next_page"
+CUT_UNREACHABLE: Final = "unreachable"
 
 DEFAULT_WINDOW_S: Final = 86_400.0  # 24 h
 MAX_WINDOW_S: Final = 14 * 86_400.0  # 14 days (F1)
@@ -158,6 +176,8 @@ def parse_query(query: Mapping[str, str], now: float) -> Query:
         until = float(math.floor(now) + 1)
     if since is None:
         since = until - DEFAULT_WINDOW_S
+    # On the grid of the marks: a mark lies in exactly one page (review K1).
+    since, until = ms_ceil(since), ms_ceil(until)
     if since >= until:
         raise QueryError("window", "empty")
     if until - since > MAX_WINDOW_S:
@@ -207,8 +227,13 @@ def off_body(now: float) -> dict[str, Any]:
     }
 
 
+def _allowed(mark: Mapping[str, Any], admin: bool) -> bool:
+    """May this user see the mark at all (rights only, no query filter)?"""
+    return admin or mark["group"] in NON_ADMIN_GROUPS
+
+
 def _visible(mark: Mapping[str, Any], query: Query, admin: bool) -> bool:
-    if not admin and mark["group"] not in NON_ADMIN_GROUPS:
+    if not _allowed(mark, admin):
         return False
     if query.router_id is not None and mark["router_id"] != query.router_id:
         return False
@@ -219,17 +244,29 @@ def _visible(mark: Mapping[str, Any], query: Query, admin: bool) -> bool:
     )
 
 
+def _edge(result: SourceResult) -> float | None:
+    """Where a cut read ends (None: not cut, or nothing of the window read)."""
+    if not result.truncated or result.unreachable:
+        return None
+    return result.edge if result.edge is not None else result.oldest
+
+
 def merge(
     results: Iterable[SourceResult], query: Query, *, admin: bool, now: float
 ) -> dict[str, Any]:
     """One answer of the read sources (filters, rights, order, paging)."""
     results = list(results)
-    # A source cut by its read limit is complete only down to its oldest
-    # read entry: the page stops there (the next page continues).
-    cut_offs = [
-        r.oldest for r in results if r.truncated and r.oldest is not None and r.marks
-    ]
-    cutoff = max(cut_offs) if cut_offs else None
+    # A cut source is complete only above its edge: the page keeps what lies
+    # after the edge's millisecond, the next page starts with it (K4). Only
+    # when that millisecond ends the window, the page keeps it (no progress
+    # otherwise) and the rest of it is cut.
+    bounds = []
+    for r in results:
+        edge = _edge(r)
+        if edge is not None:
+            after = ms_next(edge)
+            bounds.append(after if after < query.until else edge)
+    cutoff = max(bounds) if bounds else None
     marks = [
         m
         for r in results
@@ -243,26 +280,42 @@ def merge(
         page = marks[: query.limit]
         boundary = page[-1]["ts"]
         whole = [m for m in page if m["ts"] > boundary]
-        # one second with more marks than ``limit`` is cut (flagged)
+        # one timestamp with more marks than ``limit`` is cut (flagged)
         marks = whole or page
         next_until = marks[-1]["ts"]
         truncated = True
     if next_until is not None and next_until <= query.since:
         next_until = None
-    counts: dict[str, int] = {}
+    on_page: dict[str, list[dict[str, Any]]] = {}
     for mark in marks:
-        counts[mark["source"]] = counts.get(mark["source"], 0) + 1
-    sources = [
-        {
-            "id": r.source,
-            "state": r.state,
-            "reason": r.reason,
-            "count": counts.get(r.source, 0),
-            "oldest": r.oldest,
-            "truncated": r.truncated,
-        }
-        for r in results
-    ]
+        on_page.setdefault(mark["source"], []).append(mark)
+    sources = []
+    for r in results:
+        mine = on_page.get(r.source, [])
+        state = r.state
+        if state in (STATE_OK, STATE_EMPTY):
+            # after the rights (K2); a cut source is never "empty" (S1)
+            allowed = any(_allowed(m, admin) for m in r.marks)
+            state = STATE_OK if allowed or r.truncated else STATE_EMPTY
+        cut = None
+        if r.truncated:
+            if _edge(r) is None:
+                cut = CUT_UNREACHABLE
+            elif next_until is not None:
+                cut = CUT_NEXT_PAGE
+        sources.append(
+            {
+                "id": r.source,
+                "state": state,
+                "reason": r.reason,
+                "count": len(mine),
+                # the oldest of the source's marks on this page (after rights
+                # and filters; K2), None without one
+                "oldest": mine[-1]["ts"] if mine else None,
+                "truncated": r.truncated,
+                "cut": cut,
+            }
+        )
     return {
         "v": API_VERSION,
         "status": STATUS_PARTIAL
@@ -313,6 +366,8 @@ async def async_timeline(
 
 __all__ = [
     "API_VERSION",
+    "CUT_NEXT_PAGE",
+    "CUT_UNREACHABLE",
     "DEFAULT_LIMIT",
     "KINDS",
     "MAX_LIMIT",
