@@ -43,7 +43,14 @@ from custom_components.openwrt_router.traffic_flows import (
     FlowStore,
     normalise_collector_flow,
 )
-from custom_components.openwrt_router.traffic_model import Quality, Scope
+from custom_components.openwrt_router.traffic_history import TrafficHistory
+from custom_components.openwrt_router.traffic_model import (
+    Coverage,
+    MeasurementPoint,
+    Quality,
+    Rate,
+    Scope,
+)
 
 
 @pytest.fixture
@@ -394,3 +401,92 @@ def test_call_ids_are_bounded() -> None:
             flows=flows,
         )
     assert len(intake._call_ids) == tc.MAX_CALL_IDS
+
+
+# --- T6: a coarse store newer than the fine one adds nothing twice --------------------
+
+HDAY = 86400
+HT0 = 1_800_000_000 - (1_800_000_000 % HDAY)  # UTC midnight
+HWAN = MeasurementPoint(RID, Scope.WAN, device="wan")
+
+
+def hist_rate(wall: float, rx: int = 6_000, interval: float = 60.0) -> Rate:
+    return Rate(
+        HWAN,
+        Quality.OK,
+        interval_s=interval,
+        rx_bps=rx * 8 / interval,
+        tx_bps=3_000 * 8 / interval,
+        rx_delta=rx,
+        tx_delta=3_000,
+        coverage=Coverage.FULL,
+        wall_s=wall,
+        mono_s=wall,
+    )
+
+
+def hist_feed(hist: TrafficHistory, start: float, end: float) -> None:
+    t = start + 60.0
+    while t <= end:
+        hist.add_rate(hist_rate(t))
+        t += 60.0
+
+
+def hour_bytes(hist: TrafficHistory, end: float) -> list[int | None]:
+    win = hist.window(HWAN.point_id, 4 * 3600, end=end, resolution_s=3600)
+    return [b.rx_bytes for b in win.buckets]
+
+
+def test_coarse_store_newer_than_fine_store_counts_nothing_twice() -> None:
+    hist = TrafficHistory()
+    hist_feed(hist, HT0, HT0 + 2 * 3600)
+    hist.compact(HT0 + 2 * 3600)
+    fine_old = json.loads(json.dumps(hist.export_fine()))  # last fine write
+    hist_feed(hist, HT0 + 2 * 3600, HT0 + 3 * 3600)
+    hist.compact(HT0 + 3 * 3600)
+    coarse_new = json.loads(json.dumps(hist.export_coarse()))  # a later coarse write
+    # hard crash: the fine store of 2 h, the coarse store of 3 h are on disk
+    again = TrafficHistory()
+    assert again.import_payload(fine_old, coarse_new) == 0
+    end = HT0 + 3 * 3600
+    truth = hour_bytes(hist, end)
+    # every hour holds at most what really went through, before and after
+    # the next roll-up
+    for _step in ("on load", "after the next roll-up"):
+        got = hour_bytes(again, end)
+        for want, have in zip(truth, got, strict=True):
+            assert (have or 0) <= (want or 0), (_step, truth, got)
+        again.compact(end + 60)
+    assert hour_bytes(again, HT0 + 2 * 3600)[:2] == hour_bytes(hist, HT0 + 2 * 3600)[:2]
+
+
+def test_old_store_files_without_the_coarse_marker_still_load() -> None:
+    hist = TrafficHistory()
+    hist_feed(hist, HT0, HT0 + 2 * 3600)
+    hist.compact(HT0 + 2 * 3600)
+    fine = json.loads(json.dumps(hist.export_fine()))
+    coarse = json.loads(json.dumps(hist.export_coarse()))
+    for entry in coarse["points"].values():
+        entry.pop("ru", None)  # a coarse file written before the fix
+    again = TrafficHistory()
+    assert again.import_payload(fine, coarse) == 0
+    assert again.compact(HT0 + 2 * 3600) is False  # nothing rolled twice
+    assert hour_bytes(again, HT0 + 2 * 3600) == hour_bytes(hist, HT0 + 2 * 3600)
+
+
+def test_fine_store_newer_than_coarse_store_loses_no_rolled_bucket() -> None:
+    """The other order: the coarse mark tells what the coarse tiers hold, so
+    the fine buckets after it are rolled again (nothing lost, nothing twice)."""
+    hist = TrafficHistory()
+    hist_feed(hist, HT0, HT0 + 2 * 3600)
+    hist.compact(HT0 + 2 * 3600)
+    coarse_old = json.loads(json.dumps(hist.export_coarse()))
+    hist_feed(hist, HT0 + 2 * 3600, HT0 + 3 * 3600)
+    hist.compact(HT0 + 3 * 3600)
+    fine_new = json.loads(json.dumps(hist.export_fine()))
+    again = TrafficHistory()
+    assert again.import_payload(fine_new, coarse_old) == 0
+    end = HT0 + 3 * 3600
+    assert hour_bytes(again, end) == hour_bytes(hist, end)
+    again.compact(end)
+    assert hour_bytes(again, end) == hour_bytes(hist, end)
