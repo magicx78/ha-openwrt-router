@@ -134,7 +134,7 @@ test('data quality and "not available" reasons are visible', () => {
   assert.match(ov, /Schnittstellen passen nicht/); // WiFi RF interface_mismatch
   assert.match(ov, /Security Center/);
   assert.match(ov, /nicht angebunden/); // Security Center not_connected
-  assert.match(ov, /Collector-Schnittstelle noch nicht gebaut/);
+  assert.match(ov, /Collector ausgeschaltet/);
   assert.match(ov, /Hardware-Offload unbekannt/);
   assert.match(ov, /Abdeckung teilweise/);
   const rec = html(h(M.RecommendationsView, { data: M.parseRecommendations(S.recommendations()) }));
@@ -169,6 +169,19 @@ test('off shows a notice and loads nothing; the nav hides Flows for users', () =
   const frame = html(h(M.TrafficAnalyticsView, { api: neverApi, isAdmin: () => false }));
   assert.match(frame, /Traffic Analytics/);
   assert.match(frame, /aria-busy="true"/); // the overview is loading; nothing else is mounted
+});
+
+test('collector flows render as pseudonyms, never as addresses', () => {
+  const raw = S.flowsWithRows();
+  raw.rows.push({ ...raw.rows[0], src: '192.0.2.10', dst: S.PLANTED_MAC, client_ref: null });
+  const out = html(h(M.FlowsBody, { data: M.parseFlows(raw) }));
+  assert.match(out, /Flows vom Collector \(2\)/);
+  assert.match(out, /Adresse 11111111:50000/);
+  assert.match(out, /Client unbekannt/);
+  assert.doesNotMatch(out, /192\.0\.2\.10/);
+  assert.ok(!out.includes(S.PLANTED_MAC));
+  const empty = html(h(M.FlowsBody, { data: M.parseFlows(S.flows()) }));
+  assert.doesNotMatch(empty, /Flows vom Collector/);
 });
 
 test('a view never throws on junk answers', () => {

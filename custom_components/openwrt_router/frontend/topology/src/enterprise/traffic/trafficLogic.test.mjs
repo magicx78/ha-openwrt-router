@@ -3,8 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DASH, POLL_MIN_MS, SECTIONS, SERIES_WINDOWS, TAB_ID, TAB_ORDER, TAB_TITLE, TrafficApiError,
-  anomalyKindText, bucketLabel, clientLabel, coverageView, errorInfo, fmtBytes, fmtPct, fmtRate, historyPoints,
+  DASH, OFF_HINT, POLL_MIN_MS, SECTIONS, SERIES_WINDOWS, TAB_ID, TAB_ORDER, TAB_TITLE, TrafficApiError,
+  anomalyKindText, bucketLabel, clientLabel, flowEndpoint, coverageView, errorInfo, fmtBytes, fmtPct, fmtRate, historyPoints,
   overviewTiles, parseAnomalies, parseCapacity, parseClients, parseFlows, parseOverview, parsePoints,
   parseRecommendations, parseSeries, parseTalkers, parseVlans, pointLabel, rateParts, reasonText, safeText,
   sectionsFor, seriesCharts, seriesQuery, shouldFetch, sourceStateView, statusView, talkerQuery, talkerValue,
@@ -158,6 +158,28 @@ test('talkers, clients, vlans, capacity, anomalies, recommendations, flows parse
   const f = parseFlows(S.flows());
   assert.equal(f.source.state, 'unavailable');
   assert.ok(f.notes.includes('empty_is_not_no_traffic'));
+  assert.deepEqual(f.rows, []);
+  assert.equal(f.sources[0].reason, 'collector_off');
+  assert.match(reasonText('collector_off'), /Collector ausgeschaltet/);
+});
+
+test('collector flows: rows parse, endpoints are pseudonyms only', () => {
+  const f = parseFlows(S.flowsWithRows());
+  assert.equal(f.rows.length, 1);
+  assert.equal(f.rows[0].proto, 'tcp');
+  assert.equal(f.rows[0].dstPort, 443);
+  assert.equal(f.complete, true);
+  assert.equal(flowEndpoint('ipa_' + '1'.repeat(16), 443), 'Adresse 11111111:443');
+  assert.equal(flowEndpoint('192.0.2.10', 80), 'Adresse unbekannt:80');
+  assert.equal(flowEndpoint(S.PLANTED_MAC, null), 'Adresse unbekannt');
+  const many = { rows: Array.from({ length: 500 }, () => S.flowsWithRows().rows[0]) };
+  assert.equal(parseFlows(many).rows.length, 200);
+});
+
+test('the off hint names the switch and where it is', () => {
+  assert.match(OFF_HINT, /traffic_enabled/);
+  assert.match(OFF_HINT, /Konfigurieren/);
+  assert.doesNotMatch(OFF_HINT, /noch nicht vorhanden/);
 });
 
 test('parsers survive junk without throwing', () => {

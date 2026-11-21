@@ -59,7 +59,7 @@ export function overviewReady() {
     ],
     vlans: [],
     flow_sources: [
-      { source: 'collector', state: 'unavailable', reason: 'collector_interface_not_built' },
+      { source: 'collector', state: 'unavailable', reason: 'collector_off' },
       { source: 'conntrack_count', state: 'unavailable', reason: 'count_file_not_seen', routers: 0, note: 'count_only_no_flows' },
     ],
     correlation_sources: [
@@ -210,6 +210,20 @@ export function flows() {
   return {
     ...base(), source: { state: 'unavailable', reason: 'needs_flow_source', feeds: 0, records: 0 }, rows: [], complete: false,
     notes: ['empty_is_not_no_traffic', 'invisible_is_unknown'],
-    sources: [{ source: 'collector', state: 'unavailable', reason: 'collector_interface_not_built' }],
+    sources: [{ source: 'collector', state: 'unavailable', reason: 'collector_off' }],
+  };
+}
+
+/** A collector that delivers (Phase K): pseudonyms only. */
+export function flowsWithRows() {
+  return {
+    ...base(), source: { state: 'ready', reason: null, feeds: 1, records: 1 }, complete: true,
+    notes: ['empty_is_not_no_traffic'],
+    rows: [{
+      router_id: RID1, client_ref: 'cli_' + 'c'.repeat(16), attribution: 'client', vlan_id: 10, proto: 'tcp',
+      src: 'ipa_' + '1'.repeat(16), dst: 'ipa_' + '2'.repeat(16), src_port: 50000, dst_port: 443,
+      start: TS - 60, end: TS, bytes: 1200, packets: 10, direction: 'orig', kind: 'observed',
+    }],
+    sources: [{ source: 'collector', state: 'available', reason: null }],
   };
 }

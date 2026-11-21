@@ -367,10 +367,30 @@ export interface AnomalyList extends Base {
   incidentEngine: SourceState;
 }
 
+/** One flow of the external collector (pseudonyms only, Phase K). */
+export interface FlowRow {
+  routerId: string | null;
+  clientRef: string | null;
+  vlanId: number | null;
+  proto: string | null;
+  src: string | null;
+  dst: string | null;
+  srcPort: number | null;
+  dstPort: number | null;
+  start: number | null;
+  end: number | null;
+  bytes: number | null;
+  packets: number | null;
+  direction: string | null;
+  kind: string | null;
+}
+
 export interface FlowsView extends Base {
   source: SourceState;
   notes: string[];
   sources: SourceState[];
+  rows: FlowRow[];
+  complete: boolean | null;
 }
 
 export interface TalkerQuery {

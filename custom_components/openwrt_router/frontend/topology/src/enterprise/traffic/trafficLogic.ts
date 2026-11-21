@@ -32,6 +32,7 @@ import type {
   CoverageLevel,
   CoverageSummary,
   Finding,
+  FlowRow,
   FlowsView,
   HistoryInfo,
   InterfaceRow,
@@ -105,7 +106,8 @@ export const SCOPE_LABEL: Record<string, string> = {
 
 export const OFF_HINT =
   'Traffic Analytics ist aus. Das Modul ist standardmäßig ausgeschaltet und fragt dann keinen Router ab und liest '
-  + 'keinen Verlauf. Ein Schalter dafür ist im Panel noch nicht vorhanden; er folgt in einer späteren Ausbaustufe.';
+  + 'keinen Verlauf. Einschalten je Router unter Einstellungen → Geräte & Dienste → OpenWrt Router → Router '
+  + '→ Konfigurieren → „Traffic-Analyse (traffic_enabled)“. Ausschalten entfernt die Traffic-Sensoren, der Verlauf bleibt.';
 
 export const UNKNOWN_RULE = 'Was nicht gemessen wurde, steht als „—“ mit Grund da, nie als 0. Empfangen (rx) und Gesendet (tx) werden nie addiert.';
 
@@ -545,6 +547,27 @@ export function parseAnomalies(v: unknown): AnomalyList {
   };
 }
 
+export const FLOW_ROWS_MAX = 200;
+
+function parseFlowRow(o: Obj): FlowRow {
+  return {
+    routerId: str(o.router_id),
+    clientRef: str(o.client_ref),
+    vlanId: n(o.vlan_id),
+    proto: str(o.proto),
+    src: str(o.src),
+    dst: str(o.dst),
+    srcPort: n(o.src_port),
+    dstPort: n(o.dst_port),
+    start: n(o.start),
+    end: n(o.end),
+    bytes: n(o.bytes),
+    packets: n(o.packets),
+    direction: str(o.direction),
+    kind: str(o.kind),
+  };
+}
+
 export function parseFlows(v: unknown): FlowsView {
   const o = obj(v);
   return {
@@ -552,7 +575,16 @@ export function parseFlows(v: unknown): FlowsView {
     source: source(obj(o?.source), 'source'),
     notes: strList(o?.notes),
     sources: objList(o?.sources).map(s => source(s, 'source')),
+    rows: objList(o?.rows, FLOW_ROWS_MAX).map(parseFlowRow),
+    complete: typeof o?.complete === 'boolean' ? o.complete : null,
   };
+}
+
+/** Endpoint of a flow as shown: a pseudonym (ipa_…) and a port, never an address. */
+export function flowEndpoint(pseudo: string | null, port: number | null): string {
+  const m = pseudo ? /^ipa_([0-9a-f]{8})[0-9a-f]{8}$/.exec(pseudo) : null;
+  const where = m ? `Adresse ${m[1]}` : 'Adresse unbekannt';
+  return port === null ? where : `${where}:${port}`;
 }
 
 // ── Safe text, labels ────────────────────────────────────────────────────
@@ -620,6 +652,9 @@ export const REASON_TEXT: Record<string, string> = {
   security_center_has_no_traffic_indicator_intake: 'Security Center nimmt noch keine Verkehrsindikatoren an',
   net_engine_has_no_candidate_api: 'Incident Engine hat noch keine Schnittstelle für Kandidaten',
   collector_interface_not_built: 'Collector-Schnittstelle noch nicht gebaut',
+  collector_off: 'Collector ausgeschaltet (Einstellung in den Traffic-Einstellungen)',
+  flow_source_silent: 'Collector meldet sich nicht mehr',
+  not_configured: 'nicht eingerichtet',
   not_offered_unbounded: 'nicht angeboten (unbegrenzte Tabelle)',
   count_file_not_seen: 'Zähldatei nicht gefunden',
   count_only_no_flows: 'nur Anzahl, keine Verbindungen',
