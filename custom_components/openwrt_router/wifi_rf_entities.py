@@ -537,9 +537,13 @@ async def async_sync_rf_entities(hass: HomeAssistant) -> None:
         return
     hosts = _hosts(hass)
     if hosts.unsub is None:
-        hosts.unsub = async_dispatcher_connect(
-            hass, SIGNAL_WIFI_RF, lambda: _on_update(hass)
-        )
+
+        @callback
+        def _receiver() -> None:
+            # @callback: HA runs it on the loop (a lambda is an executor job)
+            _on_update(hass)
+
+        hosts.unsub = async_dispatcher_connect(hass, SIGNAL_WIFI_RF, _receiver)
     for entry_id in list(hosts.created):
         if _router_id(center, entry_id) is None:
             hosts.created.pop(entry_id, None)
@@ -596,7 +600,13 @@ def _on_update(hass: HomeAssistant) -> None:
         finally:
             hosts.syncing = False
 
-    hass.async_create_task(run(), name="openwrt_router wifi rf entities")
+    job = run()
+    try:
+        hass.async_create_task(job, name="openwrt_router wifi rf entities")
+    except Exception:
+        hosts.syncing = False  # never stuck: the next signal tries again
+        job.close()
+        raise
 
 
 def _registry(hass: HomeAssistant) -> Any:
