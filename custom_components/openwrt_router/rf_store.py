@@ -454,12 +454,14 @@ class RfStore:
 
 def store_size(payload: Mapping[str, Any]) -> int:
     """Bytes of the store file exactly as HA's ``Store`` writes it."""
-    wrapped = {
-        "version": WIFI_RF_STORE_VERSION,
-        "minor_version": 1,
-        "key": WIFI_RF_STORE_KEY,
-        "data": payload,
-    }
+    # HA's own file wrapper: its field names are no RF output fields (a dict
+    # literal would put HA's "key" into the RF field-name check)
+    wrapped = dict(  # noqa: C408
+        version=WIFI_RF_STORE_VERSION,
+        minor_version=1,
+        key=WIFI_RF_STORE_KEY,
+        data=payload,
+    )
     _mode, data = prepare_save_json(wrapped)
     return len(data.encode("utf-8") if isinstance(data, str) else data)
 

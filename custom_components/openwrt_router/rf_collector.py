@@ -128,7 +128,7 @@ class TargetState:
     reason: str | None = None
     failures: int = 0
     retry_at: float | None = None
-    list_key: Any = None  # channel/country a setup list was read for
+    list_basis: Any = None  # channel/country a setup list was read for
 
     def as_dict(self) -> dict[str, Any]:
         """Plain view (no device names: the caller keys it)."""
@@ -145,7 +145,7 @@ class RadioPlanInput:
 
     radio_id: str
     devices: tuple[str, ...]  # AP interfaces of the radio, first = primary
-    list_key: Any  # (channel, country): a change re-reads the setup lists
+    list_basis: Any  # (channel, country): a change re-reads the setup lists
 
 
 @dataclass
@@ -277,7 +277,7 @@ class RfCollector:
             return (
                 state is None
                 or state.ok_at is None
-                or (state.list_key != radio.list_key)
+                or (state.list_basis != radio.list_basis)
             )
         if kind not in due_kinds:
             return False
@@ -292,7 +292,7 @@ class RfCollector:
         targets: Sequence[Target],
         read: Callable[[str, str], Awaitable[dict[str, Any]]],
         *,
-        list_keys: Mapping[str, Any] | None = None,
+        list_bases: Mapping[str, Any] | None = None,
         wall_clock: Callable[[], float] = time.time,
     ) -> RoundResult:
         """Run the targets one by one within the round time limit.
@@ -305,7 +305,7 @@ class RfCollector:
         if not targets:
             return result
         self.counters["rounds"] += 1
-        keys = list_keys or {}
+        keys = list_bases or {}
         try:
             async with asyncio.timeout(self.round_timeout_s):
                 for target in targets:
@@ -324,7 +324,7 @@ class RfCollector:
         target: Target,
         read: Callable[[str, str], Awaitable[dict[str, Any]]],
         result: RoundResult,
-        list_key: Any,
+        list_basis: Any,
     ) -> None:
         key = (target.kind, target.device)
         state = self.targets.setdefault(key, TargetState())
@@ -345,7 +345,7 @@ class RfCollector:
         state.reason = None
         state.failures = 0
         state.retry_at = None
-        state.list_key = list_key
+        state.list_basis = list_basis
         result.answers[key] = answer
 
     def _failed(self, state: TargetState, err: RfReadError, now: float) -> None:

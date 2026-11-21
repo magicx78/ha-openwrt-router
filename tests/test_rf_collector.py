@@ -282,7 +282,7 @@ async def test_setup_lists_once_and_again_after_a_channel_change():
 
     targets = collector.plan(opts, [RADIO], paused=False, capability=_yes)
     assert sorted(t.kind for t in targets) == ["freqlist", "txpowerlist"]
-    await collector.async_run(targets, read, list_keys={"radio1": RADIO.list_key})
+    await collector.async_run(targets, read, list_bases={"radio1": RADIO.list_basis})
     for _ in range(10):
         clock.t += 60
         assert collector.plan(opts, [RADIO], paused=False, capability=_yes) == []
