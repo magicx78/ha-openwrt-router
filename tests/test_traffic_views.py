@@ -408,6 +408,11 @@ async def test_series_points_talkers_and_lists(disks) -> None:
                 "/series", params={"point_id": wan["point_id"], "window": window}
             )
             assert resp.status == 200, window
+            # the envelope keeps the module's status; the window's own
+            # reasons have their own key
+            assert resp.data["status"] == "not_ready", window
+            assert resp.data["reasons"] == ["core_missing"], window
+            assert isinstance(resp.data["window_reasons"], list), window
             assert len(resp.data["buckets"]) <= 500
             assert resp.data["utc_days"] is (resp.data["resolution_s"] == 86400)
             for b in resp.data["buckets"]:

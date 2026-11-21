@@ -412,6 +412,10 @@ def series(engine: Any, *, point_id: str, window: str) -> dict[str, Any]:
     summary.pop("radio_id", None)
     for key in ("v", "point_id"):
         summary.pop(key, None)
+    # the envelope's status/reasons are the module's; the window's own
+    # reasons travel under their own key so they never overwrite them
+    summary["window_reasons"] = summary.pop("reasons", [])
+    summary.pop("status", None)
     buckets = [] if win is None else list(win.buckets)[-HISTORY_MAX_QUERY_POINTS:]
     resolution = None if win is None else win.resolution_s
     return {
@@ -469,7 +473,8 @@ def talkers(
             limit=limit,
             uplink_ports=engine.uplink_ports(),
         )
-    return {**_base(engine), "kind": kind, **_talker_rows(engine, result.to_dict())}
+    rows = _talker_rows(engine, result.to_dict())
+    return {**rows, **_base(engine), "kind": kind}
 
 
 def clients(engine: Any) -> dict[str, Any]:
@@ -556,7 +561,7 @@ def recommendations(engine: Any, *, router_id: str | None = None) -> dict[str, A
         return off_answer(engine, findings=[])
     report = engine.congestion(router_id).to_dict()
     report.pop("v", None)
-    return {**_base(engine), **report}
+    return {**report, **_base(engine)}
 
 
 def flows(engine: Any) -> dict[str, Any]:
