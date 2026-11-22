@@ -34,7 +34,7 @@
  * characters.
  */
 
-import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
 import {
   CLIENTS_OFF_HOW, CLIENTS_OFF_TITLE, CLIENTS_PRIVACY, CUSTOM_WINDOW, CUT_TEXT, DEFAULT_FILTERS, DEFAULT_SESSION_FILTERS,
   EMPTY_TEXT, HIDDEN_ONLY_TEXT, LIST_INIT, LOADING_TEXT, NO_SOURCE_TEXT, PARTIAL_TEXT, POLL_MIN_MS,
@@ -49,7 +49,9 @@ import {
   visibleMarks,
   type ClientNames, type ListState, type RouterNames, type SessionListState,
 } from './tmLogic.ts';
-import { COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE } from './tmState.ts';
+import {
+  COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE, dialogFocus, dialogKey, exportOmittedText,
+} from './tmState.ts';
 import type { CustomWindow, Filters, Mark, Session, SessionFilters, TimelineQuery, TmApi } from './tmTypes';
 import {
   Chip, ClientFilterContext, ClientLabel, ErrorBox, Frame, JumpContext, MarkRow, OffBox, RouterSelect, Spinner,
@@ -218,24 +220,50 @@ export interface ExportState {
   saved: number | null;
   /** A cut export goes on here (the query of its first page and the cursor). */
   next: { query: TimelineQuery; cursor: string } | null;
+  /** Client marks of the window not in the file (omitted_client_marks of the last page), null before the first. */
+  omitted?: number | null;
 }
 
-export const EXPORT_INIT: ExportState = { confirm: false, busy: false, error: null, saved: null, next: null };
+export const EXPORT_INIT: ExportState = { confirm: false, busy: false, error: null, saved: null, next: null, omitted: null };
 
 export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
   state: ExportState; onAsk: () => void; onConfirm: () => void; onCancel: () => void; onNext: () => void;
 }) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const wasOpen = useRef(state.confirm);
+  const textId = useId();
+  // open: focus on "Abbrechen"; closed (cancelled or confirmed): back to the button that opened it
+  useEffect(() => {
+    const target = dialogFocus(wasOpen.current, state.confirm);
+    wasOpen.current = state.confirm;
+    if (target === 'cancel') cancel.current?.focus();
+    else if (target === 'trigger') trigger.current?.focus();
+  }, [state.confirm]);
+  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const buttons = Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? []);
+    const step = dialogKey(e.key, e.shiftKey, buttons.indexOf(document.activeElement as HTMLButtonElement), buttons.length);
+    if (!step) return;
+    e.preventDefault();
+    if (step.action === 'cancel') onCancel();
+    else buttons[step.index]?.focus();
+  };
+  const omitted = state.error === null && !state.busy ? exportOmittedText(state.omitted ?? null) : null;
   return (
     <div className="tm-export">
       {!state.confirm && (
-        <button type="button" className="diag-btn cfg-btn" disabled={state.busy} onClick={onAsk}>Exportieren</button>
+        // aria-disabled, not disabled, while busy: the focus comes back to it after the confirmation
+        <button type="button" className="diag-btn cfg-btn" ref={trigger} aria-disabled={state.busy || undefined}
+          onClick={() => { if (!state.busy) onAsk(); }}>Exportieren</button>
       )}
       {state.confirm && (
-        <div className="cfg-notice cfg-notice--info tm-export__ask" role="alertdialog" aria-label="Export bestätigen">
-          <span>{EXPORT_CONFIRM_TEXT}</span>
+        <div className="cfg-notice cfg-notice--info tm-export__ask" role="alertdialog" aria-label="Export bestätigen"
+          aria-modal="true" aria-describedby={textId} ref={dialog} onKeyDown={onKey}>
+          <span id={textId}>{EXPORT_CONFIRM_TEXT}</span>
           <span className="tm-export__buttons">
             <button type="button" className="diag-btn cfg-btn" disabled={state.busy} onClick={onConfirm}>Exportieren</button>
-            <button type="button" className="diag-btn cfg-btn" onClick={onCancel}>Abbrechen</button>
+            <button type="button" className="diag-btn cfg-btn" ref={cancel} onClick={onCancel}>Abbrechen</button>
           </span>
         </div>
       )}
@@ -246,6 +274,7 @@ export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
           {state.next
             ? `Seite ${state.saved} gespeichert. Der Export ist gekürzt; die nächste Seite folgt mit „Weitere Seite exportieren“.`
             : `Export gespeichert${state.saved > 1 ? ` (Seite ${state.saved})` : ''}.`}
+          {omitted && ` ${omitted}`}
         </span>
       )}
       {state.next && !state.busy && (
@@ -643,6 +672,7 @@ export function TimelineContainer({ api, active, viewSwitch, isAdmin = false, re
         setExp({
           confirm: false, busy: false, error: null, saved: page,
           next: file.truncated && file.nextCursor ? { query, cursor: file.nextCursor } : null,
+          omitted: file.omittedClientMarks,
         });
       },
       error => {

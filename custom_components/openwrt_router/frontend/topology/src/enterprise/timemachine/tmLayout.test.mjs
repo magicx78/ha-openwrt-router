@@ -39,7 +39,7 @@ test('below the width a row needs, every mark is a wrapping card with the title 
   // 1.50.0 review: at 720 px the source column wrapped at 1280 px windows; cards start at 860 px
   assert.ok(Number(m[1]) >= 860, `breakpoint ${m[1]} px below the row's width`);
   const body = m[2];
-  assert.match(body, /\.tm-mark \{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
+  assert.match(body, /\.tm-mark(?:\.tm-mark--start)? \{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
   assert.match(body, /\.tm-mark__main \{[^}]*flex: 1 1 100%;/);
   // card order follows the markup: time, severity, group / title + params / router, source
   const order = ['tm-mark__time', 'tm-mark__sev', 'tm-mark__group', 'tm-mark__main', 'tm-mark__router', 'tm-mark__source'];
@@ -130,12 +130,12 @@ test('text only: no innerHTML anywhere in the tab', () => {
 // ── 1.51.0: the block before the window and the client sessions ─────────
 
 test('the block before the window gives the time column room for date and time', () => {
-  const cols = /grid-template-columns: ([^;]+);/.exec(rule('.tm-spans .tm-mark'))[1];
+  const cols = /grid-template-columns: ([^;]+);/.exec(rule('.tm-mark.tm-mark--start'))[1];
   assert.match(cols, /^9\.5em /, '"21.11.2026, 14:03" in 12.5 px');
   assert.match(cols, /minmax\(0, 1fr\)/);
   // in the card layout the time is a flex item again (no grid columns)
   const m = /@container tmlist \(max-width: (\d+)px\) \{([\s\S]*?)\n\}/.exec(css);
-  assert.match(m[2], /\.tm-mark \{[^}]*display: flex;/);
+  assert.match(m[2], /\.tm-mark(?:\.tm-mark--start)? \{[^}]*display: flex;/);
   const em = [...cols.matchAll(/([\d.]+)em/g)].reduce((s, x) => s + Number(x[1]), 0);
   assert.ok(em * 12.5 + 5 * 12 + 20 < BREAKPOINT - 60, `fixed columns ${em}em leave room for the title`);
 });
@@ -192,7 +192,9 @@ test('focus inside the tab: a ring of at least 3:1 on the chip background, other
   const m = /((?:\.tm [^{,]+:focus-visible,?\s*)+)\{ outline: 2px solid (#[0-9a-f]{6}); outline-offset: 2px; \}/.exec(css);
   assert.ok(m, 'focus rule of the tab');
   const sels = m[1].split(',').map(s => s.trim()).filter(Boolean);
-  assert.deepEqual(sels, ['.tm .tm-chip:focus-visible', '.tm .tm-field select:focus-visible', '.tm .cfg-btn:focus-visible']);
+  // the client filter button too (browser review 1.52.0: it had the browser's ring only)
+  assert.deepEqual(sels, ['.tm .tm-chip:focus-visible', '.tm .tm-field select:focus-visible', '.tm .cfg-btn:focus-visible',
+    '.tm .tm-client--filter:focus-visible']);
   const ring = ratio(hex(m[2]), CHIP_BG);
   assert.equal(m[2], '#60a5fa');
   assert.equal(ring.toFixed(2), '7.32');
@@ -227,16 +229,29 @@ test('the block before the window turns into cards early enough: its title colum
   const fixed = sel => [...(/grid-template-columns: ([^;]+);/.exec(rule(sel))[1]).matchAll(/([\d.]+)em/g)]
     .reduce((x, m) => x + Number(m[1]), 0) * FONT;
   const list = Number(/@container tmlist \(max-width: (\d+)px\) \{\n  \.tm-mark \{/.exec(css)[1]);
-  const block = Number(/@container tmlist \(max-width: (\d+)px\) \{\n  \.tm-spans \.tm-mark \{/.exec(css)[1]);
+  const block = Number(/@container tmlist \(max-width: (\d+)px\) \{\n  \.tm-mark\.tm-mark--start \{/.exec(css)[1]);
   assert.equal(list, 860);
   assert.equal(block, 920);
   const listTitle = (list + 1) - PAD - GAPS - fixed('.tm-mark');
-  const blockTitle = (block + 1) - PAD - GAPS - fixed('.tm-spans .tm-mark');
+  const blockTitle = (block + 1) - PAD - GAPS - fixed('.tm-mark.tm-mark--start');
   assert.equal(listTitle, 281);
   assert.equal(blockTitle, 284.75);
   assert.ok(blockTitle >= listTitle);
   // and the cards of the block have the list's card shape
   const q = /@container tmlist \(max-width: 920px\) \{([\s\S]*?)\n\}/.exec(css)[1];
-  assert.match(q, /\.tm-spans \.tm-mark \{ display: flex; flex-wrap: wrap;/);
-  assert.match(q, /\.tm-spans \.tm-mark__main \{ flex: 1 1 100%;/);
+  assert.match(q, /\.tm-mark\.tm-mark--start \{ display: flex; flex-wrap: wrap;/);
+  assert.match(q, /\.tm-mark--start \.tm-mark__main \{ flex: 1 1 100%;/);
+});
+
+test('the client filter button: at least 24 px tall at phone width, the tab’s ring at every width', () => {
+  const phone = /@media \(max-width: 600px\) \{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(phone);
+  const m = /\.tm-client--filter \{ min-height: (\d+)px; padding-block: (\d+)px; \}/.exec(phone[1]);
+  assert.ok(m, 'min-height and padding-block of .tm-client--filter under 600 px');
+  assert.ok(Number(m[1]) >= 24);
+  // the base rule (padding 0) comes first, so the phone rule wins by order
+  assert.ok(css.indexOf('.tm-client--filter {') < css.indexOf(m[0]));
+  // the ring is outside any @media
+  const ring = css.indexOf('.tm .tm-client--filter:focus-visible');
+  assert.ok(ring > 0 && ring < css.indexOf('@media'));
 });

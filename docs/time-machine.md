@@ -1509,7 +1509,7 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 
 ## 25. Panel für D bis F (1.52.0)
 
-`_PANEL_VERSION` `20261122-timemachine6`. Das Panel liest die Routen `timeline`, `sessions`,
+`_PANEL_VERSION` `20261122-timemachine7`. Das Panel liest die Routen `timeline`, `sessions`,
 `state`, `compare` und `export` und fügt nichts hinzu. Dateien unter
 `frontend/topology/src/enterprise/timemachine/`: `tmState.ts` (Zerlegen der Antworten,
 Reducer, Texte und Werte in Worten, Vergleichszeilen, Sprungziele; ohne React),
@@ -1530,8 +1530,17 @@ Reihe (32 px). Test: `tmRender.test.mjs`, „the four-chip view switch …“.
 
 Feld `datetime-local` (Ortszeit, Sekunden, Vorgabe jetzt), „Jetzt“, „−1 h“, „−24 h“,
 Router-Auswahl. Eine Eingabe lädt nach 400 ms; bei „Jetzt“ fragt die Ansicht `at = jetzt − 1 s`
-(keine Zukunft durch eine Uhrabweichung) und lädt höchstens alle 60 s neu, solange die Seite
-sichtbar ist. Antworten einer älteren Abfrage werden verworfen.
+(keine Zukunft durch eine Uhrabweichung), setzt das Feld auf genau diese Zeit
+(`stateLoadAt`; Überschrift und Feld stimmen immer überein, auch nach dem Zurückkehren in die
+Ansicht) und lädt höchstens alle 60 s neu, solange die Seite sichtbar ist; unter „Jetzt“ ist
+der Wert des Felds selbst kein Anlass zum Laden. Antworten einer älteren Abfrage werden
+verworfen.
+
+Ortszeit an einer Zeitumstellung (`parseLocalInput`, Tests mit Europe/Berlin): Eine Uhrzeit
+der übersprungenen Stunde ist kein Zeitpunkt, sondern ein Fehler am Feld („Diese Uhrzeit gibt
+es wegen der Zeitumstellung nicht.“, es wird nicht geladen); eine der doppelten Stunde gilt
+als ihr erstes Vorkommen, darunter „Diese Uhrzeit gibt es wegen der Zeitumstellung zweimal;
+gezeigt wird die erste.“ Gleiches gilt für „Von“ und „Bis“ des Vergleichs.
 
 - `known: false`: nur ein Kasten „Für diesen Zeitpunkt ist kein Zustand bekannt.“ mit dem
   Satz zum Grund (`GLOBAL_REASON_TEXT`), keine Router-Karten.
@@ -1539,6 +1548,20 @@ sichtbar ist. Antworten einer älteren Abfrage werden verworfen.
   dem Grund (`STATE_REASON_TEXT`), gedämpft und ohne Farbe; ein Wert, den der Server trotz
   Grund schickt, wird verworfen. „nicht erreichbar“ in Warnfarbe und als Wort, `derived`
   mit dem Abzeichen „abgeleitet“ (Tooltip). Uplink `null` heißt „kein vorgeschalteter Router“.
+  Funk (`radiosView`): ein Grund steht nur einmal (der Block „unbekannt“ mit Grund, danach
+  nur „unvollständig“, wenn der Grund derselbe ist); `partial` mit `not_observed` heißt
+  „Nicht alle Funkmodule sind bekannt: Eines blieb über einen Neustart aus.“ Ein Teil
+  `unreadable` (Verkehr, Funkauslastung, Versionen, Vorfälle) heißt „Konnte nicht gelesen
+  werden.“ Der Grund `clock_shift` hat den Satz „Die Uhr von Home Assistant ist
+  zurückgesprungen; diese Zeit kommt im Verlauf doppelt vor.“ und den Kurztext „Uhr
+  zurückgesprungen, Zeit doppelt“. Uplink- und Rollenwechsel mit Parameter `since` zeigen
+  „zuerst gesehen HH:MM:SS“.
+- Marken mit Datum in der Zeitspalte (`MarkRow` mit `start`: laufende Ausfälle und Lücken,
+  Block „Läuft seit vor dem Zeitfenster“) tragen `tm-mark--start`: Zeitspalte 9.5em statt
+  5em, ab 920 px Breite der Liste (Container `tmlist`) Karten. Ein Strukturtest in
+  `tmRender.test.mjs` prüft über die Kaskade jede gerenderte Marke mit Datum (Spalte und
+  Karten ab 920 px); mit der alten Regel (an `.tm-spans` gebunden) ist er für die Ausfälle
+  des Zustands rot.
 - Abschnitte: laufende Ausfälle und Lücken (Marken wie in der Zeitleiste), offene Vorfälle,
   Verkehr und Funkauslastung der Stunde (WAN-Gründe ohne eigenen Text: „keine Messwerte in
   dieser Stunde“), für Administratoren Konfigurationsversionen und verbundene Clients (Zahl
@@ -1559,11 +1582,19 @@ Breite der Liste Karten. `changed` mit „geändert“, Clients zusätzlich „v
 unbekannt. Darunter „Ereignisse dazwischen“ (Zahl je Art, „In der Zeitleiste zeigen“ mit
 dem Fenster `t1`–`t2`, höchstens 14 Tage), Vorfälle, für Administratoren
 Konfigurationsänderungen (gezählt werden Versionen; das Backend liefert keine Zahl geänderter
-Einstellungen). Zusammenfassung: „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ nur,
-wenn beide Seiten bekannt sind, kein Merkmal unbekannt oder geändert ist und dazwischen keine
-Marke, kein Vorfall und keine Version liegt; sonst „Die Zustände zu beiden Zeitpunkten sind
+Einstellungen). `changes.other_sources` (Einträge der anderen Module mit `t1 ≤ ts < t2`)
+steht unter „Ereignisse dazwischen“ als „Dazu n Einträge aus anderen Modulen.“ (`truncated`:
+„mindestens n“); ist es `unreadable`, steht dort „Ob dazwischen etwas geschah, ist unbekannt:
+Eine Quelle ließ sich nicht lesen.“ und „Nicht gelesen: <Namen aus `SOURCE_TEXT`>.“ (mehrere:
+„Mehrere Quellen ließen sich nicht lesen.“). Fehlt das Feld oder ist es `off`, ist es
+ebenfalls unbekannt („Die anderen Module wurden nicht gelesen.“). Zusammenfassung: „Zwischen
+diesen Zeitpunkten hat sich nichts geändert.“ nur, wenn beide Seiten bekannt sind, kein
+Merkmal unbekannt oder geändert ist, dazwischen keine Marke, kein Vorfall und keine Version
+liegt und `other_sources` `ok` mit `count` 0 und ohne `truncated` ist; ist es unbekannt, steht
+der Satz zum Unbekannten; sonst „Die Zustände zu beiden Zeitpunkten sind
 gleich; dazwischen gab es Ereignisse.“, „n Merkmale haben sich geändert.“ oder „Keine
-bekannte Änderung; n Merkmale sind zu einem der Zeitpunkte unbekannt.“
+bekannte Änderung; n Merkmale sind zu einem der Zeitpunkte unbekannt.“ Status `unavailable`
+nennt wie im Zustand den Grund in Worten.
 
 ### 25.4 Zeitleiste: eigenes Fenster, Client-Filter, Export
 
@@ -1582,6 +1613,15 @@ bekannte Änderung; n Merkmale sind zu einem der Zeitpunkte unbekannt.“
   `spans` und `client` (die Route lehnt beide ab). Bei `truncated` „Weitere Seite
   exportieren“ mit `cursor`. 503 `audit_unavailable`: „Export nicht möglich: Das
   Audit-Protokoll ist nicht verfügbar.“; 403 und 5xx wie sonst.
+- Die Bestätigung ist ein modaler Dialog (`aria-modal`, `aria-describedby` auf den Satz): beim
+  Öffnen liegt der Fokus auf „Abbrechen“, Escape bricht ab, Tab und Umschalt+Tab bleiben bei
+  seinen Schaltflächen, nach dem Schließen geht der Fokus zurück auf „Exportieren“ (während
+  des Exports `aria-disabled`, nicht `disabled`, damit er fokussierbar bleibt). Logik als
+  reine Funktionen `dialogKey` und `dialogFocus`. Nach dem Export steht, wenn
+  `omitted_client_marks` > 0, „n Client-Einträge sind nicht enthalten.“ (die Zahl gilt für das
+  ganze Fenster und ist auf jeder Seite gleich).
+- Client-Kürzel: `title` „<Name> · tmc_…“, ohne Namen nur das Pseudonym. Der Client-Filter ist
+  unter 600 px mindestens 24 px hoch und hat bei jeder Breite den Fokusring des Tabs.
 
 ### 25.5 Sprünge
 
@@ -1620,4 +1660,6 @@ höchstens zwei Zeilen, der volle Name im `title`; in Karten ganz.
 (Darstellung aller Zustände beider Rollen, Sprünge, fremde Tabs, die zwei strukturellen
 Stiltests über alle Bildschirme der neuen Ansichten), `tmLayout.test.mjs`.
 
-**Nicht geprüft:** in einem Browser und in einer echten Instanz.
+Der Tab wurde vor dem Merge headless in Firefox bei 360, 768 und 1280 px geprüft (Testserver
+mit nachgebildeten Antworten). Das Panel hat kein eigenes helles Design und bleibt auch im
+hellen HA-Thema dunkel. **Nicht geprüft:** in einer echten Instanz.

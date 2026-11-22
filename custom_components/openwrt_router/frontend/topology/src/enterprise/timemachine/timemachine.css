@@ -44,7 +44,8 @@
    checked in tmLayout.test.mjs. The other tabs keep theirs. */
 .tm .tm-chip:focus-visible,
 .tm .tm-field select:focus-visible,
-.tm .cfg-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.tm .cfg-btn:focus-visible,
+.tm .tm-client--filter:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 
 /* Sources row */
 .tm-sources-box { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -81,12 +82,15 @@
 .tm-sev--info { color: #93c5fd; }
 .tm-sev--warn { color: var(--amber); }
 .tm-sev--critical { color: var(--red); }
-/* Marks that began before the window: the time column holds date and time
+/* Marks shown with their date (MarkRow start: the block before the window,
+   the intervals of "Zustand"): the time column holds date and time
    (9.5em, 4.5em = 56.25 px more than the list). Their cards start earlier
    (920 px) so that the title column at the last row width is never
-   narrower than the list's: list 861 - 20 - 60 - 500 = 281 px, block
-   921 - 20 - 60 - 556.25 = 284.75 px (12.5 px font; tmLayout.test.mjs). */
-.tm-spans .tm-mark { grid-template-columns: 9.5em 6.5em 8.5em minmax(0, 1fr) 9em 11em; }
+   narrower than the list's: list 861 - 20 - 60 - 500 = 281 px, dated
+   921 - 20 - 60 - 556.25 = 284.75 px (12.5 px font; tmLayout.test.mjs).
+   1.52.0 browser review: the intervals of "Zustand" had the 5em column
+   (the rule was bound to .tm-spans), the year broke in two. */
+.tm-mark.tm-mark--start { grid-template-columns: 9.5em 6.5em 8.5em minmax(0, 1fr) 9em 11em; }
 
 /* Client sessions: start, duration, client, router, band, changes */
 .tm-sessions { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmsessions / inline-size; }
@@ -131,6 +135,7 @@
 }
 .tm .tm-field input:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 .tm-field__error { flex: 1 1 100%; font-size: 12px; color: var(--amber); }
+.tm-field__note { flex: 1 1 100%; font-size: 12px; }
 
 /* Jumps, client filter, export */
 .tm-jump { align-self: flex-start; margin-top: 2px; font-size: 12px; }
@@ -207,10 +212,10 @@
    severity and group; line 2 title; line 3 parameters; line 4 router and
    source. */
 @container tmlist (max-width: 920px) {
-  .tm-spans .tm-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
-  .tm-spans .tm-mark__main { flex: 1 1 100%; gap: 3px; }
-  .tm-spans .tm-mark__router { flex: 0 1 auto; }
-  .tm-spans .tm-mark__source { flex: 1 1 auto; }
+  .tm-mark.tm-mark--start { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
+  .tm-mark--start .tm-mark__main { flex: 1 1 100%; gap: 3px; }
+  .tm-mark--start .tm-mark__router { flex: 0 1 auto; display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
+  .tm-mark--start .tm-mark__source { flex: 1 1 auto; }
 }
 
 @container tmlist (max-width: 860px) {
@@ -262,4 +267,6 @@
   .tm-more .cfg-btn { flex: 1 1 100%; min-height: 40px; }
   .tm-export .cfg-btn, .tm-show { flex: 1 1 100%; min-height: 40px; }
   .tm-jump { min-height: 40px; }
+  /* a client name that filters: a touch target of at least 24 px (browser review) */
+  .tm-client--filter { min-height: 24px; padding-block: 3px; }
 }

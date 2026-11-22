@@ -421,6 +421,8 @@ export const PARAM_TEXT: Record<string, string> = {
   'blips': '{n} kurze Aussetzer',
   'suppressed': '{n} zusammengefasst',
   'cap': 'Grenze {n} je Tag',
+  // 1.52.0: epoch of the first sighting of a new uplink or role ({t} its time)
+  'since': 'zuerst gesehen {t}',
 };
 
 export const PARAM_ONE: Record<string, string> = {
@@ -451,6 +453,7 @@ export const GLOBAL_REASON_TEXT: Record<string, string> = {
   'not_recorded': 'Zu dieser Zeit wurde noch nicht aufgezeichnet.',
   'beyond_retention': 'Der Zeitpunkt liegt außerhalb der Aufbewahrung von 14 Tagen.',
   'evicted': 'Die Aufzeichnung zu dieser Zeit wurde verdrängt.',
+  'clock_shift': 'Die Uhr von Home Assistant ist zurückgesprungen; diese Zeit kommt im Verlauf doppelt vor.',
 };
 
 /**
@@ -464,6 +467,7 @@ export const STATE_REASON_TEXT: Record<string, string> = {
   'ha_gap': 'Home Assistant lief nicht',
   'observation_gap': 'nicht beobachtet',
   'evicted': 'Aufzeichnung verdrängt',
+  'clock_shift': 'Uhr zurückgesprungen, Zeit doppelt',
   'not_observed': 'noch kein Wert beobachtet',
   'router_down': 'Router nicht erreichbar',
   'lan_down': 'LAN nicht erreichbar',

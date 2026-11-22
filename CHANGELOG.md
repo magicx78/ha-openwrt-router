@@ -21,7 +21,7 @@ hinzu, geschrieben beim nächsten Speichern); eine 1.51.0-Datei lädt unverände
 bleiben stehen, bis 1.51.0 selbst speichert. Zustand und Vergleich sind darum
 **erst für Zeiten ab dem Update bekannt, davor „nicht aufgezeichnet“**. Bei ausgeschalteter
 Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
-`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261122-timemachine6`.
+`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261122-timemachine7`.
 
 ### Hinzugefügt
 
@@ -64,9 +64,13 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
   Karten), Geändertes mit „geändert“ (bei Clients „von 2 auf 1 (−1)“), Unverändertes hinter
   „Unverändertes zeigen“, Unbekanntes ohne Farbe mit Grund. Ein Hinweisband, wenn zu einem der
   Zeitpunkte nichts bekannt ist; „Ereignisse dazwischen“ mit Zahl je Art und Sprung in die
-  Zeitleiste, Vorfälle, für Administratoren Konfigurationsänderungen. Der Satz „Zwischen diesen
-  Zeitpunkten hat sich nichts geändert.“ steht nur, wenn beide Zeitpunkte bekannt sind, kein
-  Merkmal unbekannt ist und dazwischen nichts geschah.
+  Zeitleiste, Vorfälle, für Administratoren Konfigurationsänderungen; Einträge anderer Module
+  dazwischen als „Dazu n Einträge aus anderen Modulen.“ (bei gekürzter Zählung „mindestens n“).
+  Der Satz „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ steht nur, wenn beide
+  Zeitpunkte bekannt sind, kein Merkmal unbekannt ist, dazwischen nichts geschah und alle
+  anderen Module gelesen wurden und leer sind; ließ sich eine Quelle nicht lesen, steht „Ob
+  dazwischen etwas geschah, ist unbekannt: Eine Quelle ließ sich nicht lesen.“ mit ihrem Namen.
+  „Noch nicht verfügbar“ nennt wie im Zustand den Grund.
 - **Zeitleiste**: fünfter Fensterzustand „Eigenes Fenster“ („Fenster: 21.11. 13:30 – 14:30“,
   „×“ zurück zu 24 Stunden, ohne automatisches Nachladen); für Administratoren ein Auswahlfeld
   „Client“ (sendet `client=tmc_…`), ein Klick auf ein Client-Kürzel setzt diesen Filter, und
@@ -110,6 +114,25 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
     (längster Block 4 ms statt bis 24 ms).
   - „Router entfernen“ macht nur den Verlauf der Router unbekannt, deren Marken ihn nannten,
     nicht mehr den der ganzen Flotte.
+- Review vor dem Merge (Panel, Browser-Prüfung), je mit Test:
+  - Die Zeiten mit Datum (laufende Ausfälle im „Zustand“, Block „Läuft seit vor dem
+    Zeitfenster“) haben die breite Zeitspalte und werden ab 920 px Listenbreite zu Karten;
+    vorher brach das Jahr in der 5em-Spalte um. Ein Strukturtest prüft jede Marke mit Datum
+    über die Kaskade und ist mit der alten Regel rot.
+  - Export-Bestätigung: `aria-modal`, Beschreibung über den Text, Fokus beim Öffnen auf
+    „Abbrechen“, Escape bricht ab, Tab bleibt im Dialog, danach Fokus zurück auf
+    „Exportieren“. Nach dem Export „n Client-Einträge sind nicht enthalten.“
+  - Client-Kürzel: Tooltip „Name · tmc_…“ (ohne Namen nur das Pseudonym); der Client-Filter
+    ist am Handy mindestens 24 px hoch und hat den Fokusring des Tabs.
+  - Ein Grund steht beim Funk eines ausgefallenen Routers nur einmal; ein über einen
+    Neustart aus gebliebener Funk heißt „Nicht alle Funkmodule sind bekannt: Eines blieb über
+    einen Neustart aus.“, ein nicht lesbarer Teil „Konnte nicht gelesen werden.“
+  - Unter „Jetzt“ folgt das Feld der geladenen Zeit (vorher alte Zeit nach dem Zurückkehren).
+  - Zeitumstellung: Eine Uhrzeit der übersprungenen Stunde ist ein Fehler am Feld („Diese
+    Uhrzeit gibt es wegen der Zeitumstellung nicht.“), eine der doppelten Stunde gilt als die
+    erste, mit Hinweis.
+  - Uplink- und Rollenwechsel zeigen „zuerst gesehen HH:MM:SS“; der Grund `clock_shift`
+    hat Satz und Kurztext.
 - Traffic und WiFi RF: neue reine Lesefunktionen `window_at` und `client_ref_for_mac`,
   Security Center: `client_ref_for_mac` (Test: gleiche Ausgaben und Zustände mit und ohne
   Aufruf).
@@ -137,12 +160,12 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
 - Ein Rücksprung der Uhr macht die ganze Zeit vor der alten Uhrzeit unbekannt.
 - „Client vergessen“ senkt die Client-Zahlen der Vergangenheit, ohne das zu markieren.
 - Sprünge in WiFi Intelligence, Netzwerkdiagnose und Traffic Analytics öffnen nur den Tab;
-  Einträge der Network Intelligence führen in keinen Tab. Kein Link aus der Topologie in die
-  Zeitreise (die Topologie kennt die Router-Kennungen `rtr_…` nicht).
+  Einträge der Network Intelligence führen in keinen Tab.
+- Kein Link aus der Topologie in die Zeitreise (die Topologie kennt die Router-Kennungen
+  `rtr_…` nicht).
 - **Nicht an einer echten Instanz und nicht auf Routern geprüft**; alle Aussagen stammen aus
   Tests mit Mocks.
-- TODO(Koordinator): Satz zur Browser-Prüfung des Tabs (360, 768, 1280 px) nach der Prüfung
-  einsetzen.
+- Der Tab wurde vor dem Merge headless in Firefox bei 360, 768 und 1280 px geprüft (Testserver mit nachgebildeten Antworten). Das Panel hat kein eigenes helles Design und bleibt auch im hellen HA-Thema dunkel. Nicht an einer echten Instanz geprüft.
 
 ## [1.51.0] - 2026-11-21
 

@@ -875,7 +875,8 @@ export function paramsText(params: Record<string, number>): string | null {
       .replace('{to}', to === undefined ? '' : fmt(to))
       .replace('{d}', durationText(v))
       .replace('{D}', exactDuration(Math.abs(v)))
-      .replace('{g}', bandText(v) ?? ''));
+      .replace('{g}', bandText(v) ?? '')
+      .replace('{t}', () => timeText(v)));
   }
   return parts.length ? parts.join(' · ') : null;
 }
@@ -953,8 +954,16 @@ export function spanText(m: Pick<Mark, 'ts' | 'end' | 'endState'>, nowMs: number
 }
 
 /** The full pseudonym for the title of a client label ("tmc_…"), nothing else; null without one. */
-export function clientTitle(client: string | null): string | null {
-  return client && CLIENT_RE.test(client) ? client : null;
+/**
+ * The title of a client label: the full name (clamped in a row) and the
+ * pseudonym an administrator copies for the forget service, "tablet ·
+ * tmc_…"; without a name only the pseudonym (browser review 1.52.0).
+ */
+export function clientTitle(client: string | null, name: string | null = null): string | null {
+  const id = client && CLIENT_RE.test(client) ? client : null;
+  const full = name ? scrub(name) : '';
+  if (full) return id ? `${full} · ${id}` : full;
+  return id;
 }
 
 /**

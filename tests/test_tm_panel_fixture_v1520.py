@@ -18,7 +18,9 @@ and ``.../timeline`` (client filter) as an administrator and as a user:
   them: the shape of the answer is the route's, only the reason is chosen
   (their write paths are covered by ``test_tm_state_v1520``);
 * compare: changes (a channel, the outage, clients), a quiet pair, one side
-  unknown, a user, two refused pairs;
+  unknown, a user, two refused pairs; ``other_sources`` ok with nothing,
+  ok with one audit entry (``compare_other``) and unreadable (the audit
+  API without ``events``, ``compare_unreadable``);
 * export: one page, a page cut by a lowered limit (``EXPORT_MAX_MARKS`` 1,
   with ``next_cursor``), the audit log refusing (503);
 * timeline: the client filter of an administrator.
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -45,7 +48,7 @@ import pytest
 from core_testkit import ADMIN_ID, USER_ID, FakeDisks
 from test_client_engine import M1, M2, disk  # noqa: F401 - fixture
 from test_tm_clients_v1510 import TMC1, clients_world
-from test_tm_routes_v1520 import PANEL_ACCESS, http, roam, tick
+from test_tm_routes_v1520 import PANEL_ACCESS, R1, http, roam, tick
 from tm_index_kit import SECRETS, T0, iface
 
 from custom_components.openwrt_router import tm_export, tm_state
@@ -53,6 +56,7 @@ from custom_components.openwrt_router.const import (
     DATA_TIME_MACHINE_ENGINE,
     OPTION_TIME_MACHINE_ENABLED,
 )
+from custom_components.openwrt_router.core_models import CoreEvent
 
 FIXTURE = (
     Path(__file__).parents[1]
@@ -75,6 +79,10 @@ def _answer(got: Any) -> dict[str, Any]:
 async def build(disks: Any, disk: Any) -> tuple[dict[str, Any], list[bytes]]:
     out: dict[str, Any] = {}
     async with clients_world(disks, disk) as w, http(w) as h:
+        # The audit log of the test world: empty (the source reads ok with
+        # nothing in the window), one entry for ``compare_other`` and none
+        # at all (``events`` missing: unreadable) for ``compare_unreadable``.
+        w.api.events = lambda **_k: []
         moments = roam(w)
         # r1 changes its channel, then r2 goes down and stays down
         tick(w, [M2], [M1], r1=[iface("phy1", 44)])
@@ -117,6 +125,22 @@ async def build(disks: Any, disk: Any) -> tuple[dict[str, Any], list[bytes]]:
         out["compare_one_unknown"] = await get(
             "/compare", {"t1": str(T0 - 600), "t2": at}
         )
+        audit = CoreEvent(
+            event_id="evt_" + "1" * 32,
+            ts=datetime.fromtimestamp(moments["r1"] + 10, UTC),
+            type="configuration.drift_detected",
+            source="config_manager",
+            router_id=R1,
+        )
+        w.api.events = lambda **_k: [audit]
+        out["compare_other"] = await get(
+            "/compare", {"t1": str(moments["r1"]), "t2": at}
+        )
+        del w.api.events
+        out["compare_unreadable"] = await get(
+            "/compare", {"t1": str(moments["r1"]), "t2": at}
+        )
+        w.api.events = lambda **_k: []
         out["compare_empty"] = await get(
             "/compare", {"t1": at, "t2": str(moments["r1"])}
         )
@@ -204,6 +228,17 @@ async def test_the_state_fixture_is_the_real_route_answer(disks, disk) -> None:
         in {r["reachable"]["state"], r["role"]["state"], r["uplink"]["state"]}
         | {x["state"] for x in r["radios"]}
     ]
+    others = {
+        name: doc[name]["body"]["changes"]["other_sources"]
+        for name in ("compare", "compare_other", "compare_unreadable")
+    }
+    assert (others["compare"]["state"], others["compare"]["count"]) == ("ok", 0)
+    assert (others["compare_other"]["state"], others["compare_other"]["count"]) == (
+        "ok",
+        1,
+    )
+    assert others["compare_unreadable"]["state"] == "unreadable"
+    assert others["compare_unreadable"]["unreadable"] == ["core_audit"]
     one = doc["compare_one_unknown"]["body"]
     assert one["before"]["known"] is False and one["after"]["known"] is True
     assert doc["compare_empty"]["body"]["details"]["reason"] == "empty"

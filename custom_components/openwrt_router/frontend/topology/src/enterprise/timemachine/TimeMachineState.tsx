@@ -27,8 +27,9 @@ import {
   SECTION_COMPARE_INCIDENTS, SECTION_CONFIG, SECTION_EVENTS, SECTION_INCIDENTS, SECTION_INTERVALS, SECTION_TRAFFIC,
   STATE_INIT, STATE_LOADING_TEXT, STATE_PICK_TEXT, STATE_STEPS, STATE_UNAVAILABLE_TEXT, UNKNOWN, UNKNOWN_TITLE,
   clientRowText, compareReducer, compareRows, compareSummary, configTitle, deltaText, fromLocalInput, globalReasonText,
-  hourText, incidentTitle, moreClientsQuery, partStateText, radioBandText, radioView, reachableView, roleView, routerName, sinceText,
-  stateReasonText, stateReducer, toLocalInput, uplinkView, utilizationText, wanText,
+  hourText, incidentTitle, moreClientsQuery, otherSourcesText, parseLocalInput, partStateText, radioBandText, radioView,
+  radiosView, reachableView, roleView, routerName, sinceText, stateLoadAt, stateReasonText, stateReducer, toLocalInput, uplinkView,
+  utilizationText, wanText,
   type CompareRow, type CompareView, type StateView, type ValueView,
 } from './tmState.ts';
 import type {
@@ -62,6 +63,17 @@ export function Value({ v }: { v: ValueView }) {
 
 function PartNote({ p }: { p: Part }) {
   return <span className="tm-value tm-value--unknown">{partStateText(p)}</span>;
+}
+
+/**
+ * What the field's own value says on a clock change: the hour the clock
+ * skips is an error, the hour it repeats a note (the first one is shown).
+ */
+export function LocalNote({ value }: { value: string }) {
+  const p = parseLocalInput(value);
+  if (p.error) return <span className="tm-field__error" role="alert">{p.error}</span>;
+  if (p.note) return <span className="tm-field__note cfg-hint">{p.note}</span>;
+  return null;
 }
 
 /** The error of a field, right under it (400 of the server in plain words). */
@@ -125,7 +137,7 @@ function ConfigRow({ c }: { c: ConfigItem }) {
 
 function RouterCard({ r }: { r: RouterState }) {
   const radios = r.radios;
-  const radiosUnknown = radios.state === 'unknown' || radios.state === 'off' || radios.state === 'unreadable';
+  const rv = radiosView(radios);
   return (
     <section className="tm-card" aria-label={routerName(r)}>
       <h4 className="tm-card__title">{routerName(r)}</h4>
@@ -136,8 +148,8 @@ function RouterCard({ r }: { r: RouterState }) {
         <div className="tm-fact">
           <dt>Funk</dt>
           <dd>
-            {radiosUnknown || !radios.items.length
-              ? <Value v={{ text: UNKNOWN, unknown: true, reason: radios.reason ? stateReasonText(radios.reason) : 'keine Funkdaten', derived: false, tone: null }} />
+            {rv.whole
+              ? <Value v={{ text: UNKNOWN, unknown: true, reason: rv.reason, derived: false, tone: null }} />
               : (
                 <ul className="tm-radios">
                   {radios.items.map(x => (
@@ -145,7 +157,7 @@ function RouterCard({ r }: { r: RouterState }) {
                   ))}
                 </ul>
               )}
-            {radios.state === 'partial' && <span className="tm-reason"> · {partStateText(radios)}</span>}
+            {rv.note && <span className="tm-reason"> · {rv.note}</span>}
           </dd>
         </div>
       </dl>
@@ -343,8 +355,9 @@ export function StateScreen({
       <div className="tm-filters" role="group" aria-label="Zeitpunkt des Zustands">
         <label className="tm-filter tm-field">
           <span className="tm-filter__name">Zeitpunkt</span>
-          <input type="datetime-local" step="1" value={input} aria-invalid={atError || undefined}
+          <input type="datetime-local" step="1" value={input} aria-invalid={atError || !!parseLocalInput(input).error || undefined}
             onChange={e => onInput(e.target.value)} />
+          <LocalNote value={input} />
           <FieldError error={state.error} fields={['at']} />
         </label>
         <div className="tm-filter">
@@ -454,13 +467,14 @@ export function CompareScreen({
     const error = state.error !== null && !fieldErr && <ErrorBox of="compare" error={state.error} onRetry={onRefresh} />;
     if (a.status === 'off') return <>{error}<OffBox /></>;
     if (a.status === 'unavailable') {
-      return <>{error}<div className="cfg-notice cfg-notice--warn tm-unavailable" role="status">{STATE_UNAVAILABLE_TEXT}</div></>;
+      return <>{error}<div className="cfg-notice cfg-notice--warn tm-unavailable" role="status">{STATE_UNAVAILABLE_TEXT} {unavailableText(a.reason).replace(/^[^.]*\. /, '')}</div></>;
     }
     const band = [sideText('„Von“', a.before), sideText('„Bis“', a.after)].filter((x): x is string => !!x);
     const win = a.t1 !== null && a.t2 !== null ? customWindow(a.t1, a.t2, nowMs) : null;
     const listed = new Set(a.routers.map(r => r.routerId));
     const quiet = (a.after?.routers ?? a.before?.routers ?? []).filter(r => !listed.has(r.routerId)).length;
     const groups = Object.entries(a.marks.byGroup).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
+    const others = otherSourcesText(a.otherSources);
     return (
       <>
         {error}
@@ -490,6 +504,7 @@ export function CompareScreen({
             )}
             {win && <button type="button" className="diag-btn cfg-btn tm-show" onClick={() => onShowWindow(win)}>In der Zeitleiste zeigen</button>}
           </div>
+          {others && <div className="cfg-hint tm-others" role="note">{others}</div>}
         </Section>
         <Section title={SECTION_COMPARE_INCIDENTS}>
           {a.incidents.state !== 'ok' && a.incidents.state !== 'partial'
@@ -531,12 +546,16 @@ export function CompareScreen({
       <div className="tm-filters" role="group" aria-label="Zeitpunkte des Vergleichs">
         <label className="tm-filter tm-field">
           <span className="tm-filter__name">Von</span>
-          <input type="datetime-local" step="1" value={from} onChange={e => onFrom(e.target.value)} />
+          <input type="datetime-local" step="1" value={from} aria-invalid={!!parseLocalInput(from).error || undefined}
+            onChange={e => onFrom(e.target.value)} />
+          <LocalNote value={from} />
           {errorAt(['t1', 'window'])}
         </label>
         <label className="tm-filter tm-field">
           <span className="tm-filter__name">Bis</span>
-          <input type="datetime-local" step="1" value={until} onChange={e => onUntil(e.target.value)} />
+          <input type="datetime-local" step="1" value={until} aria-invalid={!!parseLocalInput(until).error || undefined}
+            onChange={e => onUntil(e.target.value)} />
+          <LocalNote value={until} />
           {errorAt(['t2'])}
         </label>
         <div className="tm-filter">
@@ -580,9 +599,14 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
   const load = useCallback(() => {
     if (!api.state) return;
     const r = ref.current;
-    // "Jetzt" asks for the server's now (no future moment by a clock difference)
-    const at = r.live ? Math.floor(Date.now() / 1000) - 1 : fromLocalInput(r.input);
+    // "Jetzt" asks for the server's now (no future moment by a clock difference),
+    // and the field follows it (browser review: back in the view, the field kept the old time)
+    const { at, input: shown } = stateLoadAt(r.live, r.input, Date.now() / 1000);
     if (at === null) return;
+    if (shown !== r.input) {
+      ref.current = { ...r, input: shown };
+      setInput(shown);
+    }
     const q = { at, routerId: r.routerId, clientsCursor: null };
     const n = ++seq.current;
     lastMs.current = Date.now();
@@ -605,12 +629,14 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
     );
   }, [api]);
 
-  // a change loads after a short pause (typing in the field); only while shown
+  // a change loads after a short pause (typing in the field); only while shown.
+  // Under "Jetzt" the field follows the load, so its value is no reason to load.
+  const typed = live ? null : input;
   useEffect(() => {
     if (!active || !pageVisible()) return;
     const id = setTimeout(load, DEBOUNCE_MS);
     return () => clearTimeout(id);
-  }, [input, live, routerId, active, load]);
+  }, [typed, live, routerId, active, load]);
 
   // "Jetzt": like the timeline, at most every 60 s while visible
   useEffect(() => {
@@ -618,10 +644,8 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
     const check = () => {
       if (!ref.current.active || !ref.current.live) return;
       if (shouldFetch({ visible: pageVisible(), lastMs: lastMs.current, nowMs: Date.now(), intervalMs: POLL_MIN_MS })) {
-        // a new field value loads through the debounce above; the same second loads here (one fetch, never two)
-        const next = toLocalInput(Date.now() / 1000);
-        if (next !== ref.current.input) setInput(next);
-        else load();
+        // one fetch; load() sets the field to the moment it asks for
+        load();
       }
     };
     const id = setInterval(check, CHECK_MS);

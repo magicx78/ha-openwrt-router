@@ -22,6 +22,12 @@ import {
 import {
   GLOBAL_REASON_TEXT, JUMP_KIND_TAB, JUMP_REF_TAB, JUMP_TAB_TEXT, STATE_REASON_TEXT,
 } from './tmTexts.ts';
+import {
+  LOCAL_GAP_TEXT, LOCAL_TWICE_TEXT, OTHER_UNKNOWN_MANY, OTHER_UNKNOWN_NONE, OTHER_UNKNOWN_ONE, PART_UNREADABLE_TEXT,
+  RADIOS_NOT_OBSERVED_TEXT, dialogFocus, dialogKey, exportOmittedText, otherSourcesText, otherUnknownText, parseLocalInput,
+  partStateText, radiosView, stateLoadAt,
+} from './tmState.ts';
+import { clientTitle, paramsText, timeText } from './tmLogic.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const F = JSON.parse(readFileSync(join(here, 'tmFixtureState.json'), 'utf8'));
@@ -382,12 +388,158 @@ test('api: the export is a Blob of the server bytes; the cut and its cursor are 
   assert.equal(file.truncated, true);
   assert.equal(file.nextCursor, F.export_cut.body.next_cursor);
   assert.equal(file.marks, F.export_cut.body.marks.length);
+  assert.equal(file.omittedClientMarks, F.export_cut.body.omitted_client_marks);
   assert.equal(file.blob.type, 'application/json');
   assert.deepEqual(JSON.parse(await file.blob.text()), F.export_cut.body);
   await assert.rejects(api.exportFile({ ...q, cursor: file.nextCursor }), e => {
     assert.equal(errorInfo(e, 'export').message, 'Export nicht möglich: Das Audit-Protokoll ist nicht verfügbar.');
     return true;
   });
-  assert.match(calls[1].url, /&cursor=1800000360000%3Atmm_e388f728c5caaf9a$/);
+  assert.ok(calls[1].url.endsWith(`&cursor=${encodeURIComponent(F.export_cut.body.next_cursor)}`));
   await assert.rejects(api.exportFile(q), e => e.status === 403);
+});
+
+// ── 1.52.0 review before the merge ───────────────────────────────────────
+
+test('compare: other modules between the moments (other_sources) decide "nothing changed" too', () => {
+  const quiet = C('compare_quiet');
+  const known = { ...quiet, routers: quiet.routers.map(r => ({
+    ...r, role: { ...r.role, state: 'same' }, uplink: { ...r.uplink, state: 'same' }, radios: [],
+  })) };
+  // the fixture's three real answers: read and empty, one audit entry, the audit log unreadable
+  assert.deepEqual(C('compare').otherSources, { state: 'ok', reason: null, count: 0, truncated: false, unreadable: [] });
+  const other = C('compare_other').otherSources;
+  assert.deepEqual(other, { state: 'ok', reason: null, count: 1, truncated: false, unreadable: [] });
+  const unreadable = C('compare_unreadable').otherSources;
+  assert.deepEqual(unreadable, { state: 'unreadable', reason: 'unreadable', count: 0, truncated: false, unreadable: ['core_audit'] });
+  assert.equal(compareSummary(known, true), NOTHING_CHANGED);
+  assert.equal(otherSourcesText(known.otherSources), null);
+  // an entry of another module: the states are the same, but something happened
+  assert.equal(compareSummary({ ...known, otherSources: other }, true), SAME_BUT_EVENTS);
+  assert.equal(otherSourcesText(other), 'Dazu 1 Eintrag aus anderen Modulen.');
+  assert.equal(otherSourcesText({ ...other, count: 500, truncated: true }), 'Dazu mindestens 500 Einträge aus anderen Modulen.');
+  assert.equal(otherSourcesText({ ...other, count: 3 }), 'Dazu 3 Einträge aus anderen Modulen.');
+  // a source not read: unknown, never "nothing changed", with the source's name
+  const why = `${OTHER_UNKNOWN_ONE} Nicht gelesen: Audit.`;
+  assert.equal(compareSummary({ ...known, otherSources: unreadable }, true), why);
+  assert.equal(otherSourcesText(unreadable), why);
+  assert.equal(OTHER_UNKNOWN_ONE, 'Ob dazwischen etwas geschah, ist unbekannt: Eine Quelle ließ sich nicht lesen.');
+  assert.equal(otherUnknownText({ ...unreadable, unreadable: ['core_audit', 'ni_incidents'] }), `${OTHER_UNKNOWN_MANY} Nicht gelesen: Audit, Vorfälle.`);
+  // no other_sources at all (an older server) or "off": unknown as well
+  assert.equal(parseCompare({ ...F.compare_quiet.body, changes: { ...F.compare_quiet.body.changes, other_sources: undefined } }).otherSources, null);
+  assert.equal(compareSummary({ ...known, otherSources: null }, true), OTHER_UNKNOWN_NONE);
+  assert.equal(compareSummary({ ...known, otherSources: { state: 'off', reason: null, count: 0, truncated: false, unreadable: [] } }, true), OTHER_UNKNOWN_NONE);
+  // cut at 0 entries is not "nothing" either
+  assert.notEqual(compareSummary({ ...known, otherSources: { ...known.otherSources, truncated: true } }, true), NOTHING_CHANGED);
+  // a change stays a change, whatever the other modules say
+  assert.match(compareSummary({ ...C('compare'), otherSources: unreadable }, true), /geändert\.$/);
+});
+
+test('radios of a router card: one reason, said once; not_observed in a sentence', () => {
+  // the down router of the browser review: a partial block without items, the same reason twice
+  const down = { state: 'partial', reason: 'router_down', derived: false, items: [] };
+  assert.deepEqual(radiosView(down), { whole: true, reason: 'Router nicht erreichbar', note: 'unvollständig' });
+  // items that already say it
+  const items = [{ key: '5g0', band: '5g', channel: null, width: null, state: 'unknown', reason: 'router_down' }];
+  assert.deepEqual(radiosView({ ...down, items }), { whole: false, reason: null, note: 'unvollständig' });
+  // a different reason of the block is said
+  assert.deepEqual(radiosView({ ...down, reason: 'inconsistent', items }), { whole: false, reason: null, note: 'unvollständig · Aufzeichnung widersprüchlich' });
+  // the real unknown block of the fixture: one reason, no note
+  assert.deepEqual(radiosView(S('state').routers[1].radios), { whole: true, reason: 'Router nicht erreichbar', note: null });
+  // one radio stayed off across a restart
+  const absent = { state: 'partial', reason: 'not_observed', derived: true, items: [{ key: '5g0', band: '5g', channel: 44, width: 80, state: 'up', reason: null }] };
+  assert.deepEqual(radiosView(absent), { whole: false, reason: null, note: RADIOS_NOT_OBSERVED_TEXT });
+  assert.equal(RADIOS_NOT_OBSERVED_TEXT, 'Nicht alle Funkmodule sind bekannt: Eines blieb über einen Neustart aus.');
+});
+
+test('a part the server could not read says so in a sentence', () => {
+  assert.equal(PART_UNREADABLE_TEXT, 'Konnte nicht gelesen werden.');
+  assert.equal(partStateText({ state: 'unreadable', reason: 'unreadable' }), PART_UNREADABLE_TEXT);
+  assert.equal(partStateText({ state: 'unreadable', reason: null }), PART_UNREADABLE_TEXT);
+  assert.equal(partStateText({ state: 'unreadable', reason: 'timeout' }), 'Konnte nicht gelesen werden: Zeitüberschreitung.');
+  assert.equal(partStateText({ state: 'off', reason: 'module_off' }), 'aus · Modul aus');
+});
+
+test('clock_shift has its sentence and its short reason', () => {
+  assert.equal(GLOBAL_REASON_TEXT.clock_shift, 'Die Uhr von Home Assistant ist zurückgesprungen; diese Zeit kommt im Verlauf doppelt vor.');
+  assert.equal(globalReasonText('clock_shift'), GLOBAL_REASON_TEXT.clock_shift);
+  assert.equal(stateReasonText('clock_shift'), 'Uhr zurückgesprungen, Zeit doppelt');
+});
+
+test('the first sighting of a new uplink or role: "zuerst gesehen HH:MM:SS"', () => {
+  const since = Date.UTC(2027, 0, 15, 8, 4, 5) / 1000;
+  assert.equal(paramsText({ since }), `zuerst gesehen ${timeText(since)}`);
+  assert.equal(paramsText({ since }), 'zuerst gesehen 09:04:05');
+  assert.equal(paramsText({ since, count: 2 }), '2-mal · zuerst gesehen 09:04:05');
+});
+
+test('local time on the clock changes of Europe/Berlin: the skipped hour is an error, the doubled one the first', () => {
+  // spring 2027: 28 March, 02:00 → 03:00
+  for (const v of ['2027-03-28T02:00', '2027-03-28T02:30:15', '2027-03-28T02:59:59']) {
+    assert.deepEqual(parseLocalInput(v), { ts: null, error: LOCAL_GAP_TEXT, note: null }, v);
+    assert.equal(fromLocalInput(v), null, v);
+  }
+  assert.equal(LOCAL_GAP_TEXT, 'Diese Uhrzeit gibt es wegen der Zeitumstellung nicht.');
+  assert.equal(fromLocalInput('2027-03-28T01:59:59'), Date.UTC(2027, 2, 28, 0, 59, 59) / 1000);
+  assert.equal(fromLocalInput('2027-03-28T03:00'), Date.UTC(2027, 2, 28, 1, 0, 0) / 1000);
+  // autumn 2027: 31 October, 03:00 → 02:00; 02:30 comes twice, the first (summer time) is taken
+  const twice = parseLocalInput('2027-10-31T02:30');
+  assert.deepEqual(twice, { ts: Date.UTC(2027, 9, 31, 0, 30, 0) / 1000, error: null, note: LOCAL_TWICE_TEXT });
+  assert.equal(LOCAL_TWICE_TEXT, 'Diese Uhrzeit gibt es wegen der Zeitumstellung zweimal; gezeigt wird die erste.');
+  assert.equal(parseLocalInput('2027-10-31T02:00').ts, Date.UTC(2027, 9, 31, 0, 0, 0) / 1000);
+  assert.equal(parseLocalInput('2027-10-31T02:59:59').note, LOCAL_TWICE_TEXT);
+  // the hours around it are plain
+  for (const v of ['2027-10-31T01:59:59', '2027-10-31T03:00', '2027-01-15T09:09:59']) assert.deepEqual(parseLocalInput(v).note, null, v);
+  assert.equal(parseLocalInput('2027-10-31T03:00').ts, Date.UTC(2027, 9, 31, 2, 0, 0) / 1000);
+  // nonsense stays nonsense, without a clock text
+  for (const bad of ['2027-02-30T10:00', '2027-03-28T24:00', '2027-03-28T02:60', 'heute']) {
+    assert.deepEqual(parseLocalInput(bad), { ts: null, error: null, note: null }, bad);
+  }
+});
+
+test('"Jetzt": the moment loaded and the field always agree', () => {
+  const now = F.state.body.at + 0.4;
+  const live = stateLoadAt(true, '2027-01-14T08:00:00', now);
+  assert.equal(live.at, Math.floor(now) - 1);
+  assert.equal(live.input, toLocalInput(live.at));
+  assert.notEqual(live.input, '2027-01-14T08:00:00');
+  // a chosen time is kept as typed
+  assert.deepEqual(stateLoadAt(false, '2027-01-14T08:00:00', now), { at: fromLocalInput('2027-01-14T08:00:00'), input: '2027-01-14T08:00:00' });
+  assert.deepEqual(stateLoadAt(false, '2027-03-28T02:30', now), { at: null, input: '2027-03-28T02:30' });
+});
+
+test('export confirmation: Escape cancels, Tab goes round its buttons, focus on Abbrechen and back to the trigger', () => {
+  assert.deepEqual(dialogKey('Escape', false, 0, 2), { action: 'cancel' });
+  assert.deepEqual(dialogKey('Esc', true, -1, 2), { action: 'cancel' });
+  assert.deepEqual(dialogKey('Tab', false, 0, 2), { action: 'focus', index: 1 });
+  assert.deepEqual(dialogKey('Tab', false, 1, 2), { action: 'focus', index: 0 });
+  assert.deepEqual(dialogKey('Tab', true, 0, 2), { action: 'focus', index: 1 });
+  assert.deepEqual(dialogKey('Tab', true, 1, 2), { action: 'focus', index: 0 });
+  // the focus somewhere else: Tab comes back in, at the first or (Shift) the last button
+  assert.deepEqual(dialogKey('Tab', false, -1, 2), { action: 'focus', index: 0 });
+  assert.deepEqual(dialogKey('Tab', true, -1, 2), { action: 'focus', index: 1 });
+  // one button left (the other disabled): it stays
+  assert.deepEqual(dialogKey('Tab', false, 0, 1), { action: 'focus', index: 0 });
+  for (const k of ['Enter', ' ', 'a', 'ArrowDown']) assert.equal(dialogKey(k, false, 0, 2), null, k);
+  assert.equal(dialogKey('Tab', false, -1, 0), null);
+  assert.equal(dialogFocus(false, true), 'cancel');
+  assert.equal(dialogFocus(true, false), 'trigger');
+  assert.equal(dialogFocus(false, false), null);
+  assert.equal(dialogFocus(true, true), null);
+});
+
+test('export: the client marks left out, counted over the whole window', () => {
+  assert.equal(F.export_cut.body.omitted_client_marks, 4);
+  assert.equal(exportOmittedText(4), '4 Client-Einträge sind nicht enthalten.');
+  assert.equal(exportOmittedText(1), '1 Client-Eintrag ist nicht enthalten.');
+  for (const n of [0, null, NaN, -1]) assert.equal(exportOmittedText(n), null);
+});
+
+test('client title: the full name and the pseudonym, else the pseudonym alone', () => {
+  const id = 'tmc_0123456789abcdef';
+  assert.equal(clientTitle(id, 'tablet-kueche'), 'tablet-kueche · tmc_0123456789abcdef');
+  assert.equal(clientTitle(id, null), id);
+  assert.equal(clientTitle(id), id);
+  assert.equal(clientTitle(null, 'tablet-kueche'), 'tablet-kueche');
+  assert.equal(clientTitle('aa:bb:cc:dd:ee:ff', null), null);
 });

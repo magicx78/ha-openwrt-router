@@ -128,8 +128,8 @@ export function RouterSelect({ value, routers, onChange }: { value: string | nul
 export function ClientLabel({ client, name }: { client: string | null; name: string | null }) {
   const filter = useContext(ClientFilterContext);
   const label = clientLabel(client, name);
-  // the full pseudonym as title: an administrator can copy it for the forget service
-  const title = clientTitle(client) ?? undefined;
+  // the full name (a row clamps it) and the full pseudonym (an administrator copies it for the forget service)
+  const title = clientTitle(client, name) ?? undefined;
   if (filter && client && isClient(client)) {
     return (
       <button type="button" className="tm-client tm-client--filter" title={title}
@@ -149,7 +149,7 @@ export function MarkRow({ m, nowMs, start = false }: { m: Mark; nowMs: number; s
   const iso = isoUtc(m.ts);
   const router = routerText(m);
   return (
-    <li className="tm-mark" data-source={m.source}>
+    <li className={start ? 'tm-mark tm-mark--start' : 'tm-mark'} data-source={m.source}>
       <time className="tm-mark__time" dateTime={iso} title={iso}>{start ? startText(m.ts) : timeText(m.ts)}</time>
       <span className={`tm-mark__sev tm-sev tm-sev--${sev.tone}`}>
         <span className="tm-sev__dot" aria-hidden="true" />{sev.label}

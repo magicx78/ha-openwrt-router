@@ -342,6 +342,21 @@ export interface CompareAnswer {
   marks: { count: number; byGroup: Record<string, number> };
   incidents: Part & { opened: IncidentItem[]; resolved: IncidentItem[]; truncated: boolean };
   configVersions: Part & { items: ConfigItem[]; total: number; truncated: boolean };
+  /**
+   * Entries of the other timeline sources with t1 ≤ ts < t2 (review F; null
+   * when the server sent none: then it is unknown whether anything happened).
+   */
+  otherSources: OtherSources | null;
+}
+
+export interface OtherSources {
+  /** ok | unreadable | off */
+  state: string;
+  reason: string | null;
+  count: number;
+  truncated: boolean;
+  /** Source ids that could not be read. */
+  unreadable: string[];
 }
 
 export interface CompareQuery {
@@ -358,6 +373,8 @@ export interface ExportFile {
   marks: number;
   truncated: boolean;
   nextCursor: string | null;
+  /** Client marks of the whole window left out of the file (the same on every page). */
+  omittedClientMarks: number;
 }
 
 export interface TmHass {

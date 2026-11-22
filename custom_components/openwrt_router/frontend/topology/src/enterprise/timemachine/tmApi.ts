@@ -122,6 +122,8 @@ export function createTmApi(getHass: () => TmHass | null, deps: TmApiDeps = {}):
       marks: Array.isArray(b.marks) ? b.marks.length : 0,
       truncated: b.truncated === true,
       nextCursor: cursorOf(b.next_cursor),
+      omittedClientMarks: typeof b.omitted_client_marks === 'number' && Number.isFinite(b.omitted_client_marks)
+        ? Math.max(0, Math.floor(b.omitted_client_marks)) : 0,
     };
   }
 

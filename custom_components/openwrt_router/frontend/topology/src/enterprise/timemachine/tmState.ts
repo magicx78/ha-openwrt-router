@@ -28,11 +28,11 @@ import {
 } from './tmLogic.ts';
 import {
   GLOBAL_REASON_TEXT, JUMP_KIND_TAB, JUMP_OBJECT, JUMP_REF_TAB, JUMP_TAB_TEXT, PART_STATE_TEXT, RADIO_BAND_TEXT,
-  RADIO_STATE_TEXT, ROLE_TEXT, STATE_REASON_TEXT, TITLE_TEXT,
+  RADIO_STATE_TEXT, ROLE_TEXT, SOURCE_TEXT, STATE_REASON_TEXT, TITLE_TEXT,
 } from './tmTexts.ts';
 import type {
-  Change, ClientItem, ClientsPart, CompareAnswer, CompareQuery, ConfigItem, IncidentItem, JumpTarget, Known, Mark, Part,
-  RadioChange, RadioItem, RouterChange, RouterState, Severity, StateAnswer, StateQuery, TrafficWan, UplinkValue,
+  Change, ClientItem, ClientsPart, CompareAnswer, CompareQuery, ConfigItem, IncidentItem, JumpTarget, Known, Mark,
+  OtherSources, Part, RadioChange, RadioItem, RouterChange, RouterState, Severity, StateAnswer, StateQuery, TrafficWan, UplinkValue,
   UtilizationRadio,
 } from './tmTypes';
 
@@ -50,11 +50,52 @@ export const DERIVED_TITLE = 'Aus aufgezeichneten Ereignissen erschlossen, nicht
 export const STATE_UNAVAILABLE_TEXT = 'Der Zustand ist noch nicht verfügbar.';
 export const NOTHING_CHANGED = 'Zwischen diesen Zeitpunkten hat sich nichts geändert.';
 export const SAME_BUT_EVENTS = 'Die Zustände zu beiden Zeitpunkten sind gleich; dazwischen gab es Ereignisse.';
+/** Other sources of the window could not be read (or the server sent none): nothing is "unchanged". */
+export const OTHER_UNKNOWN_ONE = 'Ob dazwischen etwas geschah, ist unbekannt: Eine Quelle ließ sich nicht lesen.';
+export const OTHER_UNKNOWN_MANY = 'Ob dazwischen etwas geschah, ist unbekannt: Mehrere Quellen ließen sich nicht lesen.';
+export const OTHER_UNKNOWN_NONE = 'Ob dazwischen etwas geschah, ist unbekannt: Die anderen Module wurden nicht gelesen.';
+/** A part of the state the server could not read (traffic, utilization, versions, incidents). */
+export const PART_UNREADABLE_TEXT = 'Konnte nicht gelesen werden.';
+/** Radios `partial` with reason not_observed (one stayed off across a restart). */
+export const RADIOS_NOT_OBSERVED_TEXT = 'Nicht alle Funkmodule sind bekannt: Eines blieb über einen Neustart aus.';
+/** Field errors and notes of a local time on a clock change (Europe/Berlin and the like). */
+export const LOCAL_GAP_TEXT = 'Diese Uhrzeit gibt es wegen der Zeitumstellung nicht.';
+export const LOCAL_TWICE_TEXT = 'Diese Uhrzeit gibt es wegen der Zeitumstellung zweimal; gezeigt wird die erste.';
 export const COMPARE_PICK_TEXT = '„Von“ und „Bis“ wählen.';
 export const STATE_PICK_TEXT = 'Einen Zeitpunkt wählen.';
 export const EXPORT_CONFIRM_TEXT =
   'Der Export enthält die Marken des gewählten Zeitfensters ohne Namen und ohne Client-Verläufe. Er wird im Audit-Protokoll vermerkt.';
 export const EXPORT_FILENAME = 'openwrt-router-time-machine.json';
+
+/** "4 Client-Einträge sind nicht enthalten." after an export (omitted_client_marks, the whole window); null at 0. */
+export function exportOmittedText(n: number | null): string | null {
+  if (n === null || !(n > 0)) return null;
+  return n === 1 ? '1 Client-Eintrag ist nicht enthalten.' : `${num(n)} Client-Einträge sind nicht enthalten.`;
+}
+
+/**
+ * A key in the export confirmation (role alertdialog, browser review):
+ * Escape cancels, Tab and Shift+Tab go round its buttons and never leave it.
+ * `index` is the focused button (-1: none of them), `count` how many there are.
+ */
+export function dialogKey(key: string, shift: boolean, index: number, count: number):
+  { action: 'cancel' } | { action: 'focus'; index: number } | null {
+  if (key === 'Escape' || key === 'Esc') return { action: 'cancel' };
+  if (key !== 'Tab' || count <= 0) return null;
+  if (index < 0) return { action: 'focus', index: shift ? count - 1 : 0 };
+  return { action: 'focus', index: (index + (shift ? count - 1 : 1)) % count };
+}
+
+/**
+ * Where the focus goes when the confirmation opens or closes: on open to
+ * "Abbrechen" (nothing is exported by a stray Enter), on close back to the
+ * button that opened it; else nowhere.
+ */
+export function dialogFocus(wasOpen: boolean, open: boolean): 'cancel' | 'trigger' | null {
+  if (!wasOpen && open) return 'cancel';
+  if (wasOpen && !open) return 'trigger';
+  return null;
+}
 export const SECTION_INTERVALS = 'Laufende Ausfälle und Lücken';
 export const SECTION_INCIDENTS = 'Offene Vorfälle';
 export const SECTION_TRAFFIC = 'Verkehr und Funkauslastung (Stundenwerte)';
@@ -357,6 +398,19 @@ export function parseCompare(v: unknown): CompareAnswer {
       total: Math.max(0, fin(cfg.total) ?? 0),
       truncated: cfg.truncated === true,
     },
+    otherSources: otherSourcesOf(ch.other_sources),
+  };
+}
+
+function otherSourcesOf(v: unknown): OtherSources | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = obj(v);
+  return {
+    state: token(o.state) ?? 'unknown',
+    reason: token(o.reason),
+    count: Math.max(0, fin(o.count) ?? 0),
+    truncated: o.truncated === true,
+    unreadable: arr(o.unreadable).map(token).filter((x): x is string => x !== null),
   };
 }
 
@@ -397,14 +451,56 @@ export function toLocalInput(ts: number): string {
 
 const LOCAL_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?$/;
 
-/** Epoch seconds of a datetime-local value (seconds optional); null when not a date. */
-export function fromLocalInput(value: string): number | null {
+export interface LocalInput {
+  /** Epoch seconds (the first one of a doubled hour); null when not a date or not a time of the day. */
+  ts: number | null;
+  /** The field's error (a time in the hour the clock skips). */
+  error: string | null;
+  /** A note under the field (a time of the hour the clock repeats). */
+  note: string | null;
+}
+
+/**
+ * A datetime-local value (seconds optional) in the browser's time zone. A
+ * time the clock skips in spring is no moment (an error, never the hour
+ * after); a time it repeats in autumn is its first occurrence, with a note.
+ */
+export function parseLocalInput(value: string): LocalInput {
   const m = LOCAL_RE.exec(value.trim());
-  if (!m) return null;
+  if (!m) return { ts: null, error: null, note: null };
   const [y, mo, d, h, mi, s] = m.slice(1).map(x => (x === undefined ? 0 : Number(x)));
   const date = new Date(y, mo - 1, d, h, mi, s);
-  if (Number.isNaN(date.getTime()) || date.getMonth() !== mo - 1 || date.getDate() !== d) return null;
-  return Math.floor(date.getTime() / 1000);
+  if (Number.isNaN(date.getTime()) || date.getMonth() !== mo - 1 || date.getDate() !== d) return { ts: null, error: null, note: null };
+  const wall = (t: number) => {
+    const x = new Date(t);
+    return x.getFullYear() === y && x.getMonth() === mo - 1 && x.getDate() === d
+      && x.getHours() === h && x.getMinutes() === mi && x.getSeconds() === s;
+  };
+  const t = date.getTime();
+  // the engine moved a skipped time past the gap: no instant shows this wall time
+  if (!wall(t) || h > 23 || mi > 59 || s > 59) {
+    return h <= 23 && mi <= 59 && s <= 59 ? { ts: null, error: LOCAL_GAP_TEXT, note: null } : { ts: null, error: null, note: null };
+  }
+  // the same wall time an hour (or, in rare zones, half an hour) apart: the hour came twice
+  const twins = [-3600_000, -1800_000, 1800_000, 3600_000].map(o => t + o).filter(wall);
+  if (twins.length) return { ts: Math.floor(Math.min(t, ...twins) / 1000), error: null, note: LOCAL_TWICE_TEXT };
+  return { ts: Math.floor(t / 1000), error: null, note: null };
+}
+
+/** Epoch seconds of a datetime-local value (seconds optional); null when not a date or a skipped time. */
+export function fromLocalInput(value: string): number | null {
+  return parseLocalInput(value).ts;
+}
+
+/**
+ * The moment "Zustand" loads and the field that goes with it: under "Jetzt"
+ * the server's now and the field set to it (the heading and the field never
+ * disagree, browser review), else the field's own time.
+ */
+export function stateLoadAt(live: boolean, input: string, nowS: number): { at: number | null; input: string } {
+  if (!live) return { at: fromLocalInput(input), input };
+  const at = Math.floor(nowS) - 1;
+  return { at, input: toLocalInput(at) };
 }
 
 // ── Loaded state of "Zustand" ────────────────────────────────────────────
@@ -521,8 +617,33 @@ export function globalReasonText(reason: string | null): string {
 }
 
 export function partStateText(p: Part): string {
+  if (p.state === 'unreadable') {
+    return p.reason && p.reason !== 'unreadable'
+      ? `${PART_UNREADABLE_TEXT.slice(0, -1)}: ${stateReasonText(p.reason)}.`
+      : PART_UNREADABLE_TEXT;
+  }
   const word = PART_STATE_TEXT[p.state] ?? UNKNOWN;
   return p.reason ? `${word} · ${stateReasonText(p.reason)}` : word;
+}
+
+/**
+ * The radios of one router card: `whole` the block is one "unbekannt" with
+ * `reason`; `note` what follows the list of a partial block. A reason is said
+ * once: never again in the note when the value before already says it
+ * (browser review: "unbekannt · Router nicht erreichbar · unvollständig ·
+ * Router nicht erreichbar").
+ */
+export function radiosView(radios: Part & { items: RadioItem[] }): { whole: boolean; reason: string | null; note: string | null } {
+  const whole = radios.state === 'unknown' || radios.state === 'off' || radios.state === 'unreadable' || !radios.items.length;
+  const reason = whole ? (radios.reason ? stateReasonText(radios.reason) : 'keine Funkdaten') : null;
+  if (radios.state !== 'partial') return { whole, reason, note: null };
+  if (radios.reason === 'not_observed') return { whole, reason: whole ? null : reason, note: RADIOS_NOT_OBSERVED_TEXT };
+  const said = new Set(whole
+    ? [reason]
+    : radios.items.filter(i => i.reason || i.state === 'unknown').map(i => stateReasonText(i.reason)));
+  const own = radios.reason ? stateReasonText(radios.reason) : null;
+  const word = PART_STATE_TEXT.partial;
+  return { whole, reason, note: own && !said.has(own) ? `${word} · ${own}` : word };
 }
 
 function unknownView(reason: string | null): ValueView {
@@ -711,8 +832,34 @@ export function compareSummary(a: CompareAnswer, isAdmin: boolean): string {
   if (unknown > 0) {
     return `Keine bekannte Änderung; ${num(unknown)} ${unknown === 1 ? 'Merkmal ist' : 'Merkmale sind'} zu einem der Zeitpunkte unbekannt.`;
   }
-  const happened = a.marks.count > 0 || a.incidents.opened.length > 0 || a.incidents.resolved.length > 0 || a.configVersions.items.length > 0;
-  return happened ? SAME_BUT_EVENTS : NOTHING_CHANGED;
+  const other = a.otherSources;
+  const happened = a.marks.count > 0 || a.incidents.opened.length > 0 || a.incidents.resolved.length > 0
+    || a.configVersions.items.length > 0 || (other !== null && other.count > 0);
+  if (happened) return SAME_BUT_EVENTS;
+  // "nothing changed" only when the other modules were read and are empty too (review F)
+  if (other === null || other.state !== 'ok' || other.truncated) return otherUnknownText(other);
+  return NOTHING_CHANGED;
+}
+
+/** Why it is unknown whether anything happened in between, with the names of the sources not read. */
+export function otherUnknownText(o: OtherSources | null): string {
+  const ids = o?.unreadable ?? [];
+  if (o === null || (o.state !== 'unreadable' && !ids.length)) return OTHER_UNKNOWN_NONE;
+  const names = ids.map(id => SOURCE_TEXT[id] ?? 'unbekannte Quelle');
+  const head = ids.length > 1 ? OTHER_UNKNOWN_MANY : OTHER_UNKNOWN_ONE;
+  return names.length ? `${head} Nicht gelesen: ${names.join(', ')}.` : head;
+}
+
+/**
+ * The line under "Ereignisse dazwischen" for the other modules: "Dazu 3
+ * Einträge aus anderen Modulen." ("mindestens" when cut), the sentence of
+ * unknown when a source was not read, else null.
+ */
+export function otherSourcesText(o: OtherSources | null): string | null {
+  if (o === null || o.state !== 'ok') return otherUnknownText(o);
+  if (o.count <= 0) return null;
+  const n = `${o.truncated ? 'mindestens ' : ''}${num(o.count)}`;
+  return `Dazu ${n} ${o.count === 1 && !o.truncated ? 'Eintrag' : 'Einträge'} aus anderen Modulen.`;
 }
 
 // ── Jumps (§23) ──────────────────────────────────────────────────────────
