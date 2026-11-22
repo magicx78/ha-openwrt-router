@@ -19,7 +19,7 @@ and ``.../timeline`` (client filter) as an administrator and as a user:
   (their write paths are covered by ``test_tm_state_v1520``);
 * compare: changes (a channel, the outage, clients), a quiet pair, one side
   unknown, a user, two refused pairs;
-* export: one page, a page cut by a lowered limit (``EXPORT_MAX_MARKS`` 3,
+* export: one page, a page cut by a lowered limit (``EXPORT_MAX_MARKS`` 1,
   with ``next_cursor``), the audit log refusing (503);
 * timeline: the client filter of an administrator.
 
@@ -124,7 +124,7 @@ async def build(disks: Any, disk: Any) -> tuple[dict[str, Any], list[bytes]]:
         # -- export ---------------------------------------------------------------------
         window = {"from": str(int(T0 - 60)), "until": str(int(now))}
         out["export"] = await get("/export", window)
-        with patch.object(tm_export, "EXPORT_MAX_MARKS", 3):
+        with patch.object(tm_export, "EXPORT_MAX_MARKS", 1):
             out["export_cut"] = await get("/export", window)
 
         def refuse(*_a: Any, **_k: Any) -> None:

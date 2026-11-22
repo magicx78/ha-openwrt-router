@@ -219,8 +219,15 @@ async def test_clear_history_action(disks, disk) -> None:
         w.down("r2")
         assert (await async_clear_history(w.hass, True))["deleted"] == 1
         assert w.marks("router_down") and not sessions(w)
+        old = w.marks("router_down")[0]
         await async_clear_history(w.hass, False)
-        assert [m.kind for m in w.engine.index] == ["tm_cleared"]
+        # 1.52.0 review C: the router is still down, so the new history
+        # holds its outage again, from the clear on (the start before is
+        # gone with the history: derived); nothing else survives
+        assert [m.kind for m in w.engine.index] == ["router_down", "tm_cleared"]
+        [down] = w.marks("router_down")
+        assert down.seq != old.seq and down.is_open
+        assert down.ts == w.marks("tm_cleared")[0].ts
 
 
 # --- privacy and rights --------------------------------------------------------------

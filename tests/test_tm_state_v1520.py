@@ -247,15 +247,20 @@ async def test_uplink_and_role_changes_and_the_settling_window(disks) -> None:
         assert uplink(s, R3, settled - MS) == "not_observed"
         assert uplink(s, R3, settled) == R1 and role(s, R3, settled) == "node"
         assert role(s, R1, settled) == "gateway" and uplink(s, R1, settled) is None
-        # a change is settled two polls after it began: the 15 minutes before
-        # the mark are unknown, not the old value
+        # a change is settled two polls after it began: from 15 minutes
+        # before the first poll that saw it (``since``, 1.52.0 review B) up
+        # to the mark the state is unknown, not the old value
+        first = change.params["since"]
+        assert first == change.ts - 60
         assert uplink(s, R3, change.ts - MS) == "settling"
-        assert uplink(s, R3, change.ts - tm_state.TOPOLOGY_SETTLE_S) == "settling"
-        assert uplink(s, R3, change.ts - tm_state.TOPOLOGY_SETTLE_S - MS) == R1
+        assert uplink(s, R3, first - tm_state.TOPOLOGY_SETTLE_S) == "settling"
+        assert uplink(s, R3, first - tm_state.TOPOLOGY_SETTLE_S - MS) == R1
         assert uplink(s, R3, change.ts) == R2
         assert uplink(s, R3, change.ts + MS) == R2
         assert role(s, R2, turn.ts) == "gateway"
-        assert role(s, R2, turn.ts - tm_state.TOPOLOGY_SETTLE_S - MS) == "node"
+        assert turn.params["since"] == turn.ts - 60
+        assert role(s, R2, turn.ts - 60 - tm_state.TOPOLOGY_SETTLE_S) == "settling"
+        assert role(s, R2, turn.ts - 60 - tm_state.TOPOLOGY_SETTLE_S - MS) == "node"
         # r2 lost its uplink when it became a gateway
         assert uplink(s, R2, turn.ts + 60) is None
 

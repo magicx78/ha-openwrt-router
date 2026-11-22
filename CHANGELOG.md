@@ -15,8 +15,10 @@ allem aus). Alles stammt aus dem eigenen Verlauf und aus Lesefunktionen vorhande
 Erschlossenes ist als „abgeleitet“ gekennzeichnet, Unsicheres heißt ausdrücklich „unbekannt“
 mit Grund, nie geraten. **Wer die Time Machine eingeschaltet hat, bekommt mit dem Update eine
 erweiterte Datei** `.storage/openwrt_router.time_machine` (Speicher 1.2: `minor_version`
-1 → 2, nur die Schlüssel `seen`, `clients_cov` und `lost` kommen hinzu, geschrieben beim
-nächsten Speichern); eine 1.51.0-Datei lädt unverändert. Zustand und Vergleich sind darum
+1 → 2, nur die Schlüssel `seen`, `clients_cov`, `lost` und, wenn nötig, `lost_routers` kommen
+hinzu, geschrieben beim nächsten Speichern); eine 1.51.0-Datei lädt unverändert. Zurück auf
+1.51.0 (vom Review bestätigt): Die Datei lädt ohne Verlust, die zusätzlichen Schlüssel
+bleiben stehen, bis 1.51.0 selbst speichert. Zustand und Vergleich sind darum
 **erst für Zeiten ab dem Update bekannt, davor „nicht aufgezeichnet“**. Bei ausgeschalteter
 Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
 `docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261122-timemachine6`.
@@ -80,8 +82,34 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
 
 ### Geändert
 
-- Time-Machine-Speicher Version 1.2 (additiv: `seen`, `clients_cov`, `lost`); eine
-  1.51.0-Datei lädt unverändert, die Zeit davor gilt als nicht aufgezeichnet.
+- Time-Machine-Speicher Version 1.2 (additiv: `seen`, `clients_cov`, `lost`, `lost_routers`);
+  eine 1.51.0-Datei lädt unverändert, die Zeit davor gilt als nicht aufgezeichnet.
+- Review vor dem Release (Backend, je ein Test über die echten Schreibwege, ohne die Korrektur
+  rot; dazu das Zufalls-Orakel des Reviews mit festen Startwerten in der Suite):
+  - Springt die Uhr um mehr als 300 s **zurück**, ist die doppelt belegte Zeit „unbekannt“ mit
+    dem neuen Grund `clock_shift` und alles davor „verdrängt“; ein Sprung vor macht nichts
+    unbekannt.
+  - Uplink- und Rollenwechsel: die Unsicherheit zählt ab dem ersten Poll, der den neuen Wert
+    sah (Marken-Parameter `since`), auch über fehlgeschlagene Polls hinweg; ein noch
+    unbestätigter Wechsel macht Uplink und Rolle „jetzt“ unbekannt (`settling`).
+  - „Verlauf löschen“, Neuladen eines Routers und Neustart setzen laufende Ausfälle
+    (auch den LAN-Ausfall), Lücken und aus gebliebene Funks fort; vorher zeigte ein noch
+    ausgefallener Router danach „erreichbar“.
+  - Ein verdrängter laufender Ausfall macht die Zeit bis zu seinem Ende unbekannt (vorher
+    „erreichbar“).
+  - Der Funk-Block sagt nur noch `ok`, wenn er vollständig ist; ein über einen Neustart aus
+    gebliebener Funk macht ihn `partial`.
+  - Vergleich: Marken zählen im Fenster der Zeitleiste (`t1 ≤ ts < t2`); neues Feld
+    `changes.other_sources` zählt die Einträge der anderen Quellen dazwischen.
+  - Client-Liste bleibt `partial` (`flapping`), solange ein Client über der Tagesgrenze
+    ohne Session verbunden sein kann, auch über Mitternacht.
+  - Ein Fehler beim Lesen von Traffic oder WiFi RF macht nur diesen Teil `unreadable` und
+    die Antwort `partial` (vorher Fehler 500).
+  - Export: Client-Marken fallen schon in der Abfrage weg, eine Seite fasst bis zu 5000
+    Marken ohne Client (vorher 1675 bei 64 Routern); die Schleife gibt alle 1000 Marken ab
+    (längster Block 4 ms statt bis 24 ms).
+  - „Router entfernen“ macht nur den Verlauf der Router unbekannt, deren Marken ihn nannten,
+    nicht mehr den der ganzen Flotte.
 - Traffic und WiFi RF: neue reine Lesefunktionen `window_at` und `client_ref_for_mac`,
   Security Center: `client_ref_for_mac` (Test: gleiche Ausgaben und Zustände mit und ohne
   Aufruf).
@@ -106,6 +134,8 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
   Konfiguration; die Zahl „neue Versionen“ im Vergleich zählt Versionen, nicht geänderte
   Einstellungen.
 - Der Export enthält keine Client-Verläufe und berücksichtigt den Client-Filter nicht.
+- Ein Rücksprung der Uhr macht die ganze Zeit vor der alten Uhrzeit unbekannt.
+- „Client vergessen“ senkt die Client-Zahlen der Vergangenheit, ohne das zu markieren.
 - Sprünge in WiFi Intelligence, Netzwerkdiagnose und Traffic Analytics öffnen nur den Tab;
   Einträge der Network Intelligence führen in keinen Tab. Kein Link aus der Topologie in die
   Zeitreise (die Topologie kennt die Router-Kennungen `rtr_…` nicht).

@@ -80,6 +80,7 @@ from .tm_query import (
     time_machine_enabled,
 )
 from .tm_sources import (
+    ALL_SOURCE_IDS,
     KIND_GROUP,
     NON_ADMIN_GROUPS,
     REASON_ADMIN_ONLY,
@@ -87,6 +88,8 @@ from .tm_sources import (
     REASON_MODULE_OFF,
     REASON_NOT_LOADED,
     REASON_NOT_RUNNING,
+    SOURCE_TM_CLIENTS,
+    SOURCE_TM_INDEX,
     RouterMap,
     build_router_map,
     index_mark,
@@ -135,8 +138,12 @@ R_REOPENED: Final = "reopened_since"
 R_PRUNED: Final = "source_pruned"
 R_CUT: Final = "cut"
 R_UNREADABLE: Final = "unreadable"
+# review A: the wall clock jumped (back: the time is occupied twice; ahead:
+# the time was skipped)
+R_CLOCK_SHIFT: Final = "clock_shift"
 UNKNOWN_REASONS: Final = (
     R_BEYOND_RETENTION,
+    R_CLOCK_SHIFT,
     R_NOT_RECORDED,
     R_HA_GAP,
     R_OBSERVATION_GAP,
@@ -149,7 +156,14 @@ UNKNOWN_REASONS: Final = (
     R_SETTLING,
 )
 _GLOBAL: Final = frozenset(
-    {R_BEYOND_RETENTION, R_NOT_RECORDED, R_HA_GAP, R_OBSERVATION_GAP, R_EVICTED}
+    {
+        R_BEYOND_RETENTION,
+        R_CLOCK_SHIFT,
+        R_NOT_RECORDED,
+        R_HA_GAP,
+        R_OBSERVATION_GAP,
+        R_EVICTED,
+    }
 )
 
 PART_OK: Final = "ok"
@@ -301,6 +315,8 @@ class Snapshot:
         lost: Mapping[str, float],
         clients_cov: Iterable[Iterable[float | None]] = (),
         now: float,
+        lost_routers: Mapping[str, float] | None = None,
+        pending: Mapping[str, float] | None = None,
     ) -> None:
         """Sort the marks by role (one pass)."""
         self.now = now
@@ -316,6 +332,12 @@ class Snapshot:
         ]
         self.seen = {rid: list(segs) for rid, segs in seen.items()}
         self.lost = dict(lost)
+        # review J: infrastructure lost per router; review B: first poll of
+        # an uplink / role candidate the engine has not confirmed yet
+        self.lost_routers = dict(lost_routers or {})
+        self.pending = dict(pending or {})
+        self.shifts: list[tuple[float, float]] = []  # review A
+        self.session_starts: dict[str, list[float]] = {}  # review G
         self.down: dict[str, list[Mark]] = {}
         self.gaps: dict[str, list[Mark]] = {}
         self.radio: dict[str, list[Mark]] = {}
@@ -331,9 +353,15 @@ class Snapshot:
         self.routers: set[str] = set(self.seen)
         for mark in marks:
             self._take(mark)
+        self.finish()
+
+    def finish(self) -> None:
+        """Sort what was taken (after the last :meth:`_take`)."""
         for table in (self.radio, self.topo):
             for items in table.values():
                 items.sort(key=lambda m: (m.ts, m.seq))
+        for starts in self.session_starts.values():
+            starts.sort()
 
     def _take(self, mark: Mark) -> None:
         kind, rid = mark.kind, mark.router
@@ -341,10 +369,15 @@ class Snapshot:
             self.client_marks.append(mark)
             if kind == "client_session":
                 self.sessions.append(mark)
+                self.session_starts.setdefault(mark.client, []).append(mark.ts)
             elif kind == "client_flapping":
                 self.flapping.append(mark)
             return
         self.own.append(mark)
+        if kind == "clock_shift":
+            window = _shift_window(mark)
+            if window is not None:
+                self.shifts.append(window)
         if kind in _INTERVAL_KINDS:
             self.intervals.append(mark)
         if rid is not None:
@@ -371,6 +404,8 @@ class Snapshot:
         """Why nothing at ``at`` can be said (None: reconstructable)."""
         if at < self.now - RETENTION_S:
             return R_BEYOND_RETENTION
+        if any(lo <= at <= hi for lo, hi in self.shifts):
+            return R_CLOCK_SHIFT
         if any(_covers(m, at) for m in self.ha_gaps):
             return R_HA_GAP
         if any(_covers(m, at) for m in self.fleet_gaps):
@@ -397,11 +432,20 @@ class Snapshot:
 
     # -- per router --------------------------------------------------------------------
 
+    def lost_of(self, rid: str) -> float:
+        """Up to when the infrastructure marks of ``rid`` are incomplete."""
+        return max(
+            self.lost.get(QUOTA_INFRA, -math.inf),
+            self.lost_routers.get(rid, -math.inf),
+        )
+
     def reachable(self, rid: str, at: float) -> dict[str, Any]:
         """``value`` True / False / None (see the module doc)."""
         reason = self.global_reason(at)
         if reason is not None:
             return _unknown(reason)
+        if at <= self.lost_routers.get(rid, -math.inf):
+            return _unknown(R_EVICTED)
         for mark in self.down.get(rid, ()):
             if _covers(mark, at):
                 return _value(False, derived=mark.derived)
@@ -438,12 +482,13 @@ class Snapshot:
         if seg.radios_at < self.now - RETENTION_S:
             # marks after the base may be pruned already (engine: REBASE_S)
             return _radio_block(None, R_BEYOND_RETENTION), 0
-        if seg.radios_at < self.lost.get(QUOTA_INFRA, -math.inf):
+        if seg.radios_at < self.lost_of(rid):
             # a mark after the base is gone (the engine rebases then)
             return _radio_block(None, R_EVICTED), 0
         walk = _RadioWalk(seg.radios)
         end = seg.end if seg.end is not None else math.inf
-        absent = False
+        # review E: radios off when the base was set and not back since
+        absent = getattr(seg, "off", 0) > 0
         events: list[tuple[float, int, Mark]] = []
         for mark in self.radio.get(rid, ()):
             if mark.ts > at:
@@ -483,7 +528,7 @@ class Snapshot:
         if seg.topo_at < self.now - RETENTION_S:
             gone = _unknown(R_BEYOND_RETENTION)
             return gone, gone, 0
-        if seg.topo_at < self.lost.get(QUOTA_INFRA, -math.inf):
+        if seg.topo_at < self.lost_of(rid):
             gone = _unknown(R_EVICTED)
             return gone, gone, 0
         parent, role = seg.parent, seg.role
@@ -506,7 +551,17 @@ class Snapshot:
             else:
                 bad = _unknown(R_INCONSISTENT)
                 return bad, bad, applied
-        if any(at < m.ts <= at + TOPOLOGY_SETTLE_S for m in self.topo.get(rid, ())):
+        # review B: from the first poll that saw the new value (``since``;
+        # failed polls may lie between it and the confirming one), the
+        # change may have begun up to TOPOLOGY_SETTLE_S earlier
+        if any(
+            _first_seen(m) - TOPOLOGY_SETTLE_S <= at < m.ts
+            for m in self.topo.get(rid, ())
+        ):
+            return _unknown(R_SETTLING), _unknown(R_SETTLING), applied
+        since = self.pending.get(rid)
+        if seg.end is None and since is not None and at >= since - TOPOLOGY_SETTLE_S:
+            # a candidate the engine has not confirmed yet (the open edge)
             return _unknown(R_SETTLING), _unknown(R_SETTLING), applied
         if seg.end is not None and at > seg.end - TOPOLOGY_SETTLE_S:
             nxt = self._next_segment(rid, seg)
@@ -535,14 +590,44 @@ class Snapshot:
             return PART_UNKNOWN, R_EVICTED
         if not any(a <= at < b for a, b in self.clients_cov):
             return PART_UNKNOWN, R_NOT_RECORDED
-        day = int(at // 86_400)
-        if any(int(m.ts // 86_400) == day and m.ts <= at for m in self.flapping):
-            return PART_PARTIAL, R_FLAPPING
+        for flap in self.flapping:
+            if flap.ts > at:
+                continue
+            # review G: a capped session start may leave the client
+            # connected without a session, also past midnight: until the
+            # client's next recorded session after its last capped mark
+            last = flap.end if flap.end is not None else flap.ts
+            starts = self.session_starts.get(flap.client or "", ())
+            if not any(last < ts <= at for ts in starts):
+                return PART_PARTIAL, R_FLAPPING
         return PART_OK, None
 
     def sessions_at(self, at: float) -> list[Mark]:
         """Client sessions covering ``at``."""
         return [m for m in self.sessions if _covers(m, at)]
+
+
+def _shift_window(mark: Mark) -> tuple[float, float] | None:
+    """The wall time a ``clock_shift`` mark back makes unknown (review A).
+
+    The clock was found ``|shift_s|`` behind where it had been (at a tick,
+    or at a restart against the last write): from ``ts - |shift_s|`` to
+    ``ts + |shift_s|`` the wall time may be occupied twice (the jump lies
+    before ``ts``). The engine also raises ``lost`` up to the old wall time,
+    so everything before stays unknown even without this mark. A jump ahead
+    occupies no time twice: the skipped wall time had no real time in it,
+    nothing to reconstruct there differs from the last poll before it.
+    """
+    shift = float(mark.params.get("shift_s", 0) or 0)
+    if shift >= 0:
+        return None
+    return mark.ts + shift, mark.ts - shift
+
+
+def _first_seen(mark: Mark) -> float:
+    """The first poll that saw an uplink / role change (review B)."""
+    since = mark.params.get("since")
+    return min(mark.ts, float(since)) if isinstance(since, int | float) else mark.ts
 
 
 class _RadioWalk:
@@ -652,21 +737,23 @@ async def async_snapshot(engine: Any, now: float) -> Snapshot:
     """The engine's index taken apart (yields every ``YIELD_EVERY`` marks)."""
     marks = list(engine.index.marks.values())
     store = engine.store
+    index = engine.index
+    pending = getattr(engine, "topology_pending", None)
     snap = Snapshot(
         (),
         coverage=store.coverage,
         seen=store.seen,
-        lost=engine.index.lost,
+        lost=index.effective_lost(now),
         clients_cov=store.clients_cov,
         now=now,
+        lost_routers=index.lost_router,
+        pending=pending() if callable(pending) else None,
     )
     for i, mark in enumerate(marks):
         if i and i % YIELD_EVERY == 0:
             await asyncio.sleep(0)
         snap._take(mark)
-    for table in (snap.radio, snap.topo):
-        for items in table.values():
-            items.sort(key=lambda m: (m.ts, m.seq))
+    snap.finish()
     return snap
 
 
@@ -751,6 +838,10 @@ def _ni_incidents(
         return None, REASON_NOT_LOADED, False
     try:
         incidents = list(engine.machine.peek())
+        for inc in incidents:
+            # review H: an incident of another shape fails here, not later
+            _incident_item(inc, routers)
+            _incident_state(inc, 0.0)
     except Exception:  # noqa: BLE001 - a broken machine reads as unreadable
         return None, R_UNREADABLE, False
     droppable = sum(
@@ -853,6 +944,19 @@ async def _versions(
         return None, R_UNREADABLE, False
     if not isinstance(records, list | tuple):
         return None, R_UNREADABLE, False
+    try:
+        # review H: a record of another shape makes the part unreadable here,
+        # never a 500 later
+        for record in records:
+            float(record.created_at.timestamp())
+            str(record.router_id)
+            str(record.backup_id)
+            token(f"{record.reason.value}.{record.status.value}")
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug(
+            "Time Machine state: versions unreadable (%s)", type(err).__name__
+        )
+        return None, R_UNREADABLE, False
     return list(records), None, len(records) >= MAX_LIST_LIMIT
 
 
@@ -932,8 +1036,36 @@ _TRAFFIC_FIELDS: Final = (
 )
 
 
+def _foreign(name: str, key: str, call: Any, rid: str, at: float) -> dict[str, Any]:
+    """One part read from another module; its failure is this part's
+    ``unreadable`` (review H), logged by type only."""
+    try:
+        return call(rid, at)
+    except Exception as err:  # noqa: BLE001 - one module never breaks the answer
+        _LOGGER.debug(
+            "Time Machine state: %s unreadable (%s)", name, type(err).__name__
+        )
+        return {
+            "state": PART_UNREADABLE,
+            "reason": R_UNREADABLE,
+            "hour": _hour(at)[0],
+            key: [],
+        }
+
+
 def traffic_at(hass: HomeAssistant, rid: str, at: float) -> dict[str, Any]:
     """WAN hour values of the hour holding ``at`` (no point or netdev name)."""
+    return _foreign("traffic", "wan", lambda r, t: _traffic_at(hass, r, t), rid, at)
+
+
+def utilization_at(hass: HomeAssistant, rid: str, at: float) -> dict[str, Any]:
+    """Channel utilization of the hour holding ``at`` per band (no radio id)."""
+    return _foreign(
+        "utilization", "radios", lambda r, t: _utilization_at(hass, r, t), rid, at
+    )
+
+
+def _traffic_at(hass: HomeAssistant, rid: str, at: float) -> dict[str, Any]:
     from .traffic_correlate import async_get_traffic_read_api
 
     start, end = _hour(at)
@@ -962,8 +1094,7 @@ def traffic_at(hass: HomeAssistant, rid: str, at: float) -> dict[str, Any]:
     return {"state": PART_OK, "reason": None, "hour": start, "wan": wan}
 
 
-def utilization_at(hass: HomeAssistant, rid: str, at: float) -> dict[str, Any]:
-    """Channel utilization of the hour holding ``at`` per band (no radio id)."""
+def _utilization_at(hass: HomeAssistant, rid: str, at: float) -> dict[str, Any]:
     from .rf_center import async_get_rf_center
 
     start, end = _hour(at)
@@ -1164,6 +1295,11 @@ def state_body(
     parts = (
         incident_part["state"] == PART_UNREADABLE,
         config["state"] == PART_UNREADABLE,
+        *(
+            item[part]["state"] == PART_UNREADABLE
+            for item in table
+            for part in ("traffic", "utilization")
+        ),
     )
     recorded = [a for a, _b in snap.coverage]
     return {
@@ -1282,6 +1418,8 @@ def compare_body(
     now: float,
     incidents: tuple[list[Any] | None, str | None, bool],
     versions: tuple[list[Any] | None, str | None, bool],
+    clients_on: bool = False,
+    other_sources: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Only the differences of two states, plus what happened between."""
     t1, t2 = query.t1, query.t2
@@ -1318,12 +1456,18 @@ def compare_body(
         ):
             changes.append(entry)
     groups: Counter[str] = Counter()
-    # client marks only for administrators while the client list is known
-    counted = [*snap.own, *(snap.client_marks if admin and clients_known else ())]
+    # review F: exactly the own marks the timeline shows for
+    # ``from=t1&until=t2`` (``from <= ts < until``, the same router filter
+    # and rights; client marks for administrators while the client switch
+    # is on); references to audit entries count under ``other_sources``
+    counted = [
+        *(m for m in snap.own if m.source == SOURCE_TM_INDEX),
+        *(snap.client_marks if admin and clients_on else ()),
+    ]
     for mark in counted:
-        if not t1 < mark.ts <= t2:
+        if not t1 <= mark.ts < t2:
             continue
-        if query.router_id is not None and mark.router not in (query.router_id, None):
+        if query.router_id is not None and mark.router != query.router_id:
             continue
         group = KIND_GROUP[mark.kind]
         if admin or group in NON_ADMIN_GROUPS:
@@ -1423,6 +1567,17 @@ def compare_body(
                 or len(resolved) > INCIDENTS_MAX,
             },
             "config_versions": config,
+            # additive (review F): entries of the other timeline sources in
+            # the same window (see ``_other_sources``)
+            "other_sources": dict(other_sources)
+            if other_sources is not None
+            else {
+                "state": PART_OFF,
+                "reason": None,
+                "count": 0,
+                "truncated": False,
+                "unreadable": [],
+            },
         },
     }
 
@@ -1473,6 +1628,7 @@ async def async_compare(
             )
         )
         await asyncio.sleep(0)
+    other = await _other_sources(hass, query, admin=admin, now=now)
     return compare_body(
         states[0],
         states[1],
@@ -1483,7 +1639,61 @@ async def async_compare(
         now=now,
         incidents=incidents,
         versions=versions,
+        clients_on=bool(getattr(engine, "clients_wanted", False)),
+        other_sources=other,
     )
+
+
+async def _other_sources(
+    hass: HomeAssistant, query: CompareQuery, *, admin: bool, now: float
+) -> dict[str, Any]:
+    """Entries of the timeline's other sources with ``t1 <= ts < t2``
+    (review F): the timeline's own read path and rights, ``tm_index`` read
+    along for the doubles rule only. ``count`` is at most ``MAX_LIMIT``
+    (``truncated``); ``state`` ``unreadable`` when a source failed."""
+    from .tm_query import Query, async_timeline
+
+    others = tuple(
+        s for s in ALL_SOURCE_IDS if s not in (SOURCE_TM_INDEX, SOURCE_TM_CLIENTS)
+    )
+    window = Query(
+        query.t1,
+        query.t2,
+        sources=(*others, SOURCE_TM_INDEX),
+        router_id=query.router_id,
+        limit=MAX_LIMIT,
+        no_clients=not admin,
+    )
+    try:
+        body = await async_timeline(hass, window, admin=admin, now=now)
+    except Exception as err:  # noqa: BLE001 - one part never breaks the answer
+        _LOGGER.debug(
+            "Time Machine compare: sources unreadable (%s)", type(err).__name__
+        )
+        return {
+            "state": PART_UNREADABLE,
+            "reason": R_UNREADABLE,
+            "count": 0,
+            "truncated": False,
+            "unreadable": sorted(others),
+        }
+    count = sum(1 for m in body["marks"] if m["source"] in others)
+    # a module that is not running or not loaded has nothing in the window
+    # (as in the state: "off"); any other failure leaves the window unknown
+    failed = sorted(
+        src["id"]
+        for src in body["sources"]
+        if src["id"] in others
+        and src["state"] == "unreadable"
+        and src["reason"] not in (REASON_NOT_RUNNING, REASON_NOT_LOADED)
+    )
+    return {
+        "state": PART_UNREADABLE if failed else PART_OK,
+        "reason": R_UNREADABLE if failed else None,
+        "count": count,
+        "truncated": bool(body["truncated"]),
+        "unreadable": failed,
+    }
 
 
 __all__ = [

@@ -61,6 +61,7 @@ from .tm_marks import (
     END_CLOSED,
     END_OPEN,
     END_UNKNOWN,
+    QUOTA_CLIENTS,
     QUOTA_INFRA,
     REF_KINDS,
     RETENTION_S,
@@ -118,11 +119,14 @@ class _Debounce:
 
     candidate: str | None = None
     count: int = 0
+    # the first poll that saw the candidate (review B: a failed poll between
+    # it and the confirming one does not feed the debounce)
+    since: float | None = None
 
-    def feed(self, value: str) -> bool:
+    def feed(self, value: str, now: float | None = None) -> bool:
         """True when ``value`` was just seen often enough."""
         if value != self.candidate:
-            self.candidate, self.count = value, 1
+            self.candidate, self.count, self.since = value, 1, now
         else:
             self.count += 1
         return self.count == DEBOUNCE_POLLS
@@ -137,6 +141,9 @@ class _Router:
     unsub: CALLBACK_TYPE | None = None
     router_id: str | None = None
     gap_seq: int | None = None
+    # review C: the first failed poll of a gap reopened after a clear (the
+    # gap's own start is the clear; GAP_MIN_S counts from this one)
+    gap_since: float | None = None
     # radio key -> (first missing ts, polls missing)
     missing: dict[str, tuple[float, int]] = field(default_factory=dict)
     radio_down: dict[str, int] = field(default_factory=dict)  # key -> seq
@@ -210,6 +217,10 @@ class TimeMachine:
         self._core: Any = None
         self._api_unsubs: list[Callable[[], None]] = []
         self._outage_seq: dict[str, int] = {}  # entry_id -> router_down seq
+        # review E: per router the bands of radios that were off when the
+        # engine lost sight of them (restart, clear, reload): they are not in
+        # the radio state, so a base set without them is incomplete
+        self._radios_off: dict[str, list[int | float]] = {}
         self._lan_seq: int | None = None
         self._last_wall: float | None = None
         self._last_mono: float | None = None
@@ -290,6 +301,9 @@ class TimeMachine:
         index = self.index
         if now < saved_at - CLOCK_JUMP_S:
             self.counters["clock_shifts"] += 1
+            # review A: the time up to the old wall clock is occupied twice
+            index.note_until(QUOTA_INFRA, saved_at)
+            index.note_until(QUOTA_CLIENTS, saved_at)
             index.add(
                 ts=now,
                 kind="clock_shift",
@@ -359,7 +373,11 @@ class TimeMachine:
     def _close_all_open(self, at: float, state: str) -> None:
         """Every open interval ends (at ``at``, never before its start)."""
         for mark in self.index.open_marks():
+            if mark.kind == "radio_down" and mark.router is not None:
+                self._note_off(mark.router, (mark,))
             self.index.close(mark.seq, at, state)
+        # evicted open intervals end here as well (review D)
+        self.index.resolve_lost_open(at)
         self._outage_seq.clear()
         self._lan_seq = None
         for router in self.routers.values():
@@ -367,6 +385,44 @@ class TimeMachine:
             router.radio_down.clear()
         if self.recorder is not None:
             self.recorder.reset_open()
+
+    def _note_off(self, rid: str | None, marks: Any) -> None:
+        """Radios off whose return the engine will not see as a mark."""
+        if rid is None:
+            return
+        bands = [m.params.get("band") for m in marks if m is not None]
+        if bands:
+            self._radios_off.setdefault(rid, []).extend(b for b in bands if b)
+
+    def _after_reset(
+        self, now: float, gap_since: Mapping[str, float] | None = None
+    ) -> None:
+        """Outages, observation gaps and radios off go on after the own
+        history lost its open intervals (clear, reload; review C/E): from
+        ``now`` on, as known by the fleet tracker and the last poll
+        (``gap_since``: per entry the first failed poll of a gap before)."""
+        self._live_from = now
+        self._sync_outages()
+        for router in self.routers.values():
+            rid = self.router_id(router.entry_id)
+            coordinator = router.coordinator
+            if (
+                rid is None
+                or router.gap_seq is not None
+                or router.entry_id in self._outage_seq
+                or getattr(coordinator, "last_update_success", True) is not False
+            ):
+                continue
+            mark = self.index.add(
+                ts=now,
+                kind="observation_gap",
+                router=rid,
+                code="poll_failed",
+                end_state=END_OPEN,
+                derived=True,
+            )
+            router.gap_seq = mark.seq if mark else None
+            router.gap_since = (gap_since or {}).get(router.entry_id)
 
     async def async_stop(self, reason: str) -> None:
         """Detach everything and write now (switched off / last router gone)."""
@@ -622,6 +678,10 @@ class TimeMachine:
             self._on_poll(entry_id)
 
         router.unsub = coordinator.async_add_listener(_listener)
+        if self.loaded and old is None:
+            # review C: an outage the tracker holds is recorded again (a
+            # reloaded entry lost its open outage in ``remove_entry``)
+            self._on_outage()
 
     @callback
     def remove_entry(self, entry_id: str, *, close: bool = True) -> None:
@@ -635,6 +695,9 @@ class TimeMachine:
         self.store.seen_close(router.router_id, now)
         if not close:
             return
+        self._note_off(
+            router.router_id, [self.index.get(s) for s in router.radio_down.values()]
+        )
         for seq in (router.gap_seq, *router.radio_down.values()):
             self.index.close(seq, now, END_UNKNOWN)
         self.index.close(self._outage_seq.pop(entry_id, None), now, END_UNKNOWN)
@@ -673,9 +736,9 @@ class TimeMachine:
             self._lan_seq = mark.seq if mark else None
             changed = True
         elif fleet_since is None and self._lan_seq is not None:
-            mark = index.get(self._lan_seq)
-            self._lan_seq = None
-            if _ends(index, mark, now):
+            lan_seq, self._lan_seq = self._lan_seq, None
+            mark = index.get(lan_seq)
+            if _ends(index, mark, now, lan_seq):
                 index.add(
                     ts=now,
                     kind="lan_up",
@@ -704,13 +767,15 @@ class TimeMachine:
                 router = self.routers.get(entry_id)
                 if router is not None and router.gap_seq is not None:
                     gap = router.gap_seq
+                    if index.get(gap) is None:
+                        index.close(gap, now)  # evicted while open (review D)
                     index.remove_where(lambda m, gap=gap: m.seq != gap)
                     router.gap_seq = None
             changed = True
         for entry_id in [e for e in self._outage_seq if e not in view.down]:
             seq = self._outage_seq.pop(entry_id)
             mark = index.get(seq)
-            if _ends(index, mark, now):
+            if _ends(index, mark, now, seq):
                 index.add(
                     ts=now,
                     kind="router_up",
@@ -765,8 +830,14 @@ class TimeMachine:
         changed = False
         if router.gap_seq is not None:
             gap = index.get(router.gap_seq)
+            if gap is None:
+                index.close(router.gap_seq, now)  # evicted while open (D)
             router.gap_seq = None
-            if gap is not None and now - gap.ts < GAP_MIN_S:
+            began = gap.ts if gap is not None else now
+            if router.gap_since is not None:
+                began = min(began, router.gap_since)
+            router.gap_since = None
+            if gap is not None and now - began < GAP_MIN_S:
                 index.remove_where(lambda m, s=gap.seq: m.seq != s)
                 self.counters["gaps_dropped"] += 1
             elif gap is not None:
@@ -816,7 +887,7 @@ class TimeMachine:
             silent |= before is None and seq is None
             if seq is not None:
                 mark = index.get(seq)
-                if _ends(index, mark, now):
+                if _ends(index, mark, now, seq):
                     index.add(
                         ts=now,
                         kind="radio_up",
@@ -882,10 +953,23 @@ class TimeMachine:
         with radios sets it; a radio that appeared without a mark later
         starts a new stretch, so every stretch is complete by its marks."""
         seg = self.store.seen_current(rid)
+        off = self._radios_off.get(rid)
+        if silent and off:
+            # a radio is back without a mark: one radio of its band less
+            # is off (review E)
+            for key in state.radios:
+                if seg is None or key not in seg.radios:
+                    band = _band_num(key)
+                    if band in off:
+                        off.remove(band)
+            if not off:
+                self._radios_off.pop(rid, None)
         if seg is not None and seg.radios_at is not None and silent:
             seg = self.store.seen_split(rid, now, parent=state.parent, role=state.role)
+            seg.off = len(self._radios_off.get(rid, ()))
         if seg is not None and seg.radios_at is None:
             seg.radios_at, seg.radios = now, dict(state.radios)
+            seg.off = len(self._radios_off.get(rid, ()))
 
     def _rebase(
         self, router: _Router, rid: str, state: RouterState, now: float
@@ -899,8 +983,15 @@ class TimeMachine:
         seg = self.store.seen_current(rid)
         if seg is None or seg.radios_at is None:
             return False
-        lost = self.index.lost.get(QUOTA_INFRA, -math.inf)
+        lost = max(
+            self.index.lost.get(QUOTA_INFRA, -math.inf),
+            self.index.lost_router.get(rid, -math.inf),
+        )
         if now - seg.radios_at < REBASE_S and lost <= seg.radios_at:
+            return False
+        if lost > now:
+            # a clock jump back (review A): the base waits until the wall
+            # clock passed the time it had before
             return False
         if router.missing or router.radio_down:
             return False
@@ -947,9 +1038,13 @@ class TimeMachine:
         elif uplink is not None:
             parent = state.parent  # a remembered edge changes nothing
         role = "g" if router.entry_id in topology.gateways else "n"
-        if not router.uplink.feed(f"{parent}|{role}"):
+        if not router.uplink.feed(f"{parent}|{role}", now):
             return False
         changed = False
+        # review B: the first poll that saw the new value (the change began
+        # before it; failed polls may lie between it and this one)
+        since = router.uplink.since
+        first = {"since": since} if since is not None and since < now else {}
         if parent != state.parent:
             if state.parent or state.role:
                 self.index.add(
@@ -958,6 +1053,7 @@ class TimeMachine:
                     router=rid,
                     code="uplink" if parent else "uplink_lost",
                     peers=(state.parent or None, parent or None),
+                    params=first,
                 )
             state.parent = parent
             changed = True
@@ -968,6 +1064,7 @@ class TimeMachine:
                     kind="router_role_changed",
                     router=rid,
                     code="gateway" if role == "g" else "node",
+                    params=first,
                 )
             state.role = role
             changed = True
@@ -1011,6 +1108,11 @@ class TimeMachine:
             shift = (now - self._last_wall) - (mono - self._last_mono)
             if abs(shift) > CLOCK_JUMP_S:
                 self.counters["clock_shifts"] += 1
+                if shift < 0:
+                    # review A: the wall time up to where the clock was is
+                    # occupied twice; nothing up to it counts as known
+                    for quota in (QUOTA_INFRA, QUOTA_CLIENTS):
+                        self.index.note_until(quota, now - shift)
                 self.index.add(
                     ts=now,
                     kind="clock_shift",
@@ -1050,6 +1152,20 @@ class TimeMachine:
 
     # -- reading -------------------------------------------------------------------------
 
+    def topology_pending(self) -> dict[str, float]:
+        """Per router the first poll of an uplink / role candidate the
+        debounce has not confirmed yet (review B; read only)."""
+        out: dict[str, float] = {}
+        for router in self.routers.values():
+            rid = router.router_id
+            debounce = router.uplink
+            if rid is None or debounce.candidate is None or debounce.since is None:
+                continue
+            state = RouterState.parse(self.store.state.get(rid))
+            if debounce.candidate != f"{state.parent}|{state.role}":
+                out[rid] = debounce.since
+        return out
+
     def stats(self) -> dict[str, Any]:
         """Counts only (no ids) for diagnostics."""
         return {
@@ -1063,14 +1179,16 @@ class TimeMachine:
         }
 
 
-def _ends(index: MarkIndex, mark: Any, now: float) -> bool:
+def _ends(index: MarkIndex, mark: Any, now: float, seq: int | None = None) -> bool:
     """Close an outage-like interval; True when its end is to be booked.
 
     A mark evicted while open (only when its quota held nothing else,
     review S2) still gets its end mark, without a duration: no hanging
-    reference, no invented start.
+    reference, no invented start. Its quota counts as lost up to ``now``
+    (review D, ``MarkIndex.close`` of the gone ``seq``).
     """
     if mark is None:
+        index.close(seq, now)
         return True
     return index.close(mark.seq, now)
 
@@ -1307,6 +1425,11 @@ async def async_clear_history(
     if engine is None or not engine.loaded:
         raise _service_error("time_machine_off")
     now = engine.clock()
+    gap_since: dict[str, float] = {}
+    for router in engine.routers.values():
+        gap = engine.index.get(router.gap_seq)
+        if gap is not None:
+            gap_since[router.entry_id] = min(gap.ts, router.gap_since or gap.ts)
     if clients_only:
         deleted = engine.index.clear(clients_only=True, now=now)
         engine.store.clients_cov = [[now, None]] if _recording(engine) else []
@@ -1326,10 +1449,17 @@ async def async_clear_history(
         engine._outage_seq.clear()
         engine._lan_seq = None
         for router in engine.routers.values():
+            engine._note_off(
+                router.router_id,
+                [engine.index.get(s) for s in router.radio_down.values()],
+            )
             router.gap_seq = None
             router.radio_down.clear()
     if engine.recorder is not None:
         engine.recorder.reset_open()
+    if not clients_only:
+        # review C: a router down now stays down in the new history
+        engine._after_reset(now, gap_since)
     engine.index.add(
         ts=now,
         kind="tm_cleared",

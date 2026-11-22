@@ -561,7 +561,7 @@
     },
     "time_machine_forget_client": {
       "name": "Time Machine: Client vergessen",
-      "description": "Löscht alle Time-Machine-Marken eines Clients (nur Administratoren). MAC-Adresse oder Pseudonym angeben, genau eines von beiden. Ein gerade verbundener Client wird ab seinem nächsten Verbinden oder Wechsel wieder aufgezeichnet. Andere Module behalten ihre eigenen Client-Daten; die Antwort nennt sie.",
+      "description": "Löscht alle Time-Machine-Marken eines Clients (nur Administratoren). MAC-Adresse oder Pseudonym angeben, genau eines von beiden. Ein gerade verbundener Client wird ab seinem nächsten Verbinden oder Wechsel wieder aufgezeichnet. Andere Module behalten ihre eigenen Client-Daten; die Antwort nennt sie. Die Client-Zahlen der Vergangenheit (Zustand zum Zeitpunkt, Vergleich) sinken um diesen Client, ohne dass diese Zeitpunkte markiert werden.",
       "fields": {
         "mac": {
           "name": "MAC-Adresse",

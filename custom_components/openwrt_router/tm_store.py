@@ -34,7 +34,12 @@ them, so the time before the upgrade is "unknown" there, never guessed):
 * ``clients_cov``: when the client recorder was attached (pairs like
   ``coverage``).
 * ``lost``: per quota, up to when marks are gone without the retention
-  (``tm_marks.MarkIndex.lost``).
+  (``tm_marks.MarkIndex.lost``; written as ``effective_lost``: a quota that
+  waits for the end of an evicted open interval counts as lost up to the
+  write, review D).
+* ``lost_routers`` (only when not empty): per router, up to when its
+  infrastructure marks are incomplete because they named a removed router
+  (review J).
 
 **Size.** The rows are packed once and cached (a row is packed again only
 after its mark changed). A payload over ``STORE_MAX_BYTES`` is trimmed in
@@ -100,7 +105,7 @@ _STATE = re.compile(
 
 _SEEN = re.compile(
     r"[0-9]{1,16}\|[0-9]{0,16}\|[0-9]{0,16}\|[0-9a-z_.=/+]{0,400}"
-    r"\|[0-9]{0,16}\|(?:rtr_[0-9a-f]{32})?\|[gn]?"
+    r"\|[0-9]{0,16}\|(?:rtr_[0-9a-f]{32})?\|[gn]?(?:\|[0-9]{1,2})?"
 )
 
 _COUNTERS: Final = (
@@ -182,6 +187,9 @@ class Segment:
     topo_at: float | None = None
     parent: str = ""
     role: str = ""
+    # review E: radios known to exist but off when the base was set (they
+    # are not in ``radios``; the radio list is incomplete while > 0)
+    off: int = 0
 
     @property
     def is_open(self) -> bool:
@@ -189,25 +197,26 @@ class Segment:
         return self.end is None
 
     def pack(self) -> str:
-        """``start|end|radios_at|radios|topo_at|parent|role`` (ms)."""
-        return "|".join(
-            (
-                _ms(self.start),
-                _ms(self.end),
-                _ms(self.radios_at),
-                pack_radios(self.radios),
-                _ms(self.topo_at),
-                self.parent,
-                self.role,
-            )
-        )
+        """``start|end|radios_at|radios|topo_at|parent|role[|off]`` (ms)."""
+        fields = [
+            _ms(self.start),
+            _ms(self.end),
+            _ms(self.radios_at),
+            pack_radios(self.radios),
+            _ms(self.topo_at),
+            self.parent,
+            self.role,
+        ]
+        if self.off:
+            fields.append(str(min(self.off, 99)))
+        return "|".join(fields)
 
     @classmethod
     def unpack(cls, raw: Any) -> Segment | None:
         """From :meth:`pack` (None for anything that does not validate)."""
         if not isinstance(raw, str) or not _SEEN.fullmatch(raw):
             return None
-        start, end, radios_at, radios, topo_at, parent, role = raw.split("|")
+        start, end, radios_at, radios, topo_at, parent, role, *off = raw.split("|")
         seg = cls(
             int(start) / 1000,
             _sec(end),
@@ -216,6 +225,7 @@ class Segment:
             _sec(topo_at),
             parent,
             role,
+            int(off[0]) if off else 0,
         )
         if seg.end is not None and seg.end < seg.start:
             return None
@@ -321,6 +331,7 @@ class TimeMachineStore:
         # 1.2 (absent in a 1.1 file: the time before is unknown, never guessed)
         self.clients_cov = _pairs(data.get("clients_cov"))
         self.index.restore_lost(data.get("lost"))
+        self.index.restore_lost_router(data.get("lost_routers"))
         self.index.changed = False
         self.seen = {}
         seen = data.get("seen")
@@ -427,7 +438,20 @@ class TimeMachineStore:
                 if segs
             },
             "clients_cov": [list(pair) for pair in self.clients_cov],
-            "lost": {q: round(v, 3) for q, v in sorted(self.index.lost.items())},
+            "lost": {
+                q: round(v, 3)
+                for q, v in sorted(self.index.effective_lost(self.clock()).items())
+            },
+            **(
+                {
+                    "lost_routers": {
+                        r: round(v, 3)
+                        for r, v in sorted(self.index.lost_router.items())
+                    }
+                }
+                if self.index.lost_router
+                else {}
+            ),
         }
 
     def payload(self) -> dict[str, Any]:
@@ -513,6 +537,8 @@ class TimeMachineStore:
         self.clients_cov = [
             p for p in self.clients_cov if p[1] is None or float(p[1]) >= cutoff
         ]
+        for rid in [r for r, v in self.index.lost_router.items() if v < cutoff]:
+            del self.index.lost_router[rid]
         for rid in list(self.seen):
             kept = [s for s in self.seen[rid] if s.end is None or s.end >= cutoff]
             if kept:
@@ -577,6 +603,8 @@ class TimeMachineStore:
         seg = self.seen_open(rid, now)
         if old is not None and old.topo_at is not None and role:
             seg.topo_at, seg.parent, seg.role = now, parent, role
+        if old is not None:
+            seg.off = old.off  # the engine lowers it when a radio is back
         return seg
 
     def seen_restart(self, now: float, topology: Mapping[str, tuple[str, str]]) -> None:

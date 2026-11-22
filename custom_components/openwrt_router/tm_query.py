@@ -84,6 +84,7 @@ from .tm_sources import (
     SEVERITY_RANK,
     SOURCE_CORE_AUDIT,
     SOURCE_NI_EVENTS,
+    SOURCE_TM_CLIENTS,
     SOURCE_TM_INDEX,
     SOURCE_TM_REFS,
     STATE_EMPTY,
@@ -172,6 +173,9 @@ class Query:
     # additive (1.52.0): only marks of this client (``tmc_…``, admins only;
     # the route refuses it for everyone else whatever the value)
     client: str | None = None
+    # internal (1.52.0 review I, the export; no query key): no client marks
+    # at all, ``tm_clients`` is not read
+    no_clients: bool = False
 
 
 @dataclass(slots=True)
@@ -357,6 +361,8 @@ def _visible(mark: Mapping[str, Any], query: Query, admin: bool) -> bool:
         return False
     if query.client is not None and mark.get("client") != query.client:
         return False
+    if query.no_clients and mark.get("client") is not None:
+        return False
     if query.kind is not None and mark["kind"] != query.kind:
         return False
     return query.min_severity is None or (
@@ -523,6 +529,16 @@ def merge(
             after = ms_next(edge)
             bounds.append(after if after < query.until else edge)
     cutoff = max(bounds) if bounds else None
+    excluded = (
+        sum(
+            1
+            for r in results
+            for m in r.marks
+            if m.get("client") is not None and _after(m["ts"], m["id"], query.cursor)
+        )
+        if query.no_clients
+        else 0
+    )
     marks = [
         m
         for r in results
@@ -588,7 +604,7 @@ def merge(
                 "duplicates": r.duplicates,
             }
         )
-    return {
+    body = {
         "v": API_VERSION,
         "status": STATUS_PARTIAL
         if any(r.state == STATE_UNREADABLE for r in results)
@@ -611,6 +627,10 @@ def merge(
         "spanning": spanning[:SPANNING_MAX],
         "spanning_truncated": len(spanning) > SPANNING_MAX,
     }
+    if query.no_clients:
+        # internal (the export): entries left out for naming a client
+        body["excluded_client_marks"] = excluded
+    return body
 
 
 async def async_timeline(
@@ -633,6 +653,8 @@ async def async_timeline(
     req = ReadRequest(query.since, until, admin, now)
     results: list[SourceResult] = []
     for source in query.sources:
+        if query.no_clients and source == SOURCE_TM_CLIENTS:
+            continue  # review I: never read just to be thrown away
         if source == SOURCE_TM_INDEX and until < query.until:
             # A later page (review K-a): an own mark up to NI_MATCH_S after
             # the cursor (shown on the page before) still makes an NI event

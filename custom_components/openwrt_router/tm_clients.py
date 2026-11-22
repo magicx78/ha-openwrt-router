@@ -250,6 +250,9 @@ class ClientRecorder:
         router = self.engine.router_id(tr.ap)
         open_seq = self._open.get(client)
         if index.get(open_seq) is None or not index.get(open_seq).is_open:
+            if open_seq is not None and index.get(open_seq) is None:
+                # evicted while open: lost up to this transition (review D)
+                index.close(open_seq, ts)
             self._open.pop(client, None)
             open_seq = None
         if tr.kind == TR_START:

@@ -35,6 +35,15 @@ marks trimmed for the size limit, the marks of a removed router and cleared
 histories. ``tm_state`` answers "unknown" up to it instead of reconstructing
 a state from an incomplete list. Pruned marks (older than the retention)
 are not counted: the retention bound covers them.
+
+Review fixes before 1.52.0: an *open* interval that is evicted keeps its
+quota's ``lost`` open (``lost_open``) until its owner books the end
+(:meth:`MarkIndex.close` of the gone seq, or a restart / clear): until then
+:meth:`MarkIndex.effective_lost` says "lost up to now" (D). Infrastructure
+marks of other routers deleted with a removed router raise only those
+routers' watermark (``lost_router``, J). A clock jump back raises the
+infrastructure and client watermarks to the wall time before it
+(:meth:`MarkIndex.note_until`, A).
 """
 
 from __future__ import annotations
@@ -401,6 +410,10 @@ class MarkIndex:
         self.counters: dict[str, int] = dict.fromkeys(COUNTER_NAMES, 0)
         # 1.52.0: per quota, up to when marks are gone (see the module doc)
         self.lost: dict[str, float] = {}
+        # review D: open intervals evicted whose end is not booked yet
+        # (seq -> quota); review J: infrastructure lost per router
+        self.lost_open: dict[int, str] = {}
+        self.lost_router: dict[str, float] = {}
         self._newest = -math.inf  # the latest start or end of any mark
         self.changed = False
         # marks changed since the store last packed them (its row cache)
@@ -441,18 +454,55 @@ class MarkIndex:
             self._refs[mark.ref] = mark.seq
         self.next_seq = max(self.next_seq, mark.seq + 1)
 
+    def _upto(self, mark: Mark, now: float | None) -> float:
+        if mark.is_open:
+            return max(mark.ts, self._newest, now if now is not None else mark.ts)
+        return mark.last_ts
+
     def note_lost(self, marks: Iterable[Mark], now: float | None = None) -> None:
         """Marks gone before their retention: raise ``lost`` of their quota
         to their end (an open one: ``now``, else the newest known time)."""
         for mark in marks:
-            if mark.is_open:
-                upto = max(mark.ts, self._newest, now if now is not None else mark.ts)
-            else:
-                upto = mark.last_ts
-            quota = mark.quota
-            if upto > self.lost.get(quota, -math.inf):
-                self.lost[quota] = upto
-                self.changed = True
+            self.note_until(mark.quota, self._upto(mark, now))
+
+    def note_until(self, quota: str, upto: float) -> None:
+        """Raise ``lost`` of one quota to ``upto`` (never lowers it)."""
+        if upto > self.lost.get(quota, -math.inf):
+            self.lost[quota] = upto
+            self.changed = True
+
+    def note_router(self, router: str, upto: float) -> None:
+        """Raise the infrastructure watermark of one router (review J)."""
+        if upto > self.lost_router.get(router, -math.inf):
+            self.lost_router[router] = upto
+            self.changed = True
+
+    def resolve_lost_open(self, at: float) -> None:
+        """Every evicted open interval ends at ``at`` (restart, clear)."""
+        for quota in set(self.lost_open.values()):
+            self.note_until(quota, at)
+        self.lost_open.clear()
+
+    def effective_lost(self, now: float) -> dict[str, float]:
+        """``lost`` with every quota that still waits for the end of an
+        evicted open interval raised to ``now`` (review D)."""
+        out = dict(self.lost)
+        for quota in set(self.lost_open.values()):
+            out[quota] = max(out.get(quota, -math.inf), now)
+        return out
+
+    def restore_lost_router(self, raw: Any) -> None:
+        """``lost_router`` as stored (valid router ids, finite numbers)."""
+        if not isinstance(raw, Mapping):
+            return
+        for router, value in raw.items():
+            if (
+                valid_router_id(router)
+                and isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                self.note_router(router, float(value))
 
     def restore_lost(self, raw: Any) -> None:
         """``lost`` as stored (known quotas, finite numbers only)."""
@@ -496,6 +546,8 @@ class MarkIndex:
             elif opened:
                 seq = min(opened, key=lambda s: (self.marks[s].ts, s))
                 self.counters["evicted_open"] += 1
+                # lost stays open until the owner books the end (review D)
+                self.lost_open[seq] = quota
             else:
                 return
             gone = self._delete(seq)
@@ -603,8 +655,15 @@ class MarkIndex:
     # -- update ----------------------------------------------------------------------
 
     def close(self, seq: int | None, end: float, state: str = END_CLOSED) -> bool:
-        """Close an open interval (end never before its start)."""
+        """Close an open interval (end never before its start).
+
+        The seq of an open interval evicted meanwhile (``lost_open``): its
+        quota counts as lost up to ``end`` from now on (review D).
+        """
         mark = self.get(seq)
+        if mark is None and seq is not None and seq in self.lost_open:
+            self.note_until(self.lost_open.pop(seq), to_ms(end) / 1000)
+            return False
         if mark is None or not mark.is_open:
             return False
         mark.end = max(mark.ts, to_ms(end) / 1000)
@@ -696,7 +755,16 @@ class MarkIndex:
             for m in self.marks.values()
             if m.router == router or router in (m.peers or ())
         ]
-        self.note_lost((m for m in doomed if m.router != router), now)
+        for mark in doomed:
+            if mark.router == router:
+                continue
+            if mark.quota == QUOTA_INFRA and mark.router is not None:
+                # only the router whose mark named it is spoiled (review J)
+                self.note_router(mark.router, self._upto(mark, now))
+            else:
+                # a client session or a fleet mark: one list for all routers
+                self.note_lost((mark,), now)
+        self.lost_router.pop(router, None)
         seqs = {m.seq for m in doomed}
         dropped = self.remove_where(lambda m: m.seq not in seqs)
         self.counters["router_removed"] += dropped
@@ -711,6 +779,17 @@ class MarkIndex:
         if now is not None and doomed:
             for quota in {m.quota for m in doomed}:
                 self.lost[quota] = max(self.lost.get(quota, -math.inf), now)
+        pending = {
+            seq: quota
+            for seq, quota in self.lost_open.items()
+            if clients_only and quota != QUOTA_CLIENTS
+        }
+        if now is not None:
+            for quota in set(self.lost_open.values()) - set(pending.values()):
+                self.note_until(quota, now)
+        self.lost_open = pending
+        if not clients_only:
+            self.lost_router.clear()
         if clients_only:
             dropped = self.remove_where(lambda m: m.client is None)
         else:
