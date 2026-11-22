@@ -21,6 +21,8 @@ const outFile = join(root, 'node_modules/.cache/tm-render-test/bundle.mjs');
 const F = JSON.parse(readFileSync(join(here, 'tmFixture.json'), 'utf8'));
 // Phases B/C from one world of three routers (tests/test_tm_panel_fixture_v1510.py)
 const FC = JSON.parse(readFileSync(join(here, 'tmFixtureClients.json'), 'utf8'));
+// Phases D-F: state, compare, export (tests/test_tm_panel_fixture_v1520.py)
+const FS = JSON.parse(readFileSync(join(here, 'tmFixtureState.json'), 'utf8'));
 
 const inlineCss = {
   name: 'inline-css',
@@ -37,7 +39,14 @@ before(async () => {
     stdin: {
       contents: [
         "export * from './tmLogic.ts';",
-        "export { TimeMachineScreen, FilterBar, TimeMachineView, SessionsScreen, ViewSwitch } from './TimeMachineView';",
+        "export { TimeMachineScreen, FilterBar, TimeMachineView, SessionsScreen, ViewSwitch, ExportBox, EXPORT_INIT } from './TimeMachineView';",
+        "export { StateScreen, CompareScreen, StateContainer, CompareContainer } from './TimeMachineState';",
+        "export { JumpContext, MarkRow } from './tmUi';",
+        "export * as TS from './tmState.ts';",
+        "export { isEnterpriseTabAvailable, openEnterpriseTab, peekEnterpriseEntry, clearEnterpriseEntry, onEnterpriseOpen } from '../registry';",
+        "export { SecurityCenterView, entryIncident } from '../security/SecurityCenterView';",
+        "export { ConfigManagerView, entryRouter } from '../config/ConfigManagerView';",
+        "export { EnterpriseView } from '../../components/EnterpriseView';",
         "export { getEnterpriseTabs } from '../registry';",
         "export { bindConfigHass } from '../config/register';",
         "export { bindSecurityHass } from '../security/register';",
@@ -460,16 +469,18 @@ test('a restarted list shows the notice with a button to dismiss it', () => {
   assert.ok(!text(screenC(M.listReducer(state, { type: 'dismiss' }))).includes(M.RESTART_TEXT));
 });
 
-test('the view switch: administrators see both chips, everyone else none', () => {
+test('the view switch: administrators see four chips, everyone else three (no sessions)', () => {
   const api = { timeline: () => new Promise(noop), sessions: () => new Promise(noop) };
   const admin = renderToStaticMarkup(h(M.TimeMachineView, { api, isAdmin: true }));
   assert.match(admin, /aria-pressed="true"[^>]*>Zeitleiste<\/button>/);
-  assert.match(admin, /aria-pressed="false"[^>]*>Client-Sitzungen<\/button>/);
+  for (const name of ['Zustand', 'Vergleich', 'Client-Sitzungen']) assert.match(admin, new RegExp(`aria-pressed="false"[^>]*>${name}</button>`));
   const bare = props => renderToStaticMarkup(h(M.TimeMachineView, props)).replace(/<style>[\s\S]*?<\/style>/g, '');
   assert.ok(bare({ api, isAdmin: true }).includes('tm-views'));
   for (const html of [bare({ api, isAdmin: false }), bare({ api })]) {
     assert.ok(!html.includes('Client-Sitzungen'));
-    assert.ok(!html.includes('tm-views'));
+    assert.ok(html.includes('tm-views'));
+    assert.match(html, />Zustand<\/button>/);
+    assert.match(html, />Vergleich<\/button>/);
   }
 });
 
@@ -629,7 +640,8 @@ function parseHtml(html) {
 }
 
 function flexOf(value) {
-  const t = value.split(/\s+/);
+  // tokens, a calc(…) with its spaces as one
+  const t = value.match(/(?:[^\s(]+|\([^)]*\))+/g) ?? [];
   if (value === 'none') return { grow: '0', basis: 'auto' };
   if (value === 'auto') return { grow: '1', basis: 'auto' };
   if (t.length === 1) return /^[\d.]+$/.test(t[0]) ? { grow: t[0], basis: '0%' } : { grow: '1', basis: t[0] };
@@ -743,6 +755,7 @@ function everyScreen() {
     sessionsNotLoaded: sessions(sessionsState('sessions_not_loaded')),
     sessionsOff: sessions(sessionsState('sessions_off')),
     sessionsError: sessions(sessionsState(null, { error: apiError('sessions_bad_request') })),
+    ...stateScreens(sw),
   };
 }
 
@@ -831,4 +844,438 @@ test('after a refused cursor "Ältere laden" is gone until a new first page (bot
   o = M.listReducer(o, { type: 'fail', gen: 0, seq: 2, more: true, error: new M.TmApiError(503, 'x') });
   assert.equal(o.cursorRefused, false);
   assert.ok(text(screenC(o)).includes('Ältere laden'));
+});
+
+// ── 1.52.0: "Zustand", "Vergleich", export, jumps, own window, client filter ─
+
+const FS_NOW = FS.state.body.generated_at * 1000;
+const RS1 = 'rtr_11111111111111111111111111111111';
+const RS2 = 'rtr_22222222222222222222222222222222';
+const RNAMES = { [RS1]: 'Router 1', [RS2]: 'Router 2' };
+const BKP = 'bkp_' + 'a'.repeat(32);
+const errS = name => new M.TmApiError(FS[name].status, FS[name].body.code, FS[name].body.details ?? {});
+
+function stView(name, { error = null, more = [], loading = false } = {}) {
+  let s = M.TS.stateReducer(M.TS.STATE_INIT, { type: 'start', seq: 1 });
+  if (name === null) return error ? M.TS.stateReducer(s, { type: 'fail', seq: 1, error }) : s;
+  const body = typeof name === 'string' ? FS[name].body : name;
+  s = M.TS.stateReducer(s, { type: 'done', seq: 1, answer: M.TS.parseState(body), query: { at: body.at, routerId: null, clientsCursor: null } });
+  more.forEach((p, i) => {
+    s = M.TS.stateReducer(s, { type: 'moreStart', seq: i + 2 });
+    s = M.TS.stateReducer(s, { type: 'moreDone', seq: i + 2, answer: M.TS.parseState(FS[p].body) });
+  });
+  if (loading || error) s = M.TS.stateReducer(s, { type: 'start', seq: 50 });
+  if (error) s = M.TS.stateReducer(s, { type: 'fail', seq: 50, error });
+  return s;
+}
+function stateHtml(view, extra = {}, jump = null) {
+  const el = h(M.StateScreen, {
+    state: view, input: M.TS.toLocalInput(FS.state.body.at), live: false, routerId: null, routers: RNAMES, nowMs: FS_NOW,
+    isAdmin: true, onInput: noop, onNow: noop, onStep: noop, onRouter: noop, onRefresh: noop, onMore: noop, onShowWindow: noop, ...extra,
+  });
+  return renderToStaticMarkup(jump ? h(M.JumpContext.Provider, { value: jump }, el) : el).replace(/<style>[\s\S]*?<\/style>/g, '');
+}
+function cmpView(name, { error = null } = {}) {
+  let s = M.TS.compareReducer(M.TS.COMPARE_INIT, { type: 'start', seq: 1 });
+  if (name !== null) s = M.TS.compareReducer(s, { type: 'done', seq: 1, answer: M.TS.parseCompare(typeof name === 'string' ? FS[name].body : name) });
+  if (error) s = M.TS.compareReducer(M.TS.compareReducer(s, { type: 'start', seq: 2 }), { type: 'fail', seq: 2, error });
+  return s;
+}
+function compareHtml(view, extra = {}, jump = null) {
+  const el = h(M.CompareScreen, {
+    state: view, from: M.TS.toLocalInput(FS.compare.body.t1 ?? 1800000090), until: M.TS.toLocalInput(FS.state.body.at), routerId: null,
+    routers: RNAMES, nowMs: FS_NOW, isAdmin: true, showSame: {}, onFrom: noop, onUntil: noop, onPick: noop, onRouter: noop,
+    onRefresh: noop, onToggleSame: noop, onShowWindow: noop, ...extra,
+  });
+  return renderToStaticMarkup(jump ? h(M.JumpContext.Provider, { value: jump }, el) : el).replace(/<style>[\s\S]*?<\/style>/g, '');
+}
+const JUMP_ALL = { canOpen: () => true, open: noop };
+const JUMP_USER = { canOpen: tab => tab !== 'config', open: noop };
+
+/** A state answer with an open incident and a configuration version, each with its target (as the server sends them). */
+function stateWithTargets() {
+  const b = structuredClone(FS.state.body);
+  b.incidents = {
+    state: 'ok', reason: null, total: 1, truncated: false,
+    items: [{ id: 'inc_7', type: 'router_offline', severity: 'warning', router_id: RS2, router_name: 'Router 2', since: b.at - 600, state: 'open',
+      target: { tab: 'security', object_type: 'incident', object_id: 'inc_7', version_id: null } }],
+  };
+  b.config = {
+    state: 'ok', reason: null,
+    items: [{ router_id: RS1, router_name: 'Router 1', version_id: BKP, created_at: b.at - 3600, code: null,
+      target: { tab: 'config', object_type: 'version', object_id: BKP, version_id: BKP } }],
+  };
+  return b;
+}
+
+/** The screens of the new views for the structural style checks (everyScreen). */
+function stateScreens(sw) {
+  const clients = { ...stView('state_clients_page1') };
+  return {
+    stateKnown: stateHtml(stView('state'), { viewSwitch: sw('state') }),
+    stateTargets: stateHtml(stView(stateWithTargets()), { viewSwitch: sw('state') }, JUMP_ALL),
+    stateClientsPage: stateHtml(clients),
+    stateClientsAll: stateHtml(stView('state_clients_page1', { more: ['state_clients_page2'] })),
+    stateUser: stateHtml(stView('state_user'), { isAdmin: false, viewSwitch: h(M.ViewSwitch, { view: 'state', onView: noop, isAdmin: false }) }),
+    stateNotRecorded: stateHtml(stView('state_not_recorded')),
+    stateBeyond: stateHtml(stView('state_beyond_retention')),
+    stateClientsOff: stateHtml(stView('state_clients_off')),
+    stateOff: stateHtml(stView('state_off')),
+    stateUnavailable: stateHtml(stView('state_unavailable')),
+    stateBadAt: stateHtml(stView(null, { error: errS('state_bad_at') })),
+    stateLoading: stateHtml(stView(null)),
+    stateFailed: stateHtml(stView('state', { error: new M.TmApiError(500, 'x') })),
+    compare: compareHtml(cmpView('compare'), { viewSwitch: sw('compare') }),
+    compareSame: compareHtml(cmpView('compare'), { showSame: { [RS1]: true, [RS2]: true } }),
+    compareQuiet: compareHtml(cmpView('compare_quiet')),
+    compareOne: compareHtml(cmpView('compare_one_unknown')),
+    compareUser: compareHtml(cmpView('compare_user'), { isAdmin: false }),
+    compareEmpty: compareHtml(cmpView(null, { error: errS('compare_empty') })),
+    compareTooLarge: compareHtml(cmpView(null, { error: errS('compare_too_large') })),
+    compareOff: compareHtml(cmpView('compare_off')),
+    compareLoading: compareHtml(cmpView(null)),
+    timelineCustom: screenC(loadedC('timeline'), {
+      viewSwitch: sw('timeline'), isAdmin: true,
+      filters: { ...M.DEFAULT_FILTERS, window: M.CUSTOM_WINDOW, custom: { from: 1800000000, until: 1800003600 }, client: 'tmc_f3e24c9bafa1ce4d' },
+      exportState: { ...M.EXPORT_INIT, confirm: true }, onExport: { ask: noop, confirm: noop, cancel: noop, next: noop },
+    }),
+    timelineExportCut: screenC(loadedC('timeline'), {
+      isAdmin: true, exportState: { ...M.EXPORT_INIT, saved: 1, next: { query: qOf({ from: 1, until: 2 }), cursor: FS.export_cut.body.next_cursor } },
+      onExport: { ask: noop, confirm: noop, cancel: noop, next: noop },
+    }),
+    timelineExportRefused: screenC(loadedC('timeline'), {
+      isAdmin: true, exportState: { ...M.EXPORT_INIT, error: errS('export_refused') },
+      onExport: { ask: noop, confirm: noop, cancel: noop, next: noop },
+    }),
+  };
+}
+
+test('state: router cards in words, unknown muted with its reason, never green or red', () => {
+  const html = stateHtml(stView('state'));
+  const t = text(html);
+  assert.match(t, /Zustand am 15\.01\.2027,? 09:09:59/);
+  assert.equal(count(html, 'class="tm-card"'), 2);
+  for (const k of ['Erreichbar', 'Rolle', 'Uplink', 'Funk']) assert.equal(count(html, `<dt>${k}</dt>`), 2, k);
+  assert.ok(t.includes('erreichbar abgeleitet'));
+  // "nicht erreichbar": the warning colour and the word
+  assert.match(html, /<span class="tm-value tm-value--warn">nicht erreichbar/);
+  // unknown: "unbekannt" muted plus the reason, no tone class
+  assert.ok(t.includes('unbekannt · noch kein Wert beobachtet'));
+  assert.ok(t.includes('unbekannt · Router nicht erreichbar'));
+  for (const m of html.matchAll(/<span class="([^"]*tm-value--unknown[^"]*)"/g)) assert.doesNotMatch(m[1], /warn|ok|good|bad|error|crit/);
+  assert.doesNotMatch(html, /tm-value--(ok|good|bad|error)/);
+  // the derived badge says what it means in its title
+  assert.match(html, /<span class="cfg-badge cfg-badge--info tm-derived" title="[^"]+">abgeleitet<\/span>/);
+  assert.ok(t.includes('5 GHz Kanal 44 · 80 MHz · an'));
+  // sections: intervals, incidents, traffic, config, clients (administrator)
+  for (const s of [M.TS.SECTION_INTERVALS, M.TS.SECTION_INCIDENTS, M.TS.SECTION_TRAFFIC, M.TS.SECTION_CONFIG, M.TS.SECTION_CLIENTS]) assert.ok(html.includes(`>${s}</h3>`), s);
+  assert.equal(count(html, 'class="tm-mark"'), 1);
+  assert.ok(t.includes('2 Clients: Router 1 1 · Router 2 1') || t.includes('2 Clients: Router 2 1 · Router 1 1'), t);
+  assert.equal(count(html, 'class="tm-item tm-client-row"'), 2);
+  assert.match(t, /seit \d/);
+  assert.ok(!PRIVATE.test(t), t.match(PRIVATE)?.[0]);
+  // "In der Zeitleiste zeigen" is a real button
+  assert.match(html, /<button type="button" class="diag-btn cfg-btn tm-show">In der Zeitleiste zeigen<\/button>/);
+  assert.ok(!t.includes('Weitere laden'));
+});
+
+test('state: one box and no router cards when the moment is not known (every global reason)', () => {
+  for (const name of ['not_recorded', 'beyond_retention', 'ha_gap', 'observation_gap', 'evicted']) {
+    const html = stateHtml(stView(`state_${name}`));
+    const t = text(html);
+    assert.ok(t.includes(M.TS.UNKNOWN_TITLE), name);
+    assert.ok(t.includes(M.TS.globalReasonText(name)), name);
+    assert.equal(count(html, 'tm-card'), 0, name);
+    assert.equal(count(html, 'tm-unknown'), 1, name);
+    assert.ok(!html.includes(`>${M.TS.SECTION_INTERVALS}</h3>`), name);
+  }
+});
+
+test('state: clients for administrators with "Weitere laden", nothing of them for a user', () => {
+  const page1 = stateHtml(stView('state_clients_page1'));
+  assert.equal(count(page1, 'class="tm-item tm-client-row"'), 1);
+  assert.ok(text(page1).includes('Weitere laden'));
+  const both = stateHtml(stView('state_clients_page1', { more: ['state_clients_page2'] }));
+  assert.equal(count(both, 'class="tm-item tm-client-row"'), 2);
+  assert.ok(!text(both).includes('Weitere laden'));
+  // a user: no client section, no configuration section, no client names or pseudonyms
+  const user = stateHtml(stView('state_user'), { isAdmin: false });
+  const t = text(user);
+  assert.ok(!user.includes(`>${M.TS.SECTION_CLIENTS}</h3>`) && !user.includes(`>${M.TS.SECTION_CONFIG}</h3>`));
+  assert.ok(user.includes(`>${M.TS.SECTION_INTERVALS}</h3>`));
+  assert.ok(!user.includes('tm-client'));
+  assert.ok(!/tmc_[0-9a-f]{16}/.test(user));
+  assert.equal(count(user, 'class="tm-card"'), 2);
+  // an administrator with the switch off: how to switch it on
+  const off = text(stateHtml(stView('state_clients_off')));
+  assert.ok(off.includes(M.CLIENTS_OFF_TITLE));
+});
+
+test('state: off, unavailable, the future moment at the field, a failure keeps the answer', () => {
+  assert.ok(text(stateHtml(stView('state_off'))).includes(M.OFF_TITLE));
+  assert.ok(stateHtml(stView('state_unavailable')).includes('tm-unavailable'));
+  const bad = stateHtml(stView(null, { error: errS('state_bad_at') }));
+  assert.match(bad, /aria-invalid="true"/);
+  assert.match(bad, /<span class="tm-field__error" role="alert">Der Zeitpunkt liegt in der Zukunft\. Bitte einen früheren wählen\.<\/span>/);
+  assert.ok(!bad.includes('Erneut versuchen'));
+  assert.ok(!text(bad).includes(FS.state_bad_at.body.message));
+  const failed = stateHtml(stView('state', { error: new M.TmApiError(500, 'x') }));
+  assert.ok(text(failed).includes('Der Zustand konnte nicht geladen werden.'));
+  assert.equal(count(failed, 'class="tm-card"'), 2);
+  assert.ok(text(stateHtml(stView(null))).includes(M.TS.STATE_LOADING_TEXT));
+  // controls: the field (local time), "Jetzt", −1 h, −24 h, the router select
+  const html = stateHtml(stView('state'), { live: true });
+  assert.match(html, /<input type="datetime-local" step="1" value="2027-01-15T09:09:59"/);
+  assert.match(text(html), /Jetzt −1 h −24 h/);
+  assert.match(html, /aria-pressed="true"[^>]*>Jetzt</);
+  assert.match(html, /<option value=""( selected="")?>Alle Router<\/option>/);
+});
+
+test('jumps: incidents to the Security Center and versions to the configuration, only for tabs the user has', () => {
+  const view = stView(stateWithTargets());
+  const html = stateHtml(view, {}, JUMP_ALL);
+  assert.match(html, /<button type="button" class="diag-btn cfg-btn tm-jump">Im Tab Security Center öffnen <span aria-hidden="true">→<\/span><\/button>/);
+  assert.equal(count(html, 'Im Tab Konfiguration öffnen'), 1);
+  // the intervals are the Time Machine's own marks: no link to itself
+  assert.ok(!html.includes('Im Tab Zeitreise'));
+  // a user without the configuration tab: only the Security Center
+  const user = stateHtml(view, {}, JUMP_USER);
+  assert.equal(count(user, 'tm-jump'), 1);
+  assert.ok(!user.includes('Konfiguration öffnen'));
+  // without a jump api (tests, other hosts): no button at all
+  assert.equal(count(stateHtml(view), 'tm-jump'), 0);
+  // a mark of the timeline with a ref of another module gets its button inside the main column
+  const raw = { ...FS.state.body.intervals[0], ref: { module: 'security_center', type: 'incident', id: 'inc_7' } };
+  const row = renderToStaticMarkup(h(M.JumpContext.Provider, { value: JUMP_ALL }, h(M.MarkRow, { m: M.parseMark(raw), nowMs: FS_NOW })));
+  assert.match(row, /<span class="tm-mark__main">.*<button type="button" class="diag-btn cfg-btn tm-jump">Im Tab Security Center öffnen/);
+  const none = renderToStaticMarkup(h(M.JumpContext.Provider, { value: JUMP_ALL }, h(M.MarkRow, { m: M.parseMark(FS.state.body.intervals[0]), nowMs: FS_NOW })));
+  assert.ok(!none.includes('tm-jump'));
+});
+
+test('compare: a table per router, "geändert" badges, the same rows behind a button, unknown uncoloured', () => {
+  const html = compareHtml(cmpView('compare'));
+  const t = text(html);
+  assert.equal(count(html, 'role="table"'), 2);
+  assert.match(t, /Merkmal Vorher Nachher/);
+  assert.equal(count(html, '>geändert</span>'), 4);
+  assert.ok(t.includes('Kanal 36 · 80 MHz · an') && t.includes('Kanal 44 · 80 MHz · an'));
+  assert.ok(t.includes('von 2 auf 1 (−1)'));
+  assert.ok(t.includes(M.TS.compareSummary(M.TS.parseCompare(FS.compare.body), true)));
+  // the same rows: collapsed, a button with aria-expanded
+  assert.match(html, /<button type="button" class="diag-btn cfg-btn tm-same" aria-expanded="false">Unverändertes zeigen \(1\)<\/button>/);
+  assert.equal(count(html, 'tm-crow--same'), 0);
+  const open = compareHtml(cmpView('compare'), { showSame: { [RS1]: true } });
+  assert.equal(count(open, 'tm-crow--same'), 1);
+  assert.ok(open.includes('aria-expanded="true">Unverändertes ausblenden'));
+  // unknown cells are muted and never carry the warning of a change
+  for (const m of html.matchAll(/<div class="tm-crow tm-crow--unknown"[\s\S]*?<\/div>/g)) {
+    assert.ok(!m[0].includes('geändert'));
+    assert.ok(m[0].includes('tm-value--unknown'));
+  }
+  // events in between with the jump into the timeline
+  assert.ok(t.includes('4 Ereignisse'));
+  assert.match(html, /tm-show">In der Zeitleiste zeigen/);
+  assert.ok(html.includes(`>${M.TS.SECTION_COMPARE_INCIDENTS}</h3>`) && html.includes(`>${M.TS.SECTION_COMPARE_CONFIG}</h3>`));
+  assert.ok(!t.includes(M.TS.NOTHING_CHANGED));
+  assert.ok(!PRIVATE.test(t));
+});
+
+test('compare: quiet, one side unknown, a user, refused pairs at their field, off', () => {
+  const quiet = text(compareHtml(cmpView('compare_quiet')));
+  assert.ok(!quiet.includes(M.TS.NOTHING_CHANGED));
+  assert.ok(quiet.includes('Keine bekannte Änderung'));
+  const one = compareHtml(cmpView('compare_one_unknown'));
+  assert.match(one, /class="cfg-notice cfg-notice--warn tm-sides" role="note"/);
+  assert.ok(text(one).includes(`„Von“: ${M.TS.globalReasonText('not_recorded')}`));
+  assert.equal(count(one, '>geändert</span>'), 0);
+  const user = compareHtml(cmpView('compare_user'), { isAdmin: false });
+  assert.ok(!user.includes('role="rowheader">Clients<') && !user.includes(`>${M.TS.SECTION_COMPARE_CONFIG}</h3>`));
+  assert.ok(!/tmc_[0-9a-f]{16}/.test(user));
+  const empty = compareHtml(cmpView(null, { error: errS('compare_empty') }));
+  assert.match(empty, /<span class="tm-field__error" role="alert">„Bis“ muss nach „Von“ liegen\.<\/span>/);
+  assert.ok(!empty.includes('role="table"'));
+  const big = compareHtml(cmpView(null, { error: errS('compare_too_large') }));
+  assert.match(big, /Von<\/span><input[^>]*\/?><span class="tm-field__error" role="alert">Zwischen „Von“ und „Bis“ liegen höchstens 14 Tage\.</);
+  assert.ok(text(compareHtml(cmpView('compare_off'))).includes(M.OFF_TITLE));
+  assert.match(text(compareHtml(cmpView(null))), /Von Bis Schnellwahl/);
+  // the honest sentence: both known, nothing differs, nothing happened
+  const b = structuredClone(FS.compare_quiet.body);
+  for (const r of b.changes.routers) {
+    r.role.state = 'same'; r.uplink.state = 'same'; r.radios = [];
+    for (const k of ['reachable', 'role', 'uplink']) { r[k].reason = null; r[k].before ??= r[k].after; }
+  }
+  b.changes.marks = { count: 0, by_group: {} };
+  const honest = text(compareHtml(cmpView(b)));
+  assert.ok(honest.includes(M.TS.NOTHING_CHANGED), honest);
+});
+
+test('timeline: the own window as "Fenster: …" with × back to 24 Stunden; the client filter for administrators only', () => {
+  const filters = { ...M.DEFAULT_FILTERS, window: M.CUSTOM_WINDOW, custom: { from: 1800000000, until: 1800003600 }, client: 'tmc_f3e24c9bafa1ce4d' };
+  let changed = null;
+  const html = screenC(loadedC('timeline'), { filters, isAdmin: true, onFilters: f => { changed = f; } });
+  assert.ok(text(html).includes(M.customWindowText(filters.custom)));
+  assert.match(html, /class="tm-own"/);
+  assert.match(html, /aria-label="Eigenes Fenster schließen, zurück zu 24 Stunden"/);
+  // the client select and the filter buttons on client labels
+  assert.match(html, /<select[^>]*>[\s\S]*?<option value="">Alle Clients<\/option>/);
+  assert.ok(html.includes('tm-client--filter'));
+  assert.match(html, /aria-label="Zeitleiste nach [^"]+ filtern"/);
+  assert.equal(changed, null);
+  // a user: neither the select nor a filter button
+  const user = screenC(loadedC('timeline_user'), { filters: M.DEFAULT_FILTERS });
+  assert.ok(!user.includes('Alle Clients'));
+  assert.ok(!user.includes('tm-client--filter'));
+  // an administrator without the custom window: the four windows as before, no "Fenster:"
+  const plain = screenC(loadedC('timeline'), { isAdmin: true });
+  assert.ok(!plain.includes('tm-own'));
+  assert.ok(plain.includes('tm-client--filter'));
+});
+
+test('export: the button, the confirmation in the tab with the exact text, the cut and the refusal', () => {
+  const on = { ask: noop, confirm: noop, cancel: noop, next: noop };
+  const idle = screenC(loadedC('timeline'), { isAdmin: true, exportState: M.EXPORT_INIT, onExport: on });
+  assert.match(idle, /<div class="tm-export"><button type="button" class="diag-btn cfg-btn">Exportieren<\/button><\/div>/);
+  const ask = screenC(loadedC('timeline'), { isAdmin: true, exportState: { ...M.EXPORT_INIT, confirm: true }, onExport: on });
+  assert.match(ask, /role="alertdialog" aria-label="Export bestätigen"/);
+  assert.ok(text(ask).includes(text(M.TS.EXPORT_CONFIRM_TEXT)));
+  assert.match(text(ask), /Exportieren Abbrechen/);
+  const cut = screenC(loadedC('timeline'), {
+    isAdmin: true, exportState: { ...M.EXPORT_INIT, saved: 1, next: { query: qOf({ from: 1, until: 2 }), cursor: FS.export_cut.body.next_cursor } }, onExport: on,
+  });
+  assert.ok(text(cut).includes('Weitere Seite exportieren'));
+  assert.ok(text(cut).includes('Seite 1 gespeichert.'));
+  const refused = screenC(loadedC('timeline'), { isAdmin: true, exportState: { ...M.EXPORT_INIT, error: errS('export_refused') }, onExport: on });
+  assert.ok(text(refused).includes('Export nicht möglich: Das Audit-Protokoll ist nicht verfügbar.'));
+  // a user never sees the export
+  assert.ok(!screenC(loadedC('timeline_user'), { exportState: M.EXPORT_INIT, onExport: on }).includes('tm-export'));
+});
+
+test('the containers of the new views render their first state without touching the network', () => {
+  let asked = 0;
+  const api = { timeline: () => new Promise(noop), state: () => { asked++; return new Promise(noop); }, compare: () => { asked++; return new Promise(noop); } };
+  const st = renderToStaticMarkup(h(M.StateContainer, { api, active: true, isAdmin: true, onShowWindow: noop }));
+  assert.ok(st.includes('type="datetime-local"'));
+  assert.equal(renderToStaticMarkup(h(M.StateContainer, { api, active: false, onShowWindow: noop })), '');
+  const cmp = renderToStaticMarkup(h(M.CompareContainer, { api, active: true, onShowWindow: noop }));
+  assert.equal(count(cmp, 'type="datetime-local"'), 2);
+  assert.equal(asked, 0);
+  // the tab mounts only the timeline at first: the other views are not even rendered
+  const tab = renderToStaticMarkup(h(M.TimeMachineView, { api, isAdmin: true }));
+  assert.ok(!tab.includes('datetime-local'));
+});
+
+// ── foreign tabs: an entry selects, without one they start as before ────
+
+test('registry entries: only for an available tab, read by that tab only, cleared after reading', () => {
+  M.bindSecurityHass(() => ({ callApi: async () => ({}), user: { is_admin: true } }));
+  assert.equal(M.isEnterpriseTabAvailable('nope'), false);
+  assert.equal(M.openEnterpriseTab({ tab: 'nope', objectType: null, objectId: null, versionId: null, routerId: null }), false);
+  assert.equal(M.peekEnterpriseEntry('nope'), null);
+  const seen = [];
+  const off = M.onEnterpriseOpen(e => seen.push(e.tab));
+  assert.equal(M.openEnterpriseTab({ tab: 'security', objectType: 'incident', objectId: 'inc_7', versionId: null, routerId: null }), true);
+  assert.deepEqual(seen, ['security']);
+  assert.equal(M.peekEnterpriseEntry('config'), null);
+  assert.equal(M.entryIncident(M.peekEnterpriseEntry('security')), 'inc_7');
+  M.clearEnterpriseEntry('config');
+  assert.ok(M.peekEnterpriseEntry('security'));
+  M.clearEnterpriseEntry('security');
+  assert.equal(M.peekEnterpriseEntry('security'), null);
+  off();
+  M.openEnterpriseTab({ tab: 'security', objectType: null, objectId: null, versionId: null, routerId: null });
+  assert.deepEqual(seen, ['security']);
+  M.clearEnterpriseEntry('security');
+  // the readers: nothing without an entry or with another object
+  assert.equal(M.entryIncident(null), null);
+  assert.equal(M.entryIncident({ tab: 'security', objectType: 'timeline', objectId: 'x', versionId: null, routerId: null }), null);
+  assert.equal(M.entryRouter(null), null);
+  assert.equal(M.entryRouter({ tab: 'config', objectType: 'version', objectId: BKP, versionId: BKP, routerId: RS1 }), RS1);
+});
+
+test('Security Center and configuration start exactly as before without an entry or with one for another tab', () => {
+  const pending = () => new Promise(noop);
+  const secApi = new Proxy({}, { get: () => pending });
+  const cfgApi = new Proxy({}, { get: () => pending });
+  const sec = () => renderToStaticMarkup(h(M.SecurityCenterView, { api: secApi, isAdmin: () => true }));
+  const cfg = () => renderToStaticMarkup(h(M.ConfigManagerView, { api: cfgApi }));
+  const secBase = sec();
+  const cfgBase = cfg();
+  assert.ok(secBase.length > 0 && cfgBase.length > 0);
+  // an entry for another tab changes nothing here
+  M.bindConfigHass(() => ({ callApi: async () => ({}), user: { is_admin: true } }));
+  assert.ok(M.openEnterpriseTab({ tab: 'config', objectType: 'version', objectId: BKP, versionId: BKP, routerId: RS1 }));
+  assert.equal(sec(), secBase);
+  const cfgEntry = cfg();
+  M.clearEnterpriseEntry('config');
+  assert.equal(cfg(), cfgBase);
+  // before its overview has loaded the configuration tab looks the same with or without an entry:
+  // the router is selected in its first state (entryRouter, above), shown once the overview is there
+  assert.equal(cfgEntry, cfgBase);
+  assert.ok(M.openEnterpriseTab({ tab: 'security', objectType: 'incident', objectId: 'inc_7', versionId: null, routerId: null }));
+  assert.equal(cfg(), cfgBase);
+  const secEntry = sec();
+  M.clearEnterpriseEntry('security');
+  assert.equal(sec(), secBase);
+  // the same before the overview has loaded (a skeleton); the incident is in the first state (entryIncident)
+  assert.equal(secEntry, secBase);
+  // the Enterprise container: without an entry the first tab, as before
+  const ent = renderToStaticMarkup(h(M.EnterpriseView));
+  const first = M.getEnterpriseTabs()[0];
+  assert.match(ent, new RegExp(`aria-selected="true"[^>]*>${first.title}<`));
+});
+
+test('the four-chip view switch: two rows of two at 360 px (40 px), one row at 768 and 1280 px (32 px)', () => {
+  const rules = loadRules();
+  const html = renderToStaticMarkup(h(M.ViewSwitch, { view: 'state', onView: noop, isAdmin: true }));
+  const tree = parseHtml(html);
+  const views = tree.children[0];
+  assert.ok(views.classes.includes('tm-views'));
+  const chips = views.children;
+  assert.equal(chips.length, 4);
+  assert.deepEqual(chips.map(c => c.tag), ['button', 'button', 'button', 'button']);
+  // the row wraps, with a gap of 6 px: 2 × (50 % − 3 px) + 6 px = 100 %, so exactly two per row
+  for (const width of [360, 768, 1280]) {
+    const row = computed(rules, views, width);
+    assert.equal(row['flex-wrap'].val, 'wrap', `${width}`);
+    assert.equal(row.gap.val, '6px', `${width}`);
+  }
+  for (const c of chips) {
+    const narrow = computed(rules, c, 360);
+    assert.equal(narrow['flex-basis'].val, 'calc(50% - 3px)');
+    assert.equal(narrow['flex-grow'].val, '1');
+    assert.equal(narrow['min-height'].val, '40px');
+    assert.equal(narrow['box-sizing'].val, 'border-box');
+    for (const width of [768, 1280]) {
+      const wide = computed(rules, c, width);
+      // no forced share of the row: the chips sit side by side at their own width
+      assert.ok(!wide['flex-basis'] || wide['flex-basis'].val === 'auto', `${width}: ${wide['flex-basis']?.val}`);
+      assert.equal(wide['min-height'].val, '32px', `${width}`);
+    }
+  }
+  // a user: three chips, the same rules (the last one alone in its row at 360 px, full width)
+  const user = parseHtml(renderToStaticMarkup(h(M.ViewSwitch, { view: 'state', onView: noop, isAdmin: false })));
+  assert.equal(user.children[0].children.length, 3);
+});
+
+test('the new views sit in their size containers: cards, client rows and compare tables', () => {
+  const rules = loadRules();
+  for (const name of ['tmstate', 'tmclients', 'tmcompare']) assert.ok(rules.some(r => r.container === name), name);
+  const screens = everyScreen();
+  const all = (el, cls, out = []) => { if (el.classes.includes(cls)) out.push(el); el.children.forEach(c => all(c, cls, out)); return out; };
+  const up = (el, cls) => { for (let a = el.parent; a; a = a.parent) if (a.classes.includes(cls)) return a; return null; };
+  const st = parseHtml(screens.stateKnown);
+  const cards = all(st, 'tm-card');
+  assert.equal(cards.length, 2);
+  for (const c of cards) assert.ok(up(c, 'tm-state'));
+  const rows = all(st, 'tm-client-row');
+  assert.equal(rows.length, 2);
+  for (const r of rows) assert.ok(up(r, 'tm-clients'));
+  const cmp = parseHtml(screens.compare);
+  const tables = all(cmp, 'tm-ctable');
+  assert.equal(tables.length, 2);
+  for (const t of tables) assert.ok(up(t, 'tm-compare'));
+  // the intervals of "Zustand" are marks: inside .tm-timeline (tmlist)
+  for (const m of all(st, 'tm-mark')) assert.ok(up(m, 'tm-timeline'));
+  // the screens of the new views are part of the structural checks above
+  for (const k of ['stateKnown', 'stateUser', 'stateNotRecorded', 'compare', 'compareOne', 'timelineCustom', 'timelineExportCut']) assert.ok(k in screens, k);
 });

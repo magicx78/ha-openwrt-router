@@ -436,3 +436,131 @@ export const PARAM_ONE: Record<string, string> = {
   'blips': '1 kurzer Aussetzer',
   'deleted': '1 gelöscht',
 };
+
+// ── 1.52.0: state at a moment, comparison, jumps ─────────────────────────
+
+/**
+ * Why nothing at a moment is known (`unknown_reason` of a `known: false`
+ * answer, tm_state.Snapshot.global_reason). Whole sentences after
+ * "Für diesen Zeitpunkt ist kein Zustand bekannt.". Checked against the
+ * backend by tests/test_tm_panel_texts_v1520.py.
+ */
+export const GLOBAL_REASON_TEXT: Record<string, string> = {
+  'ha_gap': 'Home Assistant lief zu dieser Zeit nicht.',
+  'observation_gap': 'Die Router wurden zu dieser Zeit nicht beobachtet.',
+  'not_recorded': 'Zu dieser Zeit wurde noch nicht aufgezeichnet.',
+  'beyond_retention': 'Der Zeitpunkt liegt außerhalb der Aufbewahrung von 14 Tagen.',
+  'evicted': 'Die Aufzeichnung zu dieser Zeit wurde verdrängt.',
+};
+
+/**
+ * Why one value or part is unknown or incomplete (`reason` next to a value,
+ * a radio, a part or an incident; tm_state.UNKNOWN_REASONS and the part
+ * reasons). Shown muted after "unbekannt" (or "aus", "unvollständig").
+ */
+export const STATE_REASON_TEXT: Record<string, string> = {
+  'beyond_retention': 'außerhalb der Aufbewahrung',
+  'not_recorded': 'nicht aufgezeichnet',
+  'ha_gap': 'Home Assistant lief nicht',
+  'observation_gap': 'nicht beobachtet',
+  'evicted': 'Aufzeichnung verdrängt',
+  'not_observed': 'noch kein Wert beobachtet',
+  'router_down': 'Router nicht erreichbar',
+  'lan_down': 'LAN nicht erreichbar',
+  'ambiguous_radio': 'Funk nicht eindeutig zuzuordnen',
+  'inconsistent': 'Aufzeichnung widersprüchlich',
+  'settling': 'Wechsel noch nicht gefestigt',
+  'flapping': 'ein Client wechselte sehr oft, Sitzungen zusammengefasst',
+  'reopened_since': 'seitdem wieder geöffnet, früherer Zustand verloren',
+  'source_pruned': 'ältere Vorfälle nicht mehr gespeichert',
+  'cut': 'gekürzt',
+  'unreadable': 'nicht lesbar',
+  'module_off': 'Modul aus',
+  'not_running': 'Modul nicht eingerichtet',
+  'not_loaded': 'Daten noch nicht geladen',
+  'admin_only': 'nur für Administratoren',
+  'clients_off': 'Client-Verläufe ausgeschaltet',
+  'timeout': 'Zeitüberschreitung',
+  'error': 'Fehler',
+  'bad_format': 'unerwartetes Format',
+};
+
+/** State of a part of the state (shown as a word, never as colour alone). */
+export const PART_STATE_TEXT: Record<string, string> = {
+  'ok': 'gelesen',
+  'partial': 'unvollständig',
+  'unknown': 'unbekannt',
+  'off': 'aus',
+  'unreadable': 'nicht lesbar',
+};
+
+/** Role of a router in the mesh (`role.value`). */
+export const ROLE_TEXT: Record<string, string> = {
+  'gateway': 'Gateway',
+  'node': 'Mesh-Knoten',
+};
+
+/** Radio state at a moment (`radios.items[].state`). */
+export const RADIO_STATE_TEXT: Record<string, string> = {
+  'up': 'an',
+  'down': 'aus',
+  'unknown': 'unbekannt',
+};
+
+/** Band names of the radios (`band` of a radio item and of the utilization, channel_plan.BAND_*). */
+export const RADIO_BAND_TEXT: Record<string, string> = {
+  '2.4g': '2,4 GHz',
+  '5g': '5 GHz',
+  '6g': '6 GHz',
+};
+
+/** Names of the Enterprise tabs a jump opens (the panel's tab ids, tm_sources.TAB_*). */
+export const JUMP_TAB_TEXT: Record<string, string> = {
+  'config': 'Konfiguration',
+  'security': 'Security Center',
+  'diagnostics': 'Netzwerkdiagnose',
+  'wifi': 'WiFi Intelligence',
+  'traffic': 'Traffic Analytics',
+  'timemachine': 'Zeitreise',
+};
+
+/**
+ * `<ref.module>.<ref.type>` of a mark -> tab id, `by_kind` (JUMP_KIND_TAB)
+ * or `none` (no Enterprise tab). The panel's copy of tm_sources.JUMP_TARGETS;
+ * tests/test_tm_panel_texts_v1520.py compares both ways.
+ */
+export const JUMP_REF_TAB: Record<string, string> = {
+  'core_audit.event': 'by_kind',
+  'core_audit.drift': 'config',
+  'config_manager.version': 'config',
+  'network_intelligence.event': 'none',
+  'network_intelligence.incident': 'none',
+  'security_center.incident': 'security',
+  'security_center.drift': 'security',
+  'security_center.timeline': 'security',
+  'time_machine.mark': 'timemachine',
+};
+
+/** `kind` of a `core_audit.event` mark -> tab id or `none` (tm_sources.KIND_TABS, KIND_NO_TAB). */
+export const JUMP_KIND_TAB: Record<string, string> = {
+  'config_event': 'config',
+  'config_drift': 'config',
+  'security_incident': 'security',
+  'rf_event': 'wifi',
+  'diag_finding': 'diagnostics',
+  'traffic_anomaly': 'traffic',
+  'registry_event': 'none',
+  'security_event': 'none',
+  'core_event': 'none',
+  'audit_event': 'none',
+};
+
+/** What the object of a target is (tm_sources._OBJECT): only these are selected in their tab. */
+export const JUMP_OBJECT: Record<string, string> = {
+  'core_audit.event': 'audit_event',
+  'core_audit.drift': 'audit_event',
+  'config_manager.version': 'version',
+  'security_center.incident': 'incident',
+  'security_center.drift': 'drift',
+};
+

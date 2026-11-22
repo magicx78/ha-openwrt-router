@@ -79,3 +79,52 @@ export function getEnterpriseTabs(): EnterpriseTab[] {
     .filter(t => (t.isAvailable ? t.isAvailable() : true))
     .sort((a, b) => a.order - b.order || a.title.localeCompare(b.title, 'de'));
 }
+
+// ── Entries from another tab (1.52.0) ────────────────────────────────────
+//
+// A tab may open another one and name an object to select there (the Time
+// Machine's "Im Tab … öffnen"). The entry waits here until the target tab
+// has read it: EnterpriseView switches to `tab`, the target tab reads its
+// first state with peekEnterpriseEntry and clears it with
+// clearEnterpriseEntry in an effect (StrictMode safe). A tab that knows no
+// object only opens. Without an entry every tab starts exactly as before.
+
+export interface EnterpriseEntry {
+  tab: string;
+  objectType: string | null;
+  objectId: string | null;
+  versionId: string | null;
+  routerId: string | null;
+}
+
+let pending: EnterpriseEntry | null = null;
+const openListeners = new Set<(entry: EnterpriseEntry) => void>();
+
+/** True when the tab is registered and available to this user now. */
+export function isEnterpriseTabAvailable(id: string): boolean {
+  return getEnterpriseTabs().some(t => t.id === id);
+}
+
+/** Switch EnterpriseView to `entry.tab` (false and nothing done when that tab is not available). */
+export function openEnterpriseTab(entry: EnterpriseEntry): boolean {
+  if (!isEnterpriseTabAvailable(entry.tab)) return false;
+  pending = { ...entry };
+  for (const listener of [...openListeners]) listener(pending);
+  return true;
+}
+
+/** The entry waiting for `tab` (null: none; the tab starts as always). */
+export function peekEnterpriseEntry(tab: string): EnterpriseEntry | null {
+  return pending && pending.tab === tab ? pending : null;
+}
+
+/** The target tab has read its entry. */
+export function clearEnterpriseEntry(tab: string): void {
+  if (pending && pending.tab === tab) pending = null;
+}
+
+/** EnterpriseView listens here; returns the unsubscribe. */
+export function onEnterpriseOpen(listener: (entry: EnterpriseEntry) => void): () => void {
+  openListeners.add(listener);
+  return () => { openListeners.delete(listener); };
+}

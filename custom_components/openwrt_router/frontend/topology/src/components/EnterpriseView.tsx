@@ -1,15 +1,29 @@
 /**
  * EnterpriseView — container for the Enterprise modules. Renders the
  * registered sub-tabs (see enterprise/registry.ts); no data of its own.
+ * Another tab may switch it with openEnterpriseTab (1.52.0): it then shows
+ * that tab and moves the focus to its button.
  */
 
-import React, { useRef, useState } from 'react';
-import { getEnterpriseTabs } from '../enterprise/registry';
+import React, { useEffect, useRef, useState } from 'react';
+import { getEnterpriseTabs, onEnterpriseOpen } from '../enterprise/registry';
 
 export function EnterpriseView() {
   const tabs = getEnterpriseTabs();
   const [selected, setSelected] = useState<string | null>(null);
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const focusNext = useRef<string | null>(null);
+
+  useEffect(() => onEnterpriseOpen(entry => {
+    focusNext.current = entry.tab;
+    setSelected(entry.tab);
+  }), []);
+  useEffect(() => {
+    if (selected !== null && focusNext.current === selected) {
+      focusNext.current = null;
+      refs.current[selected]?.focus();
+    }
+  }, [selected]);
 
   if (tabs.length === 0) {
     return (

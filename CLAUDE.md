@@ -6,7 +6,7 @@ Home Assistant custom integration für OpenWrt Router via ubus/rpcd JSON-RPC.
 GitHub: https://github.com/magicx78/ha-openwrt-router
 Domain: `openwrt_router`
 HACS: Custom Repository (Ziel: Default Store)
-Stand: Version 1.51.0 (2026-11-21)
+Stand: Version 1.52.0 (2026-11-22)
 
 ## Projektstruktur
 
@@ -62,7 +62,7 @@ ha-openwrt-router/
 │   ├── test_wifi_switch_ids_v1492.py   # rpcd-getreues Router-Modell + Aufrufliste 1.47.1
 │   ├── test_unique_ids_snapshot_v1494.py  # 130 unique_ids eines Gateways (Grenzen im Docstring)
 │   ├── full_router_kit.py      # Gateway-Modell: volle ubus-Poll-Daten + rpcd-getreues WLAN
-│   └── …                       # rund 9 070 Tests (1.51.0)
+│   └── …                       # rund 9 180 Tests (1.52.0)
 ├── scripts/                    # mock_router.py, dev_start.py, _dev_rss_sample.sh, …
 ├── .github/workflows/
 │   ├── hassfest.yaml           # HA manifest validation

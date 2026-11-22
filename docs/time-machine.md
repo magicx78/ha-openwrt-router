@@ -1098,8 +1098,8 @@ Dienst-Registry: keines, beide, leeres Feld, nur `mac`, nur `client`, ungültige
 Das Panel ist mit 1.51.0 nachgezogen (Abschnitt 14.3, `_PANEL_VERSION` `20261121-timemachine5`).
 Es liest nur die Routen `timeline` und `sessions` und fügt nichts hinzu. Offen für eine spätere
 Version: Bedienelemente für die Aktionen aus Abschnitt 18. „Zustand zum Zeitpunkt“,
-Vergleich, Export und Sprünge über `ref` hat das Backend seit den Phasen D bis F
-(Abschnitte 20 bis 23); das Panel nutzt sie noch nicht.
+Vergleich, Export und Sprünge über `ref` (Phasen D bis F, Abschnitte 20 bis 23) nutzt das
+Panel seit 1.52.0 (Abschnitt 25).
 
 ## 20. Phase D: Zustand zum Zeitpunkt
 
@@ -1424,4 +1424,119 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
   laufende Konfiguration.
 - Kein WAN-Zustand zum Zeitpunkt (der eigene Verlauf hält ihn nicht).
 - Der Export enthält keine Client-Verläufe.
-- Das Panel nutzt die Routen noch nicht (kein Frontend in diesem Schritt).
+- Panel: Abschnitt 25.
+
+## 25. Panel für D bis F (1.52.0)
+
+`_PANEL_VERSION` `20261122-timemachine6`. Das Panel liest die Routen `timeline`, `sessions`,
+`state`, `compare` und `export` und fügt nichts hinzu. Dateien unter
+`frontend/topology/src/enterprise/timemachine/`: `tmState.ts` (Zerlegen der Antworten,
+Reducer, Texte und Werte in Worten, Vergleichszeilen, Sprungziele; ohne React),
+`TimeMachineState.tsx` (Ansichten „Zustand“ und „Vergleich“ mit ihren Containern), `tmUi.tsx`
+(gemeinsame Teile: Rahmen, Fehlerkasten, Marke, Client-Kürzel, Sprung-Schaltfläche, Kontexte
+für Sprung und Client-Filter), `TimeMachineView.tsx` (Zeitleiste, Sitzungen, Umschalter,
+Export), Texttabellen in `tmTexts.ts`.
+
+### 25.1 Umschalter
+
+„Zeitleiste | Zustand | Vergleich | Client-Sitzungen“; Client-Sitzungen nur für
+Administratoren (`hass.user.is_admin`). Eine Ansicht wird erst beim ersten Öffnen eingehängt,
+lädt nur, solange sie sichtbar ist, und behält ihren Zustand beim Umschalten. Bei 360 px zwei
+Reihen mit je zwei Chips (`flex: 1 1 calc(50% - 3px)`, 40 px hoch), bei 768 und 1280 px eine
+Reihe (32 px). Test: `tmRender.test.mjs`, „the four-chip view switch …“.
+
+### 25.2 Zustand
+
+Feld `datetime-local` (Ortszeit, Sekunden, Vorgabe jetzt), „Jetzt“, „−1 h“, „−24 h“,
+Router-Auswahl. Eine Eingabe lädt nach 400 ms; bei „Jetzt“ fragt die Ansicht `at = jetzt − 1 s`
+(keine Zukunft durch eine Uhrabweichung) und lädt höchstens alle 60 s neu, solange die Seite
+sichtbar ist. Antworten einer älteren Abfrage werden verworfen.
+
+- `known: false`: nur ein Kasten „Für diesen Zeitpunkt ist kein Zustand bekannt.“ mit dem
+  Satz zum Grund (`GLOBAL_REASON_TEXT`), keine Router-Karten.
+- Router-Karten: Erreichbar, Rolle, Uplink, Funk. Ein Wert mit `reason` ist „unbekannt“ mit
+  dem Grund (`STATE_REASON_TEXT`), gedämpft und ohne Farbe; ein Wert, den der Server trotz
+  Grund schickt, wird verworfen. „nicht erreichbar“ in Warnfarbe und als Wort, `derived`
+  mit dem Abzeichen „abgeleitet“ (Tooltip). Uplink `null` heißt „kein vorgeschalteter Router“.
+- Abschnitte: laufende Ausfälle und Lücken (Marken wie in der Zeitleiste), offene Vorfälle,
+  Verkehr und Funkauslastung der Stunde (WAN-Gründe ohne eigenen Text: „keine Messwerte in
+  dieser Stunde“), für Administratoren Konfigurationsversionen und verbundene Clients (Zahl
+  je Router, Zeilen mit Client, Router, Band und „seit“, „Weitere laden“ mit
+  `clients_cursor` und demselben `at`). Nicht-Admins fragen nie nach `clients_cursor`.
+- Fehler in Worten, die 400-Fehler von `at` am Feld.
+- „In der Zeitleiste zeigen“: Zeitleiste mit eigenem Fenster `at ± 30 min` (obere Grenze
+  höchstens jetzt + 1 s).
+
+### 25.3 Vergleich
+
+„Von“/„Bis“ (Vorgabe: die letzten 24 Stunden), Schnellwahl, Router-Auswahl; kein
+automatisches Nachladen. Fehler von `t1`, `t2` und dem Fenster (leer, mehr als 14 Tage) am
+Feld. Je Router eine Tabelle „Merkmal | Vorher | Nachher“ (`role="table"`), unter 560 px
+Breite der Liste Karten. `changed` mit „geändert“, Clients zusätzlich „von 2 auf 1 (−1)“,
+`same` hinter „Unverändertes zeigen (n)“, `unknown` ohne Farbe mit Grund. Ist eine Seite
+`known: false`, ein Hinweisband mit ihrem Grund, und die davon abhängigen Zeilen sind
+unbekannt. Darunter „Ereignisse dazwischen“ (Zahl je Art, „In der Zeitleiste zeigen“ mit
+dem Fenster `t1`–`t2`, höchstens 14 Tage), Vorfälle, für Administratoren
+Konfigurationsänderungen (gezählt werden Versionen; das Backend liefert keine Zahl geänderter
+Einstellungen). Zusammenfassung: „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ nur,
+wenn beide Seiten bekannt sind, kein Merkmal unbekannt oder geändert ist und dazwischen keine
+Marke, kein Vorfall und keine Version liegt; sonst „Die Zustände zu beiden Zeitpunkten sind
+gleich; dazwischen gab es Ereignisse.“, „n Merkmale haben sich geändert.“ oder „Keine
+bekannte Änderung; n Merkmale sind zu einem der Zeitpunkte unbekannt.“
+
+### 25.4 Zeitleiste: eigenes Fenster, Client-Filter, Export
+
+- Fünfter Fensterzustand „Eigenes Fenster“, angezeigt als „Fenster: TT.MM. HH:MM – HH:MM“
+  (über Mitternacht mit beiden Daten) mit „×“ zurück zu 24 Stunden; kein automatisches
+  Nachladen.
+- Client-Filter (nur Administratoren): Auswahlfeld „Client“ aus den Clients der geladenen
+  Marken, sendet `client=tmc_…`; ein Klick auf ein Client-Kürzel setzt den Filter. Für
+  Nicht-Admins wird ein gesetzter Filter nie gesendet (`askedFilters`).
+- Export (nur Administratoren): „Exportieren“, dann die Bestätigung im Tab
+  (`role="alertdialog"`) mit dem Satz „Der Export enthält die Marken des gewählten
+  Zeitfensters ohne Namen und ohne Client-Verläufe. Er wird im Audit-Protokoll vermerkt.“
+  Die Antwort wird über den vorhandenen Fetch mit Bearer-Kopfzeile geladen und als Blob
+  gespeichert (`openwrt-router-time-machine.json`, weitere Seiten `…-2.json` usw.); kein
+  Token in einer URL. Gleiches Fenster und gleiche Filter wie die Zeitleiste, aber ohne
+  `spans` und `client` (die Route lehnt beide ab). Bei `truncated` „Weitere Seite
+  exportieren“ mit `cursor`. 503 `audit_unavailable`: „Export nicht möglich: Das
+  Audit-Protokoll ist nicht verfügbar.“; 403 und 5xx wie sonst.
+
+### 25.5 Sprünge
+
+Die Schaltfläche „Im Tab <Name> öffnen →“ steht an Marken (aus `ref` und `kind`, Tabelle
+Abschnitt 23, Kopie in `tmTexts.ts`: `JUMP_REF_TAB`, `JUMP_KIND_TAB`, `JUMP_OBJECT`) und an
+Vorfällen und Versionen von `/state` und `/compare` (aus `target`, geprüft: bekannter Tab,
+Kennungen nach ihrem Muster). Keine Schaltfläche ohne Ziel, für die Zeitreise selbst oder für
+einen Tab, den der Benutzer nicht hat (`isEnterpriseTabAvailable`). Der Sprung geht über die
+Registry (`openEnterpriseTab`): `EnterpriseView` wechselt den Tab und setzt den Fokus auf
+dessen Reiter; das Ziel liest seinen Anfangszustand mit `peekEnterpriseEntry` und löscht den
+Eintrag mit `clearEnterpriseEntry`.
+
+| Ziel-Tab | Wirkung |
+|---|---|
+| Security Center | wählt den Vorfall (`object_type` `incident`); Drift und Zeitleiste öffnen nur den Tab |
+| Konfiguration | wählt den Router der Version (nicht die Version) |
+| WiFi Intelligence, Netzwerkdiagnose, Traffic Analytics | öffnen nur den Tab |
+| Topologie | kein Link: die Topologie kennt die Kennungen `rtr_…` nicht |
+
+Ohne Eintrag starten Security Center und Konfiguration wie vorher (Test, auch mit einem
+Eintrag für einen anderen Tab). Python-Test `test_tm_panel_texts_v1520.py`: jede Tabelle des
+Panels gegen `JUMP_TARGETS`, `KIND_TABS`, `KIND_NO_TAB` und `_OBJECT` in beiden Richtungen,
+jeder Tab ein registrierter Panel-Tab mit gleichem Titel, jeder Grund und Zustand mit Text.
+
+### 25.6 Lange Namen
+
+In schmalen Spalten brechen Namen ohne Leerzeichen zwischen Buchstaben um. In Zeilen
+(Zeitleiste, Block, Sitzungen, Clients des Zustands) stehen Router- und Client-Namen auf
+höchstens zwei Zeilen, der volle Name im `title`; in Karten ganz.
+
+### 25.7 Testdaten und Tests
+
+`tmFixtureState.json` sind echte Antworten der Routen (Admin und Benutzer), geschrieben von
+`tests/test_tm_panel_fixture_v1520.py` (neu erzeugen mit `TM_WRITE_FIXTURE=1`). JS-Tests:
+`tmState.test.mjs` (Logik und Client mit nachgebildetem Fetch), `tmRender.test.mjs`
+(Darstellung aller Zustände beider Rollen, Sprünge, fremde Tabs, die zwei strukturellen
+Stiltests über alle Bildschirme der neuen Ansichten), `tmLayout.test.mjs`.
+
+**Nicht geprüft:** in einem Browser und in einer echten Instanz.

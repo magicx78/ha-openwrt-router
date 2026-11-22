@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(join(here, 'timemachine.css'), 'utf8');
-const tsx = readFileSync(join(here, 'TimeMachineView.tsx'), 'utf8');
+// the markup of the tab: the views and their shared pieces (tmUi.tsx, 1.52.0), the timeline first
+const TSX_FILES = ['TimeMachineView.tsx', 'tmUi.tsx', 'TimeMachineState.tsx'];
+const tsx = TSX_FILES.map(f => readFileSync(join(here, f), 'utf8')).join('\n');
 const wifiCss = readFileSync(join(here, '../wifi/wifi.css'), 'utf8');
 const cfgCss = readFileSync(join(here, '../config/config.css'), 'utf8');
 const panelCss = readFileSync(join(here, '../../topology.css'), 'utf8');
@@ -119,7 +121,7 @@ test('on phones the chips centre their text', () => {
 });
 
 test('text only: no innerHTML anywhere in the tab', () => {
-  for (const f of ['TimeMachineView.tsx', 'tmLogic.ts', 'tmApi.ts', 'register.ts']) {
+  for (const f of [...TSX_FILES, 'tmLogic.ts', 'tmState.ts', 'tmApi.ts', 'register.ts']) {
     const src = readFileSync(join(here, f), 'utf8');
     assert.doesNotMatch(src, /dangerouslySetInnerHTML|innerHTML|insertAdjacentHTML/, f);
   }

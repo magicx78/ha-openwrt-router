@@ -1,6 +1,9 @@
 /**
- * tmApi.ts — client of GET /api/openwrt_router/enterprise/timemachine/timeline
- * and …/sessions (client sessions, administrators only; 403 for others).
+ * tmApi.ts — client of GET /api/openwrt_router/enterprise/timemachine/timeline,
+ * …/sessions (client sessions, administrators only; 403 for others), and
+ * since 1.52.0 …/state, …/compare and …/export (administrators only; the
+ * answer is kept as a Blob and saved as a file, the token never goes into a
+ * URL).
  *
  * Same pattern as trafficApi.ts: Bearer fetch on the same origin (HA's token
  * from hass.auth); a 401 is retried once after a token refresh; without a
@@ -12,8 +15,11 @@
  * (tmLogic.queryString, tmLogic.sessionQueryString).
  */
 
-import { TmApiError, parseSessions, parseTimeline, queryString, sessionQueryString } from './tmLogic.ts';
-import type { SessionQuery, TimelineQuery, TmApi, TmHass } from './tmTypes';
+import {
+  TmApiError, cursorOf, exportQueryString, parseSessions, parseTimeline, queryString, sessionQueryString,
+} from './tmLogic.ts';
+import { compareQueryString, parseCompare, parseState, stateQueryString } from './tmState.ts';
+import type { CompareQuery, ExportFile, SessionQuery, StateQuery, TimelineQuery, TmApi, TmHass } from './tmTypes';
 
 export const TM_BASE = '/api/openwrt_router/enterprise/timemachine';
 const CALL_API_BASE = 'openwrt_router/enterprise/timemachine';
@@ -77,12 +83,13 @@ export function createTmApi(getHass: () => TmHass | null, deps: TmApiDeps = {}):
     });
   }
 
-  async function get(path: string): Promise<unknown> {
+  /** The answer as text (fetch), or the parsed body of hass.callApi (no token). */
+  async function raw(path: string): Promise<{ text: string | null; body: unknown }> {
     const hass = getHass();
     if (!hass) throw new TmApiError(null, 'not_connected');
     if (token(hass) === undefined) {
       try {
-        return await hass.callApi<unknown>('GET', `${CALL_API_BASE}/${path}`);
+        return { text: null, body: await hass.callApi<unknown>('GET', `${CALL_API_BASE}/${path}`) };
       } catch (err) {
         throw callApiError(err);
       }
@@ -91,11 +98,38 @@ export function createTmApi(getHass: () => TmHass | null, deps: TmApiDeps = {}):
     let response = await send(hass, path);
     if (response.status === 401 && (await refreshToken(hass))) response = await send(hass, path);
     if (!response.ok) throw errorFrom(response.status, await readJson(response));
-    return readJson(response);
+    const text = await response.text();
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    return { text, body };
+  }
+
+  async function get(path: string): Promise<unknown> {
+    return (await raw(path)).body;
+  }
+
+  /** One export page: the server's bytes as a Blob (never shown, never put in a URL with a token). */
+  async function exportFile(q: TimelineQuery, cursor: string | null = null): Promise<ExportFile> {
+    const { text, body } = await raw(`export?${exportQueryString(q, cursor)}`);
+    const b = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const content = text ?? JSON.stringify(body);
+    return {
+      blob: new Blob([content], { type: 'application/json' }),
+      marks: Array.isArray(b.marks) ? b.marks.length : 0,
+      truncated: b.truncated === true,
+      nextCursor: cursorOf(b.next_cursor),
+    };
   }
 
   return {
     timeline: async (q: TimelineQuery) => parseTimeline(await get(`timeline?${queryString(q)}`)),
     sessions: async (q: SessionQuery) => parseSessions(await get(`sessions?${sessionQueryString(q)}`)),
+    state: async (q: StateQuery) => parseState(await get(`state?${stateQueryString(q)}`)),
+    compare: async (q: CompareQuery) => parseCompare(await get(`compare?${compareQueryString(q)}`)),
+    exportFile: (q: TimelineQuery) => exportFile(q, q.cursor),
   };
 }

@@ -27,8 +27,8 @@ import {
   GROUP_TEXT, PARAM_ONE, PARAM_TEXT, REASON_TEXT, SEVERITY_TEXT, SOURCE_TEXT, STATE_TEXT, TITLE_TEXT, UNAVAILABLE_TEXT,
 } from './tmTexts.ts';
 import type {
-  EndState, Filters, Mark, Peer, Session, SessionFilters, SessionQuery, SessionsAnswer, Severity, SourceInfo, Timeline,
-  TimelineQuery, Tone,
+  CustomWindow, EndState, Filters, Mark, Peer, Ref, Session, SessionFilters, SessionQuery, SessionsAnswer, Severity,
+  SourceInfo, Timeline, TimelineQuery, Tone,
 } from './tmTypes';
 
 export { DASH, POLL_MIN_MS, pollDelay, shouldFetch };
@@ -84,12 +84,22 @@ export const SEVERITY_FILTERS: readonly { id: Filters['severity']; label: string
   { id: 'critical', label: 'nur kritisch' },
 ];
 
-export const DEFAULT_FILTERS: Filters = { window: DEFAULT_WINDOW, sourcesOff: [], severity: 'all', routerId: null };
+export const DEFAULT_FILTERS: Filters = {
+  window: DEFAULT_WINDOW, sourcesOff: [], severity: 'all', routerId: null, custom: null, client: null,
+};
+/** The fifth window state: set only by a jump from "Zustand" or "Vergleich" (1.52.0). */
+export const CUSTOM_WINDOW = 'custom';
+/** Half of the window around a moment that "In der Zeitleiste zeigen" opens (±30 min). */
+export const AROUND_S = 1800;
+const MAX_WINDOW_S = 14 * 86_400;
 
-const ROUTER_ID_RE = /^rtr_[0-9a-f]{32}$/;
+export const ROUTER_ID_RE = /^rtr_[0-9a-f]{32}$/;
 const KEY_RE = /^[a-z0-9_.]{1,200}$/;
 const MARK_ID_RE = /^tmm_[0-9a-f]{16}$/;
-const CLIENT_RE = /^tmc_[0-9a-f]{16}$/;
+export const CLIENT_RE = /^tmc_[0-9a-f]{16}$/;
+const MODULE_RE = /^[a-z_]{1,40}$/;
+const REF_ID_RE = /^[A-Za-z0-9_:.-]{1,80}$/;
+const VERSION_ID_RE = /^bkp_[0-9a-f]{32}$/;
 /** A position of the server's order (1.51.0): "<ms>" or "<ms>:tmm_<16 hex>". */
 const CURSOR_RE = /^(\d{1,16})(?::(tmm_[0-9a-f]{16}))?$/;
 const END_STATES: readonly EndState[] = ['open', 'closed', 'unknown'];
@@ -148,6 +158,24 @@ export function parseMark(v: unknown): Mark | null {
     clientName: str(m.client_name),
     peers: peersOf(m.peers),
     spansIn: m.spans_in === true,
+    ref: refOf(m.ref),
+  };
+}
+
+/** The `ref` of a mark or item, every part checked (else null). */
+export function refOf(v: unknown): Ref | null {
+  if (!v || typeof v !== 'object') return null;
+  const r = obj(v);
+  const module = str(r.module);
+  if (!module || !MODULE_RE.test(module)) return null;
+  const type = str(r.type);
+  const id = str(r.id);
+  const versionId = str(r.version_id);
+  return {
+    module,
+    type: type && MODULE_RE.test(type) ? type : null,
+    id: id && REF_ID_RE.test(id) ? id : null,
+    versionId: versionId && VERSION_ID_RE.test(versionId) ? versionId : null,
   };
 }
 
@@ -235,18 +263,52 @@ export function windowSeconds(id: string): number {
  * server answers them as `off` without reading. Null when no source is left.
  */
 export function firstQuery(f: Filters, nowMs: number, disabled: readonly string[] = []): TimelineQuery | null {
-  const until = Math.floor(nowMs / 1000) + 1;
+  const custom = f.window === CUSTOM_WINDOW ? f.custom : null;
+  const until = custom ? custom.until : Math.floor(nowMs / 1000) + 1;
   const picked = SOURCE_IDS.filter(s => !f.sourcesOff.includes(s) || disabled.includes(s));
   if (!picked.some(s => !disabled.includes(s))) return null;
   return {
-    from: until - windowSeconds(f.window),
+    from: custom ? custom.from : until - windowSeconds(f.window),
     until,
     sources: picked.length === SOURCE_IDS.length ? null : picked,
     minSeverity: f.severity === 'all' ? null : f.severity,
     routerId: f.routerId && ROUTER_ID_RE.test(f.routerId) ? f.routerId : null,
     spans: true,
     cursor: null,
+    client: f.client && CLIENT_RE.test(f.client) ? f.client : null,
   };
+}
+
+/** What the timeline asks with: a client filter only for administrators (never sent otherwise). */
+export function askedFilters(f: Filters, isAdmin: boolean): Filters {
+  return isAdmin || f.client === null ? f : { ...f, client: null };
+}
+
+/**
+ * The custom window of a jump: `from`–`until` (epoch seconds), the upper end
+ * at most `nowMs` (+1 s, like a first page), at most 14 days, never empty.
+ * Null when nothing of it is left.
+ */
+export function customWindow(from: number, until: number, nowMs: number): CustomWindow | null {
+  if (!Number.isFinite(from) || !Number.isFinite(until)) return null;
+  const top = Math.min(Math.ceil(until), Math.floor(nowMs / 1000) + 1);
+  const low = Math.max(Math.floor(from), top - MAX_WINDOW_S);
+  return low < top ? { from: low, until: top } : null;
+}
+
+/** The ±30 min window around a moment. */
+export function aroundWindow(at: number, nowMs: number): CustomWindow | null {
+  return customWindow(at - AROUND_S, at + AROUND_S, nowMs);
+}
+
+/** "Fenster: 21.11. 13:30 – 14:30" (local time; the date of the end only when it differs). */
+export function customWindowText(c: CustomWindow): string {
+  const a = new Date(c.from * 1000);
+  const b = new Date(c.until * 1000);
+  const day = (d: Date) => `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.`;
+  const hm = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const end = dayKey(a) === dayKey(b) ? hm(b) : `${day(b)} ${hm(b)}`;
+  return `Fenster: ${day(a)} ${hm(a)} – ${end}`;
 }
 
 /**
@@ -272,12 +334,23 @@ export function queryString(q: TimelineQuery): string {
   if (q.minSeverity && SEVERITIES.includes(q.minSeverity)) p.set('min_severity', q.minSeverity);
   if (q.spans) p.set('spans', '1');
   if (q.cursor && CURSOR_RE.test(q.cursor)) p.set('cursor', q.cursor);
+  if (q.client && CLIENT_RE.test(q.client)) p.set('client', q.client);
   return p.toString();
+}
+
+/**
+ * The export of a timeline query (administrators only): the same window and
+ * filters, never `spans` or `client` (the route refuses both; the export has
+ * no client histories). `cursor`: the next page of a cut export.
+ */
+export function exportQueryString(q: TimelineQuery, cursor: string | null = null): string {
+  return queryString({ ...q, spans: false, client: null, cursor: cursor && CURSOR_RE.test(cursor) ? cursor : null });
 }
 
 /** A stable key of what the server is asked (a change starts a new list). */
 export function filterKey(f: Filters): string {
-  return JSON.stringify([f.window, [...f.sourcesOff].sort(), f.severity, f.routerId]);
+  const custom = f.window === CUSTOM_WINDOW && f.custom ? [f.custom.from, f.custom.until] : null;
+  return JSON.stringify([f.window, [...f.sourcesOff].sort(), f.severity, f.routerId, custom, f.client ?? null]);
 }
 
 // ── Marks: order, dedupe, merge ──────────────────────────────────────────
@@ -657,6 +730,11 @@ export function rememberClients(prev: ClientNames, items: readonly { client: str
     }
   }
   return next ?? prev;
+}
+
+/** Clients of loaded marks (the timeline's client filter, administrators only). */
+export function rememberMarkClients(prev: ClientNames, marks: readonly Mark[]): ClientNames {
+  return rememberClients(prev, marks);
 }
 
 export function clientOptions(names: ClientNames): { value: string; label: string }[] {
@@ -1059,28 +1137,67 @@ const FIELD_TEXT: Record<string, string> = {
 };
 
 export interface ErrorInfo {
-  kind: 'forbidden' | 'gone' | 'invalid' | 'failed';
+  kind: 'forbidden' | 'gone' | 'invalid' | 'failed' | 'refused';
   message: string;
   retry: boolean;
+  /** The field the server named (shown next to that field: at, t1, t2, window). */
+  field?: string;
 }
+
+export type ErrorOf = 'timeline' | 'sessions' | 'state' | 'compare' | 'export';
 
 export const FAILED_TEXT = 'Die Zeitleiste konnte nicht geladen werden.';
 export const SESSIONS_FAILED_TEXT = 'Die Client-Sitzungen konnten nicht geladen werden.';
+export const STATE_FAILED_TEXT = 'Der Zustand konnte nicht geladen werden.';
+export const COMPARE_FAILED_TEXT = 'Der Vergleich konnte nicht geladen werden.';
+export const EXPORT_FAILED_TEXT = 'Der Export ist fehlgeschlagen.';
+export const EXPORT_REFUSED_TEXT = 'Export nicht möglich: Das Audit-Protokoll ist nicht verfügbar.';
+const FAILED_OF: Record<ErrorOf, string> = {
+  timeline: FAILED_TEXT, sessions: SESSIONS_FAILED_TEXT, state: STATE_FAILED_TEXT, compare: COMPARE_FAILED_TEXT,
+  export: EXPORT_FAILED_TEXT,
+};
+const FORBIDDEN_OF: Record<ErrorOf, string> = {
+  timeline: 'Keine Berechtigung für die Zeitreise.',
+  sessions: 'Keine Berechtigung für die Client-Sitzungen (nur Administratoren).',
+  state: 'Keine Berechtigung für die Zeitreise.',
+  compare: 'Keine Berechtigung für die Zeitreise.',
+  export: 'Keine Berechtigung für den Export (nur Administratoren).',
+};
+
+/** 400 of …/state and …/compare in plain words, by field and reason (1.52.0). */
+function momentError(field: string | undefined, reason: string | undefined): string | null {
+  switch (field) {
+    case 'at':
+      return reason === 'out_of_range' ? 'Der Zeitpunkt liegt in der Zukunft. Bitte einen früheren wählen.' : 'Ungültiger Zeitpunkt.';
+    case 't1':
+      return reason === 'missing' ? 'Bitte „Von“ angeben.' : reason === 'out_of_range' ? '„Von“ liegt in der Zukunft.' : 'Ungültiger Wert bei „Von“.';
+    case 't2':
+      return reason === 'missing' ? 'Bitte „Bis“ angeben.' : reason === 'out_of_range' ? '„Bis“ liegt in der Zukunft.' : 'Ungültiger Wert bei „Bis“.';
+    case 'window':
+      return reason === 'empty' ? '„Bis“ muss nach „Von“ liegen.'
+        : reason === 'too_large' ? 'Zwischen „Von“ und „Bis“ liegen höchstens 14 Tage.' : 'Ungültiger Zeitraum.';
+    case 'clients_cursor':
+      return 'Die Stelle zum Weiterladen der Clients ist nicht mehr gültig. Bitte „Aktualisieren“.';
+    default:
+      return null;
+  }
+}
 
 /** The message of an error: from status and code only, never the server's text. */
-export function errorInfo(err: unknown, of: 'timeline' | 'sessions' = 'timeline'): ErrorInfo {
-  const failed = of === 'sessions' ? SESSIONS_FAILED_TEXT : FAILED_TEXT;
+export function errorInfo(err: unknown, of: ErrorOf = 'timeline'): ErrorInfo {
+  const failed = FAILED_OF[of];
   if (!(err instanceof TmApiError)) return { kind: 'failed', message: failed, retry: true };
   switch (err.status) {
     case 401:
     case 403:
-      return {
-        kind: 'forbidden',
-        message: of === 'sessions' ? 'Keine Berechtigung für die Client-Sitzungen (nur Administratoren).' : 'Keine Berechtigung für die Zeitreise.',
-        retry: false,
-      };
+      return { kind: 'forbidden', message: FORBIDDEN_OF[of], retry: false };
     case 410:
       return { kind: 'gone', message: 'Die Integration wurde entladen.', retry: false };
+    case 503:
+      if (of === 'export' && err.details.reason === 'audit_unavailable') {
+        return { kind: 'refused', message: EXPORT_REFUSED_TEXT, retry: true };
+      }
+      return { kind: 'failed', message: failed, retry: true };
     case 400: {
       if (err.details.field === 'cursor') {
         // only an older page sends a cursor: the list moved on, a refresh starts it anew
@@ -1091,6 +1208,10 @@ export function errorInfo(err: unknown, of: 'timeline' | 'sessions' = 'timeline'
             : 'Ungültige Stelle zum Weiterblättern. Bitte „Aktualisieren“.',
           retry: false,
         };
+      }
+      if (of === 'state' || of === 'compare') {
+        const text = momentError(err.details.field, err.details.reason);
+        if (text) return { kind: 'invalid', message: text, retry: false, field: err.details.field };
       }
       const field = err.details.field ? FIELD_TEXT[err.details.field] ?? 'unbekannt' : null;
       return { kind: 'invalid', message: `Ungültige Filterkombination.${field ? ` Feld: ${field}.` : ''}`, retry: false };
