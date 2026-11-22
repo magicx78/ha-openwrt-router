@@ -2,6 +2,45 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [Unreleased]
+
+Network Time Machine, Phasen D bis F (nur Backend, das Panel nutzt es noch nicht; Details
+in `docs/time-machine.md` Abschnitte 20 bis 24). Weiterhin standardmäßig aus; ausgeschaltet
+keine Wirkung, kein zusätzlicher Router-Aufruf (Test vergleicht die Aufrufliste zweier Polls
+mit allem an und allem aus).
+
+### Added
+- **Zustand zum Zeitpunkt** `GET …/timemachine/state?at=…`: je Router erreichbar, Rolle,
+  Uplink, Kanal und Breite je Funk, dazu laufende Ausfälle und Lücken, offene NI-Incidents,
+  Stundenwerte von Traffic (WAN) und WiFi RF (je Band), für Administratoren die neueste
+  behaltene Konfigurationsversion und (bei eingeschalteten Client-Verläufen) die Clients je
+  Access Point mit Cursor. Rekonstruiertes trägt `derived: true`, Unsicheres ist
+  ausdrücklich unbekannt mit festem Grund, nie geraten (Zufalls-Orakel-Test).
+- **Vergleich** `GET …/timemachine/compare?t1=…&t2=…`: nur die Unterschiede je Router,
+  Marken dazwischen je Gruppe, geöffnete und gelöste Incidents, Versionen dazwischen.
+- **Export** `GET …/timemachine/export` (nur Administratoren): Marken eines Fensters als
+  JSON-Datei, ohne Namen und ohne Client-Marken, höchstens 5000 je Seite mit Cursor, jeder
+  Export im Audit (`time_machine.exported`), ohne Audit kein Export.
+- **Ein Client über Module**: Audit-Einträge von Security Center, Traffic und WiFi RF werden
+  dem TM-Client zugeordnet, über die prozessinterne Funktion „Pseudonym für MAC“ des jeweiligen
+  Moduls, nie durch Vergleich der `cli_`-Werte.
+- **Sprungziele**: dokumentierte Abbildung `ref.module`/`ref.type` (+ `kind`) → Tab und
+  Objekt; Test, dass jede erzeugte Kombination ein Ziel oder ausdrücklich keines hat.
+
+### Changed
+- Time-Machine-Speicher Version 1.2 (additiv: `seen`, `clients_cov`, `lost`); eine
+  1.51.0-Datei lädt unverändert, die Zeit davor gilt als nicht aufgezeichnet.
+- Traffic und WiFi RF: neue reine Lesefunktionen `window_at` und `client_ref_for_mac`,
+  Security Center: `client_ref_for_mac` (Test: gleiche Ausgaben und Zustände mit und ohne
+  Aufruf).
+- Fehler in einer Time-Machine-Route werden nur noch mit Typ und Datei:Zeile geloggt, ohne
+  Traceback (dessen Meldung könnte Daten tragen).
+- Audit-Einträge der Art `security_event` führen in keinen Tab mehr (vorher Security).
+
+### Fixed
+- Ein `min_severity`-Filter entfernt nicht mehr beide Einträge eines Ereignisses (eigene
+  Marke und NI-Doppel); Test mit einem echten NI-Ereignis der Doppel-Regel.
+
 ## [1.51.0] - 2026-11-21
 
 Network Time Machine, Phasen B und C: Die Zeitreise hat einen **eigenen Verlauf, der

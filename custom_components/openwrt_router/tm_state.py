@@ -325,6 +325,7 @@ class Snapshot:
         self.fleet_gaps: list[Mark] = []
         self.flapping: list[Mark] = []
         self.sessions: list[Mark] = []
+        self.client_marks: list[Mark] = []
         self.intervals: list[Mark] = []
         self.own: list[Mark] = []
         self.routers: set[str] = set(self.seen)
@@ -337,6 +338,7 @@ class Snapshot:
     def _take(self, mark: Mark) -> None:
         kind, rid = mark.kind, mark.router
         if mark.client is not None:
+            self.client_marks.append(mark)
             if kind == "client_session":
                 self.sessions.append(mark)
             elif kind == "client_flapping":
@@ -436,6 +438,9 @@ class Snapshot:
         if seg.radios_at < self.now - RETENTION_S:
             # marks after the base may be pruned already (engine: REBASE_S)
             return _radio_block(None, R_BEYOND_RETENTION), 0
+        if seg.radios_at < self.lost.get(QUOTA_INFRA, -math.inf):
+            # a mark after the base is gone (the engine rebases then)
+            return _radio_block(None, R_EVICTED), 0
         walk = _RadioWalk(seg.radios)
         end = seg.end if seg.end is not None else math.inf
         absent = False
@@ -477,6 +482,9 @@ class Snapshot:
             return _unknown(R_NOT_OBSERVED), _unknown(R_NOT_OBSERVED), 0
         if seg.topo_at < self.now - RETENTION_S:
             gone = _unknown(R_BEYOND_RETENTION)
+            return gone, gone, 0
+        if seg.topo_at < self.lost.get(QUOTA_INFRA, -math.inf):
+            gone = _unknown(R_EVICTED)
             return gone, gone, 0
         parent, role = seg.parent, seg.role
         end = seg.end if seg.end is not None else math.inf
@@ -556,6 +564,18 @@ class _RadioWalk:
     def apply(self, mark: Mark) -> bool:
         """One mark; False when it fits no radio at all (inconsistent)."""
         params = mark.params
+        if mark.kind == "radio_up":
+            # no band in the mark: the radio whose "off" mark the engine
+            # closed at this very poll
+            downs = [k for k, v in self.keys.items() if v[2] is not None]
+            hits = [k for k in downs if self.keys[k][2].end == mark.ts]
+            if len(hits) != 1:
+                self._spoil(hits or list(self.keys))
+                return True
+            item = self.keys[hits[0]]
+            if item[3] is None:
+                item[0], item[1], item[2] = params.get("channel"), None, None
+            return True
         band = self._band(params.get("band"))
         if not band:
             return False
@@ -583,13 +603,6 @@ class _RadioWalk:
                 self._spoil(band)
                 return True
             self.keys[hits[0]][2] = mark
-        else:  # radio_up
-            hits = [k for k in live if self.keys[k][2] is not None]
-            if len(hits) != 1:
-                self._spoil(band)
-                return True
-            item = self.keys[hits[0]]
-            item[0], item[1], item[2] = params.get("channel"), None, None
         return True
 
     def items(self, at: float) -> list[dict[str, Any]]:
@@ -785,8 +798,9 @@ def incidents_at(
 ) -> dict[str, Any]:
     """NI incidents open (or of unknown state) at ``at``."""
     if incidents is None:
+        off = reason in (REASON_NOT_RUNNING, REASON_NOT_LOADED)
         return {
-            "state": PART_UNREADABLE,
+            "state": PART_OFF if off else PART_UNREADABLE,
             "reason": reason,
             "items": [],
             "total": 0,
@@ -1146,8 +1160,9 @@ def state_body(
         cursor=clients_cursor,
         items=client_items,
     )
+    incident_part = incidents_at(*incidents, at, routers, router_id)
     parts = (
-        incidents[1] is not None and incidents[1] not in (REASON_MODULE_OFF,),
+        incident_part["state"] == PART_UNREADABLE,
         config["state"] == PART_UNREADABLE,
     )
     recorded = [a for a, _b in snap.coverage]
@@ -1170,7 +1185,7 @@ def state_body(
         "intervals": intervals,
         "intervals_total": total,
         "intervals_truncated": total > INTERVALS_MAX,
-        "incidents": incidents_at(*incidents, at, routers, router_id),
+        "incidents": incident_part,
         "config": config,
         "clients": clients,
     }
@@ -1303,7 +1318,9 @@ def compare_body(
         ):
             changes.append(entry)
     groups: Counter[str] = Counter()
-    for mark in snap.own:
+    # client marks only for administrators while the client list is known
+    counted = [*snap.own, *(snap.client_marks if admin and clients_known else ())]
+    for mark in counted:
         if not t1 < mark.ts <= t2:
             continue
         if query.router_id is not None and mark.router not in (query.router_id, None):
@@ -1392,7 +1409,11 @@ def compare_body(
                 "by_group": dict(sorted(groups.items())),
             },
             "incidents": {
-                "state": PART_UNREADABLE
+                "state": (
+                    PART_OFF
+                    if reason in (REASON_NOT_RUNNING, REASON_NOT_LOADED)
+                    else PART_UNREADABLE
+                )
                 if items is None
                 else (PART_PARTIAL if pruned else PART_OK),
                 "reason": reason if items is None else (R_PRUNED if pruned else None),

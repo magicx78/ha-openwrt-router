@@ -767,11 +767,15 @@ KIND_TABS: Final[Mapping[str, str]] = {
     "config_event": TAB_CONFIG,
     "config_drift": TAB_CONFIG,
     "security_incident": TAB_SECURITY,
-    "security_event": TAB_SECURITY,
     "rf_event": TAB_WIFI,
     "diag_finding": TAB_DIAGNOSTICS,
     "traffic_anomaly": TAB_TRAFFIC,
 }
+# Kinds of audit entries that no Enterprise tab shows (explicitly none): the
+# core's own entries (registry, authorizations, store) and unknown types.
+KIND_NO_TAB: Final = frozenset(
+    {"registry_event", "security_event", "core_event", "audit_event"}
+)
 _BY_KIND: Final = "by_kind"
 # Every (ref.module, ref.type) the backend produces -> tab, ``by_kind``
 # (``KIND_TABS``) or None: no Enterprise tab shows it (Network Intelligence

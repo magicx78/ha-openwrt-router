@@ -84,6 +84,25 @@ def _stats(hass: HomeAssistant) -> Stats:
     return stats
 
 
+def _where(err: BaseException) -> str:
+    """File and line that raised (never the message: it may carry data)."""
+    tb = err.__traceback__
+    while tb is not None and tb.tb_next is not None:
+        tb = tb.tb_next
+    if tb is None:
+        return "-"
+    return f"{tb.tb_frame.f_code.co_filename.rsplit('/', 1)[-1]}:{tb.tb_lineno}"
+
+
+def _failed(name: str, err: Exception) -> web.StreamResponse:
+    # Only the type and where (1.52.0: no traceback either, its message and
+    # locals may carry router or client data).
+    _LOGGER.warning(
+        "Time Machine route %s failed: %s at %s", name, type(err).__name__, _where(err)
+    )
+    return error_response(RequestError(500, "internal"))
+
+
 class TimeMachineTimelineView(HomeAssistantView):
     """The merged timeline of one window (Phase A sources)."""
 
@@ -120,13 +139,8 @@ class TimeMachineTimelineView(HomeAssistantView):
                 )
         except RequestError as err:
             return error_response(err)
-        except Exception as err:
-            # Only the type: the message may carry router data.
-            _LOGGER.warning(
-                "Time Machine route %s failed: %s", self.name, type(err).__name__
-            )
-            _LOGGER.debug("Time Machine route error", exc_info=err)
-            return error_response(RequestError(500, "internal"))
+        except Exception as err:  # noqa: BLE001 - logged by type, a 500
+            return _failed(self.name, err)
         return self.json(body, headers=dict(NO_STORE))
 
 
@@ -155,12 +169,8 @@ class TimeMachineSessionsView(HomeAssistantView):
             body = sessions_page(hass, query, now=now)
         except RequestError as err:
             return error_response(err)
-        except Exception as err:
-            _LOGGER.warning(
-                "Time Machine route %s failed: %s", self.name, type(err).__name__
-            )
-            _LOGGER.debug("Time Machine route error", exc_info=err)
-            return error_response(RequestError(500, "internal"))
+        except Exception as err:  # noqa: BLE001 - logged by type, a 500
+            return _failed(self.name, err)
         return self.json(body, headers=dict(NO_STORE))
 
 
@@ -175,13 +185,6 @@ def _reader(request: web.Request) -> tuple[HomeAssistant, bool]:
     if hass.data.get(_PANEL_VIEW_DISABLED_KEY):
         raise RequestError(410, "integration_not_loaded")
     return hass, admin
-
-
-def _failed(name: str, err: Exception) -> web.StreamResponse:
-    # Only the type: the message may carry router data.
-    _LOGGER.warning("Time Machine route %s failed: %s", name, type(err).__name__)
-    _LOGGER.debug("Time Machine route error", exc_info=err)
-    return error_response(RequestError(500, "internal"))
 
 
 class TimeMachineStateView(HomeAssistantView):

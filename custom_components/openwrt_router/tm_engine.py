@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import re
 import time
 from collections.abc import Callable, Mapping
@@ -60,6 +61,7 @@ from .tm_marks import (
     END_CLOSED,
     END_OPEN,
     END_UNKNOWN,
+    QUOTA_INFRA,
     REF_KINDS,
     RETENTION_S,
     MarkIndex,
@@ -881,20 +883,24 @@ class TimeMachine:
         starts a new stretch, so every stretch is complete by its marks."""
         seg = self.store.seen_current(rid)
         if seg is not None and seg.radios_at is not None and silent:
-            seg = self.store.seen_split(rid, now)
+            seg = self.store.seen_split(rid, now, parent=state.parent, role=state.role)
         if seg is not None and seg.radios_at is None:
             seg.radios_at, seg.radios = now, dict(state.radios)
 
     def _rebase(
         self, router: _Router, rid: str, state: RouterState, now: float
     ) -> bool:
-        """A followed stretch whose base is ``REBASE_S`` old starts anew from
-        the state after this poll (1.52.0): the marks a stretch needs never
-        reach the 14-day pruning. Not while a radio is missing or off or an
+        """A followed stretch whose base is ``REBASE_S`` old, or older than
+        a lost mark (``MarkIndex.lost``), starts anew from the state after
+        this poll (1.52.0): the marks a stretch needs never reach the 14-day
+        pruning, and a lost one spoils only the time up to it. Not while a radio is missing or off or an
         uplink / role change is still being debounced (the new base would
         hide it)."""
         seg = self.store.seen_current(rid)
-        if seg is None or seg.radios_at is None or now - seg.radios_at < REBASE_S:
+        if seg is None or seg.radios_at is None:
+            return False
+        lost = self.index.lost.get(QUOTA_INFRA, -math.inf)
+        if now - seg.radios_at < REBASE_S and lost <= seg.radios_at:
             return False
         if router.missing or router.radio_down:
             return False
@@ -902,7 +908,7 @@ class TimeMachine:
             f"{state.parent}|{state.role}"
         ):
             return False
-        seg = self.store.seen_split(rid, now)
+        seg = self.store.seen_split(rid, now, parent=state.parent, role=state.role)
         seg.radios_at, seg.radios = now, dict(state.radios)
         return True
 
@@ -966,8 +972,9 @@ class TimeMachine:
             state.role = role
             changed = True
         seg = self.store.seen_current(rid)
-        if seg is not None and seg.topo_at is None:
-            # 1.52.0: the first settled uplink and role of the stretch
+        if seg is not None and (seg.topo_at is None or seg.topo_at == now):
+            # 1.52.0: the first settled uplink and role of the stretch (or a
+            # change at the very poll a new stretch began: it is the base)
             seg.topo_at, seg.parent, seg.role = now, state.parent, state.role
             changed = True
         return changed
@@ -1307,7 +1314,14 @@ async def async_clear_history(
         deleted = engine.index.clear(clients_only=False, now=now)
         engine.store.checkpoints.clear()
         engine.store.coverage = [[now, None]]
-        engine.store.seen_restart(now)
+        engine.store.seen_restart(
+            now,
+            {
+                rid: (parsed.parent, parsed.role)
+                for rid, raw in engine.store.state.items()
+                for parsed in (RouterState.parse(raw),)
+            },
+        )
         engine.store.clients_cov = [[now, None]] if _recording(engine) else []
         engine._outage_seq.clear()
         engine._lan_seq = None

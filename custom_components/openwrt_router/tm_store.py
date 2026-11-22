@@ -565,28 +565,34 @@ class TimeMachineStore:
         for rid in list(self.seen):
             self.seen_close(rid, end)
 
-    def seen_split(self, rid: str, now: float) -> Segment:
+    def seen_split(
+        self, rid: str, now: float, *, parent: str = "", role: str = ""
+    ) -> Segment:
         """End the open stretch at ``now`` and start the next one (a radio
-        appeared without a mark): the settled uplink and role go on."""
+        appeared without a mark, or the base rolls forward). A settled
+        uplink and role go on as ``parent`` / ``role``: the engine's current
+        state, not the old stretch's base (marks changed it since)."""
         old = self.seen_current(rid)
         self.seen_close(rid, now)
         seg = self.seen_open(rid, now)
-        if old is not None and old.topo_at is not None:
-            seg.topo_at, seg.parent, seg.role = now, old.parent, old.role
+        if old is not None and old.topo_at is not None and role:
+            seg.topo_at, seg.parent, seg.role = now, parent, role
         return seg
 
-    def seen_restart(self, now: float) -> None:
-        """The whole history was cleared: followed stretches start anew."""
+    def seen_restart(self, now: float, topology: Mapping[str, tuple[str, str]]) -> None:
+        """The whole history was cleared: followed stretches start anew;
+        ``topology`` holds the engine's settled ``(parent, role)`` per
+        router (they go on: the debounce does not see them again until
+        they change)."""
         seen: dict[str, list[Segment]] = {}
         for rid in list(self.seen):
             old = self.seen_current(rid)
             if old is None:
                 continue
             seg = Segment(start=now)
-            if old.topo_at is not None:
-                # the settled uplink and role go on (the debounce does not
-                # see them again until they change)
-                seg.topo_at, seg.parent, seg.role = now, old.parent, old.role
+            parent, role = topology.get(rid, ("", ""))
+            if old.topo_at is not None and role:
+                seg.topo_at, seg.parent, seg.role = now, parent, role
             seen[rid] = [seg]
         self.seen = seen
 
