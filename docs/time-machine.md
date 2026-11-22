@@ -1348,9 +1348,16 @@ Beispiel aus `test_compare_route_names_only_the_differences` (`changes`, gekürz
   schon galt, ist kein Unterschied).
 - `other_sources` (Review F, additiv): Einträge der **anderen** Quellen der Zeitleiste
   (Audit, NI-Ereignisse und -Incidents, Security Center, …) im selben Fenster, über denselben
-  Lesepfad und mit denselben Rechten (`tm_index` wird nur für die Doppel-Regel mitgelesen):
+  Lesepfad und mit denselben Rechten (jede Quelle über ihren Leser, die Doppel-Regel der
+  Zeitleiste, deren Rechte und Filter; `tm_index` wird nur gelesen, wenn NI-Ereignisse im
+  Fenster liegen, denn nur für sie braucht die Doppel-Regel die eigenen Marken). Gezählt wird
+  nur: keine Zusammenführung, keine Sortierung, keine Seite.
   `{"state": "ok" | "unreadable", "reason": null | "unreadable", "count", "truncated",
-  "unreadable": [Quellen-IDs]}`. `count` zählt höchstens 500 Einträge (`truncated`). Eine
+  "unreadable": [Quellen-IDs]}`. `count` ist die genaue Zahl bis 500; darüber oder wenn eine
+  Quelle gekürzt gelesen wurde, `truncated: true`. Gleich der Zahl der Einträge anderer
+  Quellen, die die Zeitleiste für dasselbe Fenster listet
+  (`test_f_other_sources_count_ni_events_without_their_doubles`, mit echten NI-Doppeln,
+  als Administrator und als Nutzer). Eine
   Quelle, die nicht läuft oder nicht geladen ist, hat nichts im Fenster und ist nicht
   `unreadable`. Ein Vergleich ist erst „nichts geändert“, wenn `marks.count == 0`,
   `other_sources.state == "ok"`, `other_sources.count == 0` und nicht `truncated`
@@ -1482,12 +1489,25 @@ Ereignisschleife.
 | Abfrage | 1 Router, Marken in 3 h (`test_cost_of_state_compare_and_export_on_a_full_store`) | 64 Router, Marken über 13 Tage, je Router ein Abschnitt (Export: `test_i_export_pages_fill_and_the_loop_yields[64]`; `/state`, `/compare` und „vorher“: einmalig mit dem Messtest des Reviews, nicht in der Suite) |
 |---|---|---|
 | `/state` | 8–9 ms (Block 5–6 ms) | 6 ms (2 ms), bei „jetzt“ 8–9 ms (5 ms) |
-| `/compare` | 23–27 ms (4–5 ms) | 31–35 ms (6–7 ms) |
+| `/compare` | 13–15 ms (erster Aufruf), 12–13 ms (weitere); ohne `other_sources` 9–13 ms | 21–26 ms (erster), 18–23 ms (weitere); Fenster 13 Tage |
 | `/export` vorher (Stand `d39fd4c`) | 56–63 ms (7–9 ms) | 73–82 ms (18–24 ms), erste Seite 1675 Marken, 4 Seiten |
 | `/export` nachher | 22–26 ms (4 ms) | 27–29 ms (4 ms), eine Seite mit allen 5000 Marken ohne Client |
 
-`/compare` ist seit dem Review langsamer (vorher 7–8 ms), weil es `other_sources` über den
-Lesepfad der Zeitleiste liest. Die Marken werden einmal je Abfrage linear durchlaufen
+`/compare` las `other_sources` zuerst über die ganze Zeitleiste (alle Marken auch des
+eigenen Index in Wörterbücher, zusammenführen, sortieren, Seite von 500): 1 Router 21–25 ms,
+64 Router 29–48 ms. Seit 1.52.0 zählt es nur (oben). Einen teuren kalten ersten Aufruf gibt
+es nicht (erster Aufruf 1–5 ms über den weiteren).
+
+Die Tests prüfen **gezählte Arbeit, keine Zeit** (eine Zeitgrenze hält auf einem geteilten
+CI-Runner nicht; dort maß der Test für `/compare` einmal einen Block von 0,6 s): Python-Aufrufe ins Paket bei einem
+Viertel und beim vollen Speicher (höchstens 6-fach, quadratisch wäre etwa 16-fach), die
+meisten Aufrufe zwischen zwei Abgaben an die Ereignisschleife (höchstens 100 000; heute
+höchstens 70 013, die Suche über den ganzen Index in `MarkIndex.window`), die Zahl der
+Abgaben auf dem vollen Speicher (fällt, wenn eine Schleife nicht mehr abgibt) und ein
+Durchlauf des Speichers je Antwort (`Snapshot._take` genau einmal je Marke, auch beim
+Vergleich). Jede dieser Prüfungen schlägt an, wenn man eine der Abgaben (Schnappschuss,
+Index-Leser, Export) abschaltet oder einen quadratischen Schritt einbaut (einmal von Hand
+geprüft). Die Marken werden einmal je Abfrage linear durchlaufen
 (Abgabe alle 2000 Marken), danach je Router und Zeitpunkt nur deren eigene Marken; nichts ist
 quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 100 Incidents,
 100 Versionen, 500 Clients je Seite, 5000 Marken je Export-Seite.

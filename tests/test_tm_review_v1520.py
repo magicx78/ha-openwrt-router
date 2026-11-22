@@ -11,11 +11,9 @@ The answers are read as the routes read them (``tm_state.async_snapshot`` /
 # ruff: noqa: F811  (pytest fixtures imported from test_client_engine)
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import random
-import sys
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -26,9 +24,11 @@ import pytest
 from core_testkit import FakeDisks
 from test_client_engine import M1, M2, disk  # noqa: F401 - fixture
 from test_tm_clients_v1510 import clients_world, step
+from test_tm_modules_v1520 import BLOCK_CALLS_MAX, GROWTH_MAX, count_work
 from tm_index_kit import RID, T0, iface, poll_data, world
 
 from custom_components.openwrt_router import (
+    net_engine,
     rf_center,
     tm_export,
     tm_query,
@@ -467,6 +467,16 @@ async def test_f_compare_counts_like_the_timeline_and_names_other_sources(
             "truncated": False,
             "unreadable": [],
         }
+        # exactly the other sources' entries the timeline lists
+        others = tuple(
+            x
+            for x in tm_sources.ALL_SOURCE_IDS
+            if x not in (tm_sources.SOURCE_TM_INDEX, tm_sources.SOURCE_TM_CLIENTS)
+        )
+        listed = await tm_query.async_timeline(
+            w.hass, tm_query.Query(t1, t2, sources=others), admin=True, now=now
+        )
+        assert other["count"] == len(listed["marks"]) == 1
         # the mark exactly at t2 does not count; a failing source is named
         del w.api.events
         body = await tm_state.async_compare(
@@ -475,6 +485,50 @@ async def test_f_compare_counts_like_the_timeline_and_names_other_sources(
         assert body["changes"]["marks"]["count"] == 0
         other = body["changes"]["other_sources"]
         assert (other["state"], other["unreadable"]) == ("unreadable", ["core_audit"])
+
+
+async def test_f_other_sources_count_ni_events_without_their_doubles(
+    disks, disk
+) -> None:
+    """The real NI writes ``router_unreachable`` / ``router_reachable`` for
+    the outage the Time Machine holds itself: the timeline drops them as
+    doubles, ``other_sources`` counts exactly what the timeline lists."""
+    async with clients_world(disks, disk) as w:
+        clock = SimpleNamespace(time=w.clock, monotonic=time.monotonic)
+        w.stack.enter_context(patch.object(net_engine, "time", clock))
+        w.stack.enter_context(
+            patch.object(net_engine, "async_get_engine", lambda _h: w.ni)
+        )
+        w.api.events = lambda **_k: []
+        for _ in range(3):
+            step(w, [M1], [M2])
+        w.down("r1")
+        for _ in range(5):
+            step(w, None, [M2])
+        w.up("r1")
+        for _ in range(3):
+            step(w, [M1], [M2])
+        assert "system.router_unreachable" in [e.kind for e in w.ni.ring]
+        t1, t2 = T0 - 60, w.t
+        everything = tuple(
+            x for x in tm_sources.ALL_SOURCE_IDS if x != tm_sources.SOURCE_TM_CLIENTS
+        )
+        for admin in (True, False):
+            listed = await tm_query.async_timeline(
+                w.hass,
+                tm_query.Query(t1, t2, sources=everything, no_clients=not admin),
+                admin=admin,
+                now=w.t,
+            )
+            by_id = {x["id"]: x for x in listed["sources"]}
+            assert by_id["ni_events"]["duplicates"] == 2
+            body = await tm_state.async_compare(
+                w.hass, tm_state.CompareQuery(t1, t2), admin=admin, now=w.t
+            )
+            other = body["changes"]["other_sources"]
+            want = [m for m in listed["marks"] if m["source"] != "tm_index"]
+            assert not listed["truncated"] and other["truncated"] is False
+            assert other["count"] == len(want), (admin, other, want)
 
 
 # --- G: the client day cap across midnight ------------------------------------------------
@@ -542,12 +596,13 @@ async def test_h_failing_traffic_and_rf_reads_make_parts_unreadable(
 RIDS = [f"rtr_{i:032x}" for i in range(1, 65)]
 
 
-def _fill_fleet(engine: Any, now: float, routers: int) -> None:
-    """15000 marks (5000 without a client) over 13 days and ``routers``."""
+def _fill_fleet(engine: Any, now: float, routers: int, share: float = 1.0) -> None:
+    """15000 marks (5000 without a client) over 13 days and ``routers`` (a
+    ``share`` of them)."""
     rnd = random.Random(7)
     span = 13 * 86_400
     rids = RIDS[:routers]
-    for i in range(3000):
+    for i in range(int(3000 * share)):
         ts = now - span + rnd.random() * span
         engine.index.add(
             ts=ts,
@@ -556,7 +611,7 @@ def _fill_fleet(engine: Any, now: float, routers: int) -> None:
             code="channel",
             params={"band": 5, "channel_from": 36, "channel_to": 100},
         )
-    for i in range(2000):
+    for i in range(int(2000 * share)):
         ts = now - span + rnd.random() * span
         engine.index.add(
             ts=ts,
@@ -565,7 +620,7 @@ def _fill_fleet(engine: Any, now: float, routers: int) -> None:
             code="configuration.drift_detected",
             ref=("audit", f"evt_{i:032x}"),
         )
-    for i in range(10_000):
+    for i in range(int(10_000 * share)):
         ts = now - span + rnd.random() * span
         engine.index.add(
             ts=ts,
@@ -592,25 +647,7 @@ def _fill_fleet(engine: Any, now: float, routers: int) -> None:
         engine.store.state[rid] = "a" * 16 + "|" + pack_radios(radios) + "||n"
 
 
-class Yields:
-    """Longest stretch between two yields, and the yields of the export."""
-
-    def __init__(self) -> None:
-        self.real = asyncio.sleep
-        self.last = time.perf_counter()
-        self.longest = 0.0
-        self.export_yields = 0
-
-    async def sleep(self, delay: float = 0, *a: Any) -> None:
-        if sys._getframe(1).f_globals.get("__name__") == tm_export.__name__:
-            self.export_yields += 1
-        self.longest = max(self.longest, time.perf_counter() - self.last)
-        await self.real(delay, *a)
-        self.last = time.perf_counter()
-
-
-@pytest.mark.parametrize("routers", [1, 64])
-async def test_i_export_pages_fill_and_the_loop_yields(disks, routers) -> None:
+async def _export_work(disks: Any, routers: int, share: float) -> tuple[Any, Any]:
     with world(disks) as w:
         w.entries[0].options[OPTION_TIME_MACHINE_ENABLED] = True
         now = T0 + 14 * 86_400
@@ -619,26 +656,32 @@ async def test_i_export_pages_fill_and_the_loop_yields(disks, routers) -> None:
         w.clock.t = now
         engine.clients_wanted = True
         engine.recorder = SimpleNamespace(name_of=lambda _c: None, attached=True)
-        _fill_fleet(engine, now, routers)
-        assert len(engine.index) == 15_000
+        _fill_fleet(engine, now, routers, share)
         query = tm_query.Query(now - 14 * 86_400 + 60, now)
-        yields = Yields()
-        with patch.object(asyncio, "sleep", yields.sleep):
-            started = time.perf_counter()
-            body = await async_export(w.hass, query, now=now, user_id="u")
-            total = time.perf_counter() - started
-            yields.longest = max(yields.longest, time.perf_counter() - yields.last)
-        # every mark without a client fits one page (5000): none is pushed
-        # out by client marks that are left out anyway
-        assert len(body["marks"]) == 5000 and body["truncated"] is False
-        assert body["omitted_client_marks"] == 10_000
-        assert body["sources"] and len(json.dumps(body)) < 16_000_000
-        assert yields.export_yields >= 5  # every 1000 marks
-        print(
-            f"\n[time machine] export {routers} router(s), 15000 marks: "
-            f"{total * 1000:.1f} ms, longest block {yields.longest * 1000:.1f} ms"
+        return await count_work(
+            lambda: async_export(w.hass, query, now=now, user_id="u")
         )
-        assert yields.longest < 0.25  # generous for slow CI runners
+
+
+@pytest.mark.parametrize("routers", [1, 64])
+async def test_i_export_pages_fill_and_the_loop_yields(disks, routers) -> None:
+    """Counted work, not time (see ``test_tm_modules_v1520.Work``)."""
+    _small, small = await _export_work(disks, routers, 0.25)
+    body, work = await _export_work(disks, routers, 1.0)
+    # every mark without a client fits one page (5000): none is pushed
+    # out by client marks that are left out anyway
+    assert len(body["marks"]) == 5000 and body["truncated"] is False
+    assert body["omitted_client_marks"] == 10_000
+    assert body["sources"] and len(json.dumps(body)) < 16_000_000
+    print(
+        f"\n[time machine] export {routers} router(s): calls {small.calls} -> "
+        f"{work.calls}, longest block {small.longest} -> {work.longest} calls, "
+        f"yields {small.yields} -> {work.yields}"
+    )
+    # the export's own loop yields every 1000 marks
+    assert work.by_module[tm_export.__name__] >= len(body["marks"]) // 1000
+    assert work.calls <= GROWTH_MAX * small.calls  # nothing quadratic
+    assert work.longest <= BLOCK_CALLS_MAX  # no long block
 
 
 # --- J: forgetting a router spoils only the routers that named it --------------------------

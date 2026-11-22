@@ -16,7 +16,10 @@ import ast
 import asyncio
 import copy
 import json
+import sys
 import time
+from collections import Counter
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -407,32 +410,88 @@ async def _read_everything(w: Any) -> tuple[Any, Any, Any]:
     return state, compare, export
 
 
-# --- cost on a full store ------------------------------------------------------------
+# --- cost on a full store: counted work, not time ---------------------------------------
 
 
-class Blocks:
-    """Longest stretch between two yields of the code under test."""
+class Work:
+    """The work of the code under test, counted instead of timed (a shared CI
+    runner makes any time bound fragile; review 1.52.0, as M1 of 1.51.0).
+
+    ``calls``: Python calls into the package (each resumption of one of its
+    coroutines counts too), a measure of work that does not depend on the
+    machine. ``longest``: the most such calls between two yields to the event
+    loop (``asyncio.sleep``), a measure of the longest block. ``yields``: the
+    yields (``by_module``: per module that yielded). ``takes``: marks taken apart into a state snapshot
+    (``Snapshot._take``), i.e. the passes over the store times its size.
+    """
 
     def __init__(self) -> None:
-        self.last = time.perf_counter()
-        self.longest = 0.0
-        self.real = asyncio.sleep
+        self.calls = 0
+        self.longest = 0
+        self.yields = 0
+        self.by_module: Counter[str] = Counter()
+        self.takes = 0
+        self._since = 0
+        self._real = asyncio.sleep
+        self._root = str(PACKAGE)
+        self._take = tm_state.Snapshot._take.__code__
 
-    async def sleep(self, delay: float = 0, *a: Any) -> None:
-        now = time.perf_counter()
-        self.longest = max(self.longest, now - self.last)
-        await self.real(delay, *a)
-        self.last = time.perf_counter()
+    def _profile(self, frame: Any, event: str, _arg: Any) -> None:
+        if event != "call":
+            return
+        code = frame.f_code
+        if code.co_filename.startswith(self._root):
+            self.calls += 1
+            self._since += 1
+            if code is self._take:
+                self.takes += 1
 
-    def end(self) -> None:
-        self.longest = max(self.longest, time.perf_counter() - self.last)
+    async def _sleep(self, delay: float = 0, *a: Any) -> None:
+        self.yields += 1
+        self.by_module[sys._getframe(1).f_globals.get("__name__", "")] += 1
+        self.longest = max(self.longest, self._since)
+        self._since = 0
+        await self._real(delay, *a)
+
+    async def run(self, call: Callable[[], Awaitable[Any]]) -> Any:
+        with patch.object(asyncio, "sleep", self._sleep):
+            sys.setprofile(self._profile)
+            try:
+                body = await call()
+            finally:
+                sys.setprofile(None)
+        self.longest = max(self.longest, self._since)
+        return body
 
 
-def _fill(engine: Any) -> None:
-    """15000 marks as in ``test_a_full_store_stays_under_the_limit``."""
-    for i in range(3000):
+async def count_work(call: Callable[[], Awaitable[Any]]) -> tuple[Any, Work]:
+    work = Work()
+    return await work.run(call), work
+
+
+# Data 1x (a quarter of the store) and 4x (the full store, 15000 marks, the
+# most the quotas allow): linear work grows about 4x (fixed costs make it
+# less), a quadratic step about 16x. Every answer still has one stretch that
+# scans the whole index without a yield (``MarkIndex.window``, about two
+# calls per stored mark, plus the state's per-session check), bounded by the
+# quotas: at most 70 013 calls on the full store (export), about 4 ms on
+# VM 103. ``BLOCK_CALLS_MAX`` leaves room for that and fails on a new stretch
+# of about ten calls per page mark (a dict per mark) without a yield. The
+# loops over marks yield every 1000 / 2000 marks (snapshot, index reader,
+# export): on the full store the answers yield at least ``YIELDS_MIN`` times
+# (counted on this fixed data), which any removed yield of those loops
+# lowers (checked by switching each one off).
+GROWTH_MAX = 6.0
+BLOCK_CALLS_MAX = 100_000
+YIELDS_MIN = {"state": 7, "compare": 15, "export": 18}
+
+
+def _fill(engine: Any, share: float = 1.0) -> None:
+    """15000 marks as in ``test_a_full_store_stays_under_the_limit`` (a
+    ``share`` of them, spread over the same time)."""
+    for i in range(int(3000 * share)):
         engine.index.add(
-            ts=T0 + i,
+            ts=T0 + i / share,
             kind="channel_changed",
             router=R1,
             code="channel",
@@ -445,27 +504,27 @@ def _fill(engine: Any) -> None:
                 "dfs": 0,
             },
         )
-    for i in range(2000):
+    for i in range(int(2000 * share)):
         engine.index.add(
-            ts=T0 + i,
+            ts=T0 + i / share,
             kind="config_drift",
             router=R1,
             code="configuration.drift_detected",
             ref=("audit", f"evt_{i:032x}"),
         )
-    for i in range(10_000):
+    for i in range(int(10_000 * share)):
         engine.index.add(
-            ts=T0 + i,
+            ts=T0 + i / share,
             kind="client_session",
             router=R1,
             client=f"{i:016x}",
-            end=T0 + i + 600,
+            end=T0 + i / share + 600,
             end_state="closed",
             params={"band": 5, "gaps": 1},
         )
 
 
-async def test_cost_of_state_compare_and_export_on_a_full_store(disks) -> None:
+async def _cost(disks: Any, share: float) -> tuple[dict[str, Work], Any]:
     with world(disks) as w:
         w.entries[0].options[OPTION_TIME_MACHINE_ENABLED] = True
         engine = await w.start(clients=False)
@@ -473,10 +532,11 @@ async def test_cost_of_state_compare_and_export_on_a_full_store(disks) -> None:
         engine.recorder = SimpleNamespace(name_of=lambda _c: None, attached=True)
         engine.store.clients_cov = [[T0 - 10, None]]
         w.coords["r1"].poll()
-        _fill(engine)
-        assert len(engine.index) == 15_000
+        _fill(engine, share)
+        size = len(engine.index)
         w.clock.t = now = T0 + 10_000
-        results = {}
+        works: dict[str, Work] = {}
+        bodies: dict[str, Any] = {}
         for name, call in (
             (
                 "state",
@@ -500,27 +560,28 @@ async def test_cost_of_state_compare_and_export_on_a_full_store(disks) -> None:
                 ),
             ),
         ):
-            blocks = Blocks()
-            with (
-                patch.object(tm_state.asyncio, "sleep", blocks.sleep),
-                patch.object(tm_sources.asyncio, "sleep", blocks.sleep),
-                patch.object(tm_query.asyncio, "sleep", blocks.sleep),
-            ):
-                started = time.perf_counter()
-                body = await call()
-                blocks.end()
-            results[name] = (time.perf_counter() - started, blocks.longest)
-            assert len(json.dumps(body)) < 4_000_000
-        state = body_state = await tm_state.async_state(
-            w.hass, tm_state.StateQuery(T0 + 5_000.5), admin=True, now=now
+            bodies[name], works[name] = await count_work(call)
+            assert len(json.dumps(bodies[name])) < 4_000_000
+        return works, (size, bodies)
+
+
+async def test_cost_of_state_compare_and_export_on_a_full_store(disks) -> None:
+    small, (small_size, _b) = await _cost(disks, 0.25)
+    full, (size, bodies) = await _cost(disks, 1.0)
+    assert size == 15_000 and 3_750 <= small_size <= 3_751
+    state = bodies["state"]
+    assert state["clients"]["total"] == 600 and len(state["clients"]["items"]) == 200
+    for name in ("state", "compare", "export"):
+        a, b = small[name], full[name]
+        print(
+            f"\n[time machine] {name}: calls {a.calls} -> {b.calls} "
+            f"({b.calls / a.calls:.2f}x), longest block {a.longest} -> "
+            f"{b.longest} calls, yields {a.yields} -> {b.yields}, "
+            f"snapshot takes {a.takes} -> {b.takes}"
         )
-        assert (
-            state["clients"]["total"] == 600
-            and len(body_state["clients"]["items"]) == 200
-        )
-        for name, (total, longest) in results.items():
-            print(
-                f"\n[time machine] {name} on 15000 marks: {total * 1000:.1f} ms, "
-                f"longest block {longest * 1000:.1f} ms"
-            )
-            assert longest < 0.25, name  # generous for slow CI runners
+        assert b.calls <= GROWTH_MAX * a.calls, name  # nothing quadratic
+        assert b.longest <= BLOCK_CALLS_MAX, name  # no long block
+        assert b.yields >= YIELDS_MIN[name], name  # the loops yield
+    # one pass over the store per answer (compare: one snapshot for both)
+    assert full["state"].takes == size and full["compare"].takes == size
+    assert full["export"].takes == 0

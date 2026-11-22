@@ -63,6 +63,7 @@ from homeassistant.core import HomeAssistant
 from .tm_engine import _band_num
 from .tm_marks import QUOTA_CLIENTS, QUOTA_INFRA, RETENTION_S, Mark
 from .tm_query import (
+    _READ,
     API_VERSION,
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -71,12 +72,15 @@ from .tm_query import (
     STATUS_OK,
     STATUS_PARTIAL,
     STATUS_UNAVAILABLE,
+    Query,
     QueryError,
     _allowed,
     _cursor,
     _newest_first,
     _time,
+    _visible,
     cursor_of,
+    drop_duplicates,
     time_machine_enabled,
 )
 from .tm_sources import (
@@ -88,9 +92,13 @@ from .tm_sources import (
     REASON_MODULE_OFF,
     REASON_NOT_LOADED,
     REASON_NOT_RUNNING,
+    SOURCE_NI_EVENTS,
     SOURCE_TM_CLIENTS,
     SOURCE_TM_INDEX,
+    STATE_UNREADABLE,
+    ReadRequest,
     RouterMap,
+    async_read_source,
     build_router_map,
     index_mark,
     jump_target,
@@ -1648,24 +1656,44 @@ async def _other_sources(
     hass: HomeAssistant, query: CompareQuery, *, admin: bool, now: float
 ) -> dict[str, Any]:
     """Entries of the timeline's other sources with ``t1 <= ts < t2``
-    (review F): the timeline's own read path and rights, ``tm_index`` read
-    along for the doubles rule only. ``count`` is at most ``MAX_LIMIT``
-    (``truncated``); ``state`` ``unreadable`` when a source failed."""
-    from .tm_query import Query, async_timeline
-
+    (review F): each source through the timeline's own reader, its doubles
+    rule (``drop_duplicates``) and its rights and filters (``_visible``),
+    but only counted: no merge, no sort, no page. The own index is read
+    only when NI events are in the window (the doubles rule needs it for
+    them alone). ``count`` is at most ``MAX_LIMIT`` (``truncated`` above it
+    or when a source was cut); ``state`` ``unreadable`` when a source failed.
+    """
     others = tuple(
         s for s in ALL_SOURCE_IDS if s not in (SOURCE_TM_INDEX, SOURCE_TM_CLIENTS)
     )
     window = Query(
         query.t1,
         query.t2,
-        sources=(*others, SOURCE_TM_INDEX),
+        sources=others,
         router_id=query.router_id,
         limit=MAX_LIMIT,
         no_clients=not admin,
     )
     try:
-        body = await async_timeline(hass, window, admin=admin, now=now)
+        routers = build_router_map(hass)
+        req = ReadRequest(query.t1, query.t2, admin, now)
+        results = []
+        for source in others:
+            results.append(await async_read_source(hass, source, req, routers))
+            await asyncio.sleep(0)
+        if any(
+            r.source == SOURCE_NI_EVENTS and r.state in _READ and r.marks
+            for r in results
+        ):
+            results.append(await async_read_source(hass, SOURCE_TM_INDEX, req, routers))
+        drop_duplicates(results, window, admin=admin)
+        count = sum(
+            1
+            for r in results
+            if r.source in others
+            for m in r.marks
+            if _visible(m, window, admin)
+        )
     except Exception as err:  # noqa: BLE001 - one part never breaks the answer
         _LOGGER.debug(
             "Time Machine compare: sources unreadable (%s)", type(err).__name__
@@ -1677,21 +1705,21 @@ async def _other_sources(
             "truncated": False,
             "unreadable": sorted(others),
         }
-    count = sum(1 for m in body["marks"] if m["source"] in others)
     # a module that is not running or not loaded has nothing in the window
     # (as in the state: "off"); any other failure leaves the window unknown
     failed = sorted(
-        src["id"]
-        for src in body["sources"]
-        if src["id"] in others
-        and src["state"] == "unreadable"
-        and src["reason"] not in (REASON_NOT_RUNNING, REASON_NOT_LOADED)
+        r.source
+        for r in results
+        if r.source in others
+        and r.state == STATE_UNREADABLE
+        and r.reason not in (REASON_NOT_RUNNING, REASON_NOT_LOADED)
     )
     return {
         "state": PART_UNREADABLE if failed else PART_OK,
         "reason": R_UNREADABLE if failed else None,
-        "count": count,
-        "truncated": bool(body["truncated"]),
+        "count": min(count, MAX_LIMIT),
+        "truncated": count > MAX_LIMIT
+        or any(r.truncated for r in results if r.source in others),
         "unreadable": failed,
     }
 
