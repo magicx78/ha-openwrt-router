@@ -1271,46 +1271,49 @@ Ein Wert ist nie geraten. Es gilt:
     aus), endet deren doppelte Zeit beim `saved_at` der Datei (der letzte Lauf schrieb nichts
     danach; `_past_at_start`; ebenso nie innerhalb eines Abschnitts, `_clean_cut`), und die
     HA-Lücke beginnt an der alten Wanduhrzeit statt am falschen `saved_at`.
-  - *Nie gekürzt* wird eine doppelte Zeit, in die eine aufgezeichnete Linie vor geschrieben
+  - *Nicht gekürzt* wird eine doppelte Zeit, in die eine aufgezeichnete Linie vor geschrieben
     haben kann (`_ahead_inside`: eine `clock_shift`-Marke `forwards` mit kleinerer `seq` und
-    `ts` vor dem Ende der doppelten Zeit). Deren Werte sind falsch datiert; sie bleiben
-    unbekannt oder gehen mit dem erklärten Löschen unten.
-  - *Ein Tag ohne Aufzeichnung, dann:* Läuft eine Wartezeit `CLOCK_WAIT_MAX_S` (86 400 s;
-    gezählt ab dem Sprung, ohne die Uhrsprünge, über Neustarts ab der Wanduhrzeit des
-    Sprungs; `_waits`: Marke → Wanduhrzeit des Sprungs, `0` für einen Sprung ohne Marke;
-    geprüft bei jedem Poll, Tick und Start, `_check_wait`), sucht die Engine eine Erklärung.
-    **Erklärt** ist der Rücksprung `B` (`_explained_from`) genau dann, wenn
-    1. keine Rücksprung-Marke verdrängt wurde (`_lost_ahead` leer),
-    2. die `clock_shift`-Marke direkt vor `B` (nach `seq`) ein Sprung **vor** `A` mit
-       `shift_s` > 300 ist und nach `B` kein Sprung vor aufgezeichnet wurde,
-    3. `B.ts < A.ts` (die Uhr ging hinter den Zielpunkt des Sprungs vor zurück),
-    4. keine frühere Rücksprung-Marke über `A.ts − A.shift_s` hinaus reicht (die letzte
-       Wanduhrzeit der Linie vor dem Sprung vor) und
-    5. keine Marke der Infrastruktur-Quote nach dieser Zeit verdrängt wurde
-       (`index.lost`).
-
-    Dann schrieb nach `start = A.ts − A.shift_s` bis zur alten Wanduhrzeit von `B` nur die
-    Linie vor. Erst wird die Datei nach `.bak` kopiert (`TmStore.async_backup`: das jetzige
-    Speichern, dann `core_store._backup_file` im Executor; eine Kopie, jedes Mal
-    überschrieben; Zähler `backups`). Gelingt die Kopie nicht, wird nichts gelöscht
-    (`clock_backups_failed`) und weiter gewartet. Sonst löscht `_end_wait` alles nach
-    `max(jetzt, start)` Datierte: Marken (`MarkIndex.drop_after`: Intervalle, die danach
-    enden, enden dort mit `unknown`; `lost` wird begrenzt), Abschnitte, Abdeckung und
-    Client-Abdeckung, Checkpoints (`TmStore.drop_after`). Offene Intervalle, die danach
-    begannen, werden ab jetzt neu erfasst wie nach „Verlauf löschen“ (`_after_reset`,
-    `ClientRecorder.reopen`). `B` bekommt `wait_s`; seine doppelte Zeit bleibt bis dahin
-    unbekannt. Davor wird nichts angefasst. Zähler `clock_waits_capped`, Warnung im Log nur
-    mit Zahlen.
-
-    **Nicht erklärt** (z. B. ein Start weit zurück ohne NTP, oder eine Uhr, die schon beim
-    Start vor ging, also ohne gesehenen Sprung vor): Es wird **nichts** gelöscht, die
-    Wartezeit geht bis zur alten Wanduhrzeit weiter (Zähler `clock_waits_unexplained`, Info
-    im Log). Schlimmster Fall: so lange ohne Aufzeichnung, wie die Uhr zurück stand, ohne
-    Obergrenze, bis NTP sie stellt (ein Sprung vor beendet es sofort, siehe oben).
+    `ts` vor dem Ende der doppelten Zeit). Deren Werte sind vielleicht falsch datiert; sie
+    bleiben unbekannt. **Ausnahme** beim Sprung vor im Betrieb (`_undoes`, nicht beim Start):
+    Der Sprung vor um `shift` hebt den Rücksprung `B` auf, wenn `shift + B.shift_s` zwischen
+    −300 und +300 s liegt (beide gegen die monotone Uhr gemessen); hat `B` `lead_s` 0 (beim
+    Start geschrieben, die Zeit, die HA davor aus war, steckt nicht in `B.shift_s`), reicht
+    `shift + B.shift_s` ≥ −300. Dann läuft die Uhr wieder auf der Linie vor `B` weiter, die
+    Linie dazwischen war die falsche, und die doppelte Zeit wird wie oben gekürzt. Das ist der
+    Fall eines Geräts ohne Uhrenbatterie, das nach einem harmlosen Sprung vor (zehn Minuten,
+    oder das NTP eines früheren Starts weit zurück) wieder weit zurück startet (Tests
+    `test_p1_*`). Grenze: Geht eine falsche Zeitquelle zweimal um dieselbe Spanne vor, gilt
+    die zweite als richtig, und die Werte der ersten Linie vor lesen sich als bekannt zu ihrer
+    (falschen) Zeit, wie bei jeder Uhr vor, die nie zurückgestellt wird
+    (`test_a_clock_set_ahead_again_by_the_same_amount_is_trusted`).
+  - *Nichts wird gelöscht* (Entscheidung nach dem zweiten Review des PR). Ein früherer Stand
+    löschte nach einem Tag Warten, was ein aufgezeichneter Sprung vor „erklärte“
+    (`_explained_from`, nach einer Kopie `.bak`). Das Review fand drei Fälle, in denen das
+    echten Verlauf löschte, und jede strengere Regel scheitert an demselben Punkt: Ein Sprung
+    vor um X und später ein Sprung zurück um X sehen gleich aus, ob die Linie dazwischen vor
+    stand (dann wäre Löschen richtig) oder die Linien davor und danach zurück standen (dann
+    löscht es die Wahrheit), z. B. wenn die Time Machine zum ersten Mal mit einer Uhr weit
+    zurück startet und NTP nur den Sprung vor hinterlässt. Darum löscht die Engine wegen eines
+    Uhrsprungs nichts (kein `drop_after`, kein `async_backup`), und die Wartezeit geht immer
+    bis zur alten Wanduhrzeit, ohne Obergrenze, außer ein Sprung vor kürzt sie (oben) oder
+    „Verlauf löschen“ beendet sie. Schlimmster Fall: so lange ohne Aufzeichnung, wie die Uhr
+    zurück stand. Ein Sprung vor, der die Uhr nicht bis zur alten Zeit bringt, verkürzt das
+    Warten nur um seine Größe.
+  - *Langes Warten:* `_waits` hält je Rücksprung-Marke die Wanduhrzeit des Sprungs (`0` für
+    einen Sprung ohne Marke), verschoben um jeden späteren Uhrsprung (Uhrsprünge sind keine
+    gewartete Zeit; über Neustarts zählt die Wanduhrzeit des Sprungs). Läuft eine Wartezeit
+    `CLOCK_WAIT_LONG_S` (86 400 s; geprüft bei jedem Poll, Tick und Start, `_check_wait`),
+    steigt der Zähler `clock_waits_long` und eine Info steht im Log (nur Zahlen), einmal je
+    Wartezeit und Lauf. Sonst hat der Wert keine Wirkung.
+  - *Uhr vor, dann zurück:* Was die Linie vor datierte, bleibt in der Datei und liegt in der
+    doppelten Zeit des Rücksprungs; es liest sich `clock_shift` (unbekannt), solange die
+    Marke bleibt, und fällt danach mit der Aufbewahrung weg. Die Zeit, die die Uhr vor stand,
+    wird danach ohne Aufzeichnung noch einmal gelebt (`test_a_clock_ahead_then_corrected_*`,
+    `test_gap2_*`).
 
     Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups), die in der ersten
     Zeitlinie datiert sind, stehen weiter in der Liste der Zeitleiste; sie liegen in deren
-    eigenem Speicher, den die Zeitreise nicht löscht.
+    eigenem Speicher.
   - *Abschnitte und offene Intervalle am Sprung:* Bei jedem Sprung (vor oder zurück) endet
     jeder verfolgte Abschnitt bei der letzten Prüfung davor; bei einem Rücksprung im Betrieb
     enden offene Intervalle dort mit `unknown` (eine offene Lücke behält `gap_s`), und was
@@ -1319,8 +1322,9 @@ Ein Wert ist nie geraten. Es gilt:
     bei einer früheren Wanduhrzeit (vom Orakel gefunden).
   - *Neustart:* `_jumps_from_index` liest `_follow_from` und die laufenden Wartezeiten aus den
     Marken (eine mit `wait_s` ist entschieden und wartet nicht mehr); stehen `lost`-Werte mehr
-    als 300 s vor jetzt (die Marke selbst wurde verdrängt), wartet die Engine bis dahin; ein
-    solcher Sprung ist nie erklärt.
+    als 300 s vor jetzt (die Marke selbst wurde verdrängt), wartet die Engine bis dahin
+    (`_lost_ahead`; auch wenn danach eine andere Rücksprung-Marke gekürzt wird,
+    `_follow_until`).
     `_unseen_jump`: Liegt das Neueste der Datei (Marken der Infrastruktur-Quote, Abschnitte)
     mehr als 300 s nach `saved_at`, sprang die Uhr vor dem Stopp zurück, ohne dass ein Poll
     oder Tick es sah; der Start schreibt dann `clock_shift` bei `saved_at` mit
@@ -1336,8 +1340,8 @@ Ein Wert ist nie geraten. Es gilt:
   - *Speicher:* kein neuer Schlüssel, `wait_s` ist ein Marken-Parameter. 1.52.0 und 1.51.0
     laden eine 1.52.1-Datei ohne Verlust (ihr `_migrate` nimmt jede Unterversion von
     Version 1, `unpack` jeden gültigen Parameter); sie warten ohne `wait_s` wieder bis zur
-    alten Wanduhrzeit, zeigen aber nichts Falsches: Was eine Linie vor datierte, ist entweder
-    schon gelöscht oder liegt in der doppelten Zeit ohne `wait_s`.
+    alten Wanduhrzeit, zeigen aber nichts Falsches: Was eine Linie vor datierte, liegt in der
+    doppelten Zeit ohne `wait_s`.
 - **LAN-Ausfall** (Review K): Die Marke `lan_down` beginnt, wenn der **letzte** Router
   ausfiel (spätester Beginn der eigenen Ausfälle), nicht beim ersten einzelnen Ausfall. Ein
   Router gilt erst ab seinem eigenen ersten fehlgeschlagenen Poll als „nicht erreichbar“;
@@ -1648,28 +1652,37 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
   verfolgt danach nichts, bis die Wanduhr die alte Zeit überholt hat oder ein Sprung vor die
   Wartezeit beendet (bei einer Stunde Rücksprung also rund eine Stunde ohne Aufzeichnung,
   `not_recorded`; Abschnitt 20.3).
-- Stand die Uhr **vor** und wurde zurückgestellt (Sprung vor gesehen, Regel „erklärt“ in
-  20.3): bis zu einem Tag ohne Aufzeichnung, dann wird gelöscht, was die Linie vor datierte
-  (Kopie in `.bak`). Diese Werte sind aus dem Verlauf weg, auch wenn sie echte Beobachtungen
-  zur falschen Zeit waren.
-- Stand die Uhr **zurück** ohne erklärenden Sprung vor (z. B. Start ohne RTC und ohne NTP):
-  nichts wird gelöscht, aber bis die Uhr die alte Zeit erreicht oder NTP sie stellt, wird
-  nichts verfolgt, auch länger als einen Tag (schlimmster Fall: so lange, wie die Uhr zurück
-  stand). Der Verlauf davor bleibt erhalten; unbekannt bleibt die Zeit, die die Uhr zurück
-  lief, und der Rest des Abschnitts, in den sie fiel (meist bis zu einem Tag, länger, wenn
-  ein Funk fehlte oder aus war). Fiel sie in den letzten Abschnitt vor dem Stopp, bleibt die
-  Zeit bis zum Stopp unbekannt wie in 1.52.0.
-- Ging die Uhr schon beim Start vor (kein gesehener Sprung vor) und wird dann
-  zurückgestellt, gilt das als nicht erklärt: nichts wird gelöscht, die falsch datierten
-  Werte bleiben in der doppelten Zeit unbekannt, und es wird bis zur alten Wanduhrzeit
-  gewartet.
+- **Wegen eines Uhrsprungs wird nichts gelöscht** (20.3). Stand die Uhr **zurück** und wird
+  nicht vorgestellt (z. B. Start ohne RTC und ohne NTP), wird nichts verfolgt, bis die Uhr
+  die alte Zeit erreicht: ohne Obergrenze, schlimmstenfalls so lange, wie die Uhr zurück
+  stand (bis „Verlauf löschen“). Ein Sprung vor in dieser Zeit, der die Uhr nicht bis zur
+  alten Zeit bringt, verkürzt das nur um seine Größe. Der Verlauf davor bleibt erhalten;
+  wird die Uhr vorgestellt, bleibt unbekannt die Zeit, die die Uhr zurück lief, und der Rest
+  des Abschnitts, in den sie fiel (meist bis zu einem Tag). Fiel sie in den letzten
+  Abschnitt vor dem Stopp, bleibt die Zeit bis zum Stopp unbekannt wie in 1.52.0.
+- **Funk dauerhaft aus** (zweites Review, P2-2): Solange ein Funk fehlt oder aus ist, bekommt
+  ein Abschnitt keine neue Basis (`REBASE_S`); fällt ein korrigierter Rücksprung in so einen
+  langen Abschnitt, bleibt die Zeit bis zu dessen Ende unbekannt, bis zur ganzen Spanne des
+  Rücksprungs, für die ganze Aufbewahrung (`_clean_cut`). Offen (`TODO.md`).
+- Stand die Uhr **vor** und wurde zurückgestellt: So lange, wie die Uhr vor stand, wird nichts
+  verfolgt (eine Minute 400 Tage vor: 400 Tage). Was die Linie vor aufzeichnete, bleibt in der
+  Datei und liest sich unbekannt (`clock_shift`), bis es mit der Aufbewahrung wegfällt. Ging
+  die Uhr schon beim Start vor (kein gesehener Sprung vor), gilt dasselbe. Wird die Uhr danach
+  genau um dieselbe Spanne wieder vorgestellt, gilt die neue Uhr als richtig, und die Werte der
+  ersten Linie vor lesen sich als bekannt zu ihrer falschen Zeit (20.3, `_undoes`).
+- Stellt NTP die Uhr, während HA aus ist, und liegt ein aufgezeichneter Sprung vor in der
+  doppelten Zeit (z. B. ein Sprung vor um zehn Minuten zwei Tage vor einem Start 400 Tage
+  zurück), bleibt die ganze doppelte Zeit unbekannt, solange sie in der Aufbewahrung liegt:
+  im Beispiel der ganze Verlauf vor dem Stopp. Beim Start ist nicht zu sehen, ob die Uhr die
+  Linie vor dem Rücksprung fortsetzt (`_past_at_start` nutzt `_undoes` nicht). Gelöscht wird
+  nichts. Stellt NTP die Uhr im Betrieb, ist der Verlauf bekannt.
 - Ein Sprung vor, dessen Marke schon älter als 14 Tage ist (eine Linie vor, die mehr als
   14 Tage lief), schützt die doppelte Zeit nicht mehr vor dem Kürzen (`_ahead_inside` sieht
   ihn nicht).
-- Steht die Uhr mehr als 14 Tage vor, löscht die Aufbewahrung beim nächsten Takt den
-  echten Verlauf davor (so schon vor 1.52.1).
-- Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups), die in einer gelöschten
-  Linie vor datiert sind, stehen weiter in der Liste der Zeitleiste.
+- Steht die Uhr mehr als 14 Tage vor, löscht die normale Aufbewahrung (sie rechnet mit der
+  Wanduhr) beim nächsten Takt den echten Verlauf davor (so schon vor 1.52.1).
+- Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups), die in einer Linie vor
+  datiert sind, stehen weiter in der Liste der Zeitleiste.
 - Eine 1.52.0-Datei, in der die Uhr die Zeit des ersten Durchlaufs schon wieder erreicht hat,
   wird nicht repariert.
 - Nach einem unsauberen Stopp kann ein Uplink- oder Rollenwechsel, den die Engine vor dem

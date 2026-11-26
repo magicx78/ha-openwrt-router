@@ -7,8 +7,9 @@ All notable changes to the OpenWrt Router integration will be documented in this
 ## [1.52.1] - 2026-11-26
 
 Network Time Machine: zwei Lücken nach einem **Rücksprung der Uhr** geschlossen, dazu
-verwandte, die die Prüfung und das Review des PR fanden. Grundsatz unverändert: „wahr oder
-unbekannt“, nie ein falscher bekannter Wert. Bei ausgeschalteter Time Machine keine Wirkung
+verwandte, die die Prüfung und die Reviews des PR fanden. Grundsatz unverändert: „wahr oder
+unbekannt“, nie ein falscher bekannter Wert. **Wegen eines Uhrsprungs wird nichts gelöscht**
+und keine Kopie `.bak` geschrieben (Entscheidung nach dem zweiten Review des PR, siehe unten). Bei ausgeschalteter Time Machine keine Wirkung
 (die Datei wird weder gelesen noch geschrieben), kein zusätzlicher Router-Aufruf, keine neue
 Entität, keine geänderte unique_id. Entwicklerdoku: `docs/time-machine.md`, Abschnitt 20.3
 („Uhrsprung zurück“), 24 und 25.2.
@@ -24,33 +25,38 @@ Entität, keine geänderte unique_id. Entwicklerdoku: `docs/time-machine.md`, Ab
 - **Ein Sprung vor beendet eine Wartezeit.** Startet HA z. B. mit einer Uhr 400 Tage zurück
   und NTP stellt sie eine Minute später richtig, lebte die Linie zurück nur diese Minute: Die
   doppelt belegte Zeit endet an der Uhrzeit kurz vor dem Sprung vor (Parameter `wait_s` der
-  Marke), und der Verlauf vor dem Stopp ist sofort wieder bekannt (wie in 1.52.0; der erste
-  Stand dieses PR verbarg ihn 14 Tage). Stellt NTP die Uhr, während HA aus ist, gilt dasselbe
+  Marke), und der Verlauf vor dem Stopp ist wieder bekannt (wie in 1.52.0; der erste Stand
+  dieses PR verbarg ihn 14 Tage), soweit er nicht im Abschnitt liegt, in den die Zeit zurück
+  fiel (siehe „Bekannte Grenzen“). Stellt NTP die Uhr, während HA aus ist, gilt dasselbe
   beim nächsten Start (die Linie zurück schrieb nach ihrem letzten Speichern nichts), und die
   HA-Lücke beginnt am Stopp statt an der falschen Zeit. Die doppelt belegte Zeit endet nie
   mitten in einem Abschnitt der Linie davor: Dessen Rekonstruktion spielt jede Marke nach
   seiner Basis nach der Zeit ab, auch die der Linie zurück (vom Orakel gefunden; ohne diese
   Regel zeigte der Verlauf einen Kanal, den nur die Linie zurück sah). Liegt die Uhr nach dem
   Sprung vor noch vor der alten Zeit, ist der Rest bis dahin wieder doppelt belegt.
-- **Nach einem Tag Warten wird nur gelöscht, was ein aufgezeichneter Sprung vor erklärt.**
-  Stand die Uhr vor (ein Sprung vor, den die Time Machine sah) und wurde zurückgestellt,
-  läuft die Wartezeit höchstens einen Tag (`CLOCK_WAIT_MAX_S` = 86 400 s, gezählt ab dem
-  Sprung, Uhrsprünge zählen nicht als gewartete Zeit, auch über Neustarts). Dann wird erst die
-  Datei nach `.bak` kopiert (eine Kopie, jedes Mal überschrieben, im Executor), und danach
-  werden alle Marken, Abschnitte, Abdeckungen und Checkpoints gelöscht, die die Linie vor
-  datierte; die Aufzeichnung geht weiter. Was jetzt noch läuft, wird ab jetzt neu erfasst wie
-  nach „Verlauf löschen“. Ohne Kopie wird nichts gelöscht. **Erklärt** heißt: Die Marke direkt
-  vor dem Rücksprung ist ein Sprung vor um mehr als 300 s, die Uhr ging hinter dessen
-  Zielpunkt zurück, danach kam kein Sprung vor, kein früherer Rücksprung reicht in die Zeit
-  der Linie vor, und weder eine Rücksprung-Marke noch eine Infrastruktur-Marke nach dem
-  Beginn der Linie vor wurde verdrängt. Gelöscht wird nur, was nach dem Beginn der Linie vor
-  (oder nach jetzt, wenn das später ist) datiert ist. **Ohne Erklärung** (z. B. ein Start
-  weit zurück ohne NTP) wird nichts gelöscht, und die Wartezeit geht bis zur alten Uhrzeit
-  weiter. Im Log steht eine Warnung bzw. eine Info (nur Zahlen), in der Diagnose die Zähler
-  `clock_waits_capped`, `clock_waits_unexplained`, `clock_backups_failed`.
-- **Eine doppelt belegte Zeit, in die eine Linie vor geschrieben haben kann, wird nie
-  gekürzt** (weder durch einen Sprung vor noch beim Start): Deren Werte sind falsch datiert
-  und bleiben unbekannt, bis das erklärte Löschen sie entfernt.
+- **Wegen eines Uhrsprungs wird nichts gelöscht.** Ein früherer Stand dieses PR löschte nach
+  einem Tag Warten, was ein aufgezeichneter Sprung vor „erklärte“ (die Uhr ging vor und wurde
+  zurückgestellt), nach einer Kopie `.bak`. Das zweite Review fand drei Fälle, in denen das
+  echten, richtig datierten Verlauf löschte (ein harmloser Sprung vor von zehn Minuten vor
+  einem Start weit zurück; dasselbe in einem Lauf; ein Gerät ohne Uhrenbatterie, das zweimal
+  400 Tage zurück startet). Ein Sprung vor und ein gleich großer Sprung zurück sehen gleich aus,
+  ob die Linie dazwischen vor stand oder die Linien davor und danach zurück standen; keine
+  Regel kann das unterscheiden. Darum gibt es dieses Löschen nicht mehr: kein `.bak`, kein
+  Löschen von Marken, Abschnitten, Abdeckung oder Checkpoints wegen eines Uhrsprungs. Die
+  Wartezeit läuft bis zur alten Uhrzeit, ohne Obergrenze (oder bis ein Sprung vor sie
+  beendet, oder bis „Verlauf löschen“). Nach einem Tag Warten (`CLOCK_WAIT_LONG_S` = 86 400 s,
+  gezählt ab dem Sprung, Uhrsprünge zählen nicht als gewartete Zeit, auch über Neustarts)
+  steht eine Info im Log (nur Zahlen), und der Diagnose-Zähler `clock_waits_long` steigt,
+  einmal je Wartezeit und Lauf; sonst hat dieser Wert keine Wirkung.
+- **Eine doppelt belegte Zeit, in die eine Linie vor geschrieben haben kann, wird nur gekürzt,
+  wenn der Sprung vor den Rücksprung genau aufhebt.** Ging die Uhr vor (aufgezeichnet), dann
+  zurück, sind die Werte der Linie vor vielleicht falsch datiert; die doppelte Zeit bleibt
+  dann unbekannt. Ausnahme: Der Sprung vor geht so weit vor, wie der Rücksprung zurück ging
+  (auf 300 s genau; nach einem Rücksprung beim Start auch mehr, um die Zeit, die HA aus war).
+  Dann läuft die Uhr wieder auf der Linie vor dem Rücksprung weiter, und die Linie dazwischen
+  war die falsche: Die doppelte Zeit endet am Sprung vor, und der Verlauf davor ist bekannt
+  (die Fälle des zweiten Reviews). Beim Start, nachdem NTP die Uhr bei ausgeschaltetem HA
+  stellte, ist das nicht zu sehen; dort bleibt sie unbekannt (siehe „Bekannte Grenzen“).
 - **„Verlauf löschen“ beendet eine laufende Wartezeit.** „Nur Client-Verläufe löschen“ lässt
   sie stehen.
 - **Ein Rücksprung kurz vor dem Stopp wird beim Start erkannt** (gab es schon in 1.52.0):
@@ -84,34 +90,49 @@ Entität, keine geänderte unique_id. Entwicklerdoku: `docs/time-machine.md`, Ab
 - Speicher bleibt Version 1.2 (`minor_version` 2), kein neuer Schlüssel; neu ist nur der
   Marken-Parameter `wait_s` an einer `clock_shift`-Marke. Eine Datei aus 1.52.0 oder 1.51.0
   lädt ohne Verlust (Tests mit Dateien, die der unveränderte Code dieser Versionen geschrieben
-  hat). Neu ist die Kopie `.bak` der Datei vor dem erklärten Löschen; „Verlauf löschen“ und
-  das Ausschalten entfernen sie wie bisher.
+  hat). Eine Kopie `.bak` schreibt die Time Machine weiterhin nur, wenn ihre Datei unlesbar
+  ist (wie bisher).
 - Zurück auf 1.52.0 oder 1.51.0 (geprüft mit deren Code und dem echten HA-Store): Die Datei
   lädt ohne Fehler und ohne verworfene Marke; beide nehmen jede Unterversion von Version 1 an
   und behalten den unbekannten Parameter. Sie kennen `wait_s` nicht und warten wieder bis zur
   alten Wanduhrzeit, zeichnen also bis dahin nichts auf; falsche Werte gibt es dabei nicht,
-  weil die Marken einer Linie vor entweder gelöscht sind oder in der doppelten Zeit liegen.
+  weil die Marken einer Linie vor in der doppelten Zeit liegen.
   1.51.0 lässt beim eigenen Speichern die Schlüssel von 1.2 weg (wie schon bei 1.52.0).
 
 ### Bekannte Grenzen
 
-- Stand die Uhr **zurück** und kein aufgezeichneter Sprung vor erklärt es (Start ohne RTC und
-  ohne NTP), wird nichts gelöscht, aber bis die Uhr die alte Zeit erreicht oder NTP sie
-  stellt, wird nichts aufgezeichnet, auch länger als einen Tag. Schlimmster Fall: so lange,
-  wie die Uhr zurück stand. Der Verlauf davor bleibt erhalten; unbekannt bleibt die Zeit, die
-  die Uhr zurück lief, und der Rest des Abschnitts, in den sie fiel (meist bis zu einem Tag;
-  fiel sie in den letzten Abschnitt vor dem Stopp, bis zum Stopp).
-- Stand die Uhr **vor** und wurde zurückgestellt: bis zu einem Tag „nicht aufgezeichnet“, dann
-  sind die Werte der Zeit, in der die Uhr vor ging, aus dem Verlauf gelöscht (nur in `.bak`),
-  auch wenn es echte Beobachtungen zur falschen Zeit waren. Ging die Uhr schon beim Start vor
-  (kein gesehener Sprung vor), gilt das Zurückstellen als nicht erklärt: nichts gelöscht, die
-  Werte bleiben unbekannt, gewartet wird bis zur alten Uhrzeit.
+- **Nichts wird wegen eines Uhrsprungs gelöscht, dafür kann das Warten lange dauern.** Stand
+  die Uhr **zurück** und wird nicht vorgestellt (Start ohne RTC und ohne NTP), wird nichts
+  aufgezeichnet, bis die Uhr die alte Zeit erreicht: ohne Obergrenze, schlimmstenfalls so
+  lange, wie die Uhr zurück stand. Ein Sprung vor in dieser Zeit (auch ein kleiner, der die
+  Uhr nicht bis zur alten Zeit bringt) beendet das Warten nicht, er verkürzt es nur um seine
+  Größe. Bei einer Uhr 400 Tage zurück und keinem NTP sind das 400 Tage, bis „Verlauf
+  löschen“ es beendet.
+- Stand die Uhr **vor** und wurde zurückgestellt: Es wird so lange nichts aufgezeichnet, wie
+  die Uhr vor stand (bei einer Minute 400 Tage vor also 400 Tage), und diese Zeit liest sich
+  „unbekannt (Uhrsprung)“. Was die Linie vor aufzeichnete, bleibt in der Datei, liest sich
+  aber ebenfalls „unbekannt (Uhrsprung)“, solange die Rücksprung-Marke bleibt (so lange, wie
+  ihre doppelte Zeit in den 14 Tagen liegt); danach fällt es mit der Aufbewahrung weg. Der
+  Verlauf vor dem Sprung vor bleibt bekannt. Ausnahme: Wird die Uhr danach genau um dieselbe
+  Spanne wieder vorgestellt (eine falsche Zeitquelle zweimal), gilt die Uhr, mit der sie
+  dann läuft, als richtig, und die Werte der ersten Linie vor lesen sich als bekannt zu der
+  Zeit, auf die sie datiert sind, wie bei jeder Uhr vor, die nie zurückgestellt wird.
+- Stellt NTP die Uhr, während HA aus ist, und liegt ein aufgezeichneter Sprung vor in der
+  doppelten Zeit (z. B. zehn Minuten vor, zwei Tage vor einem Start 400 Tage zurück), bleibt
+  die ganze doppelte Zeit unbekannt, solange sie in den 14 Tagen liegt: im Beispiel der ganze
+  Verlauf vor dem Stopp. Gelöscht wird nichts; stellt NTP die Uhr im Betrieb, ist er bekannt.
+- **Funk dauerhaft aus** (zweites Review, P2-2): Solange ein Funk fehlt oder aus ist, bekommt
+  ein Abschnitt keine neue Basis, er kann also viele Tage lang sein. Fällt ein korrigierter
+  Rücksprung in so einen Abschnitt, bleibt die Zeit bis zu dessen Ende unbekannt, also bis zur
+  ganzen Spanne des Rücksprungs, für die ganze Aufbewahrung. Sonst ist es meist bis zu einem
+  Tag (im letzten Abschnitt vor dem Stopp bis zum Stopp). Offen, siehe `TODO.md`.
 - Ein Sprung vor, dessen Marke älter als 14 Tage ist, schützt die doppelte Zeit nicht mehr
   vor dem Kürzen.
 - Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups), die in der ersten
   Zeitlinie datiert sind, stehen weiter in der Liste der Zeitleiste.
-- Steht die Uhr mehr als 14 Tage vor, löscht die Aufbewahrung beim nächsten Takt den echten
-  Verlauf davor (so schon vor 1.52.1).
+- Steht die Uhr mehr als 14 Tage vor, löscht die normale Aufbewahrung (sie rechnet mit der
+  Wanduhr) beim nächsten Takt den echten Verlauf davor (so schon vor 1.52.1; kein Löschen
+  wegen des Sprungs selbst).
 - Eine 1.52.0-Datei, in der die Uhr die Zeit des ersten Durchlaufs schon wieder erreicht hat,
   wird nicht repariert (die beiden Durchläufe sind nicht mehr zu trennen).
 - Die übrigen Grenzen von 1.52.0 gelten weiter; offene Orakel-Befunde in `TODO.md`.

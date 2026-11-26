@@ -30,23 +30,40 @@ Entwicklerdoku: `docs/time-machine.md`.
       WAN-Zustand zum Zeitpunkt; Versionen sind die neuesten behaltenen; Export ohne
       Client-Verläufe und ohne Client-Filter.
 - [ ] **Bekannte Grenzen von 1.52.1 (Uhrsprung, `docs/time-machine.md` 20.3 und 24):**
-      - Rücksprung ohne erklärenden Sprung vor (Start ohne RTC und ohne NTP): nichts wird
-        gelöscht, aber keine Aufzeichnung, bis die Uhr die alte Zeit erreicht oder NTP sie
-        stellt, auch länger als einen Tag (schlimmster Fall: so lange, wie die Uhr zurück
-        stand). Unbekannt bleibt dazu der Rest des Abschnitts, in den die Zeit zurück fiel
-        (meist bis zu einem Tag; im letzten Abschnitt vor dem Stopp bis zum Stopp). Besser
-        ginge es nur mit der Zuordnung von Marken zu Abschnitten (Speicherformat).
-      - Uhr vor, dann zurückgestellt (erklärt): ein Tag ohne Aufzeichnung, dann sind die
-        Werte der Zeit, in der die Uhr vor ging, gelöscht (nur in `.bak`). Ging die Uhr schon
-        beim Start vor (kein gesehener Sprung vor): nicht erklärt, nichts gelöscht, Werte
-        unbekannt, Warten bis zur alten Uhrzeit.
+      Wegen eines Uhrsprungs wird nichts gelöscht (Entscheidung nach dem zweiten Review von
+      PR #72); dafür:
+      - Rücksprung, den kein Sprung vor korrigiert (Start ohne RTC und ohne NTP): keine
+        Aufzeichnung, bis die Uhr die alte Zeit erreicht, ohne Obergrenze (schlimmster Fall:
+        so lange, wie die Uhr zurück stand; „Verlauf löschen“ beendet es). Ein kleiner Sprung
+        vor verkürzt das nur um seine Größe. Nach der Korrektur bleibt dazu der Rest des
+        Abschnitts unbekannt, in den die Zeit zurück fiel (meist bis zu einem Tag; im letzten
+        Abschnitt vor dem Stopp bis zum Stopp). Besser ginge es nur mit der Zuordnung von
+        Marken zu Abschnitten (Speicherformat).
+      - Uhr vor, dann zurückgestellt: keine Aufzeichnung, so lange die Uhr vor stand; was die
+        Linie vor aufzeichnete, bleibt und liest sich unbekannt, bis es mit der Aufbewahrung
+        wegfällt. Wird die Uhr danach genau um dieselbe Spanne wieder vorgestellt, gelten die
+        Werte der ersten Linie vor als bekannt zu ihrer falschen Zeit (`_undoes`).
+      - Später, Idee: das Warten sicher verkürzen. Dafür braucht es einen Beleg, dass die
+        Uhr vor stand (nicht nur einen aufgezeichneten Sprung vor; ein Sprung vor und ein
+        gleich großer Sprung zurück sehen gleich aus, ob die Linie dazwischen vor stand oder
+        die Linien darum zurück), z. B. eine vertrauenswürdige Zeitquelle oder die Zeit des
+        Routers. Ohne Beleg: weiter warten, nichts löschen.
+      - NTP stellt die Uhr, während HA aus ist, und ein aufgezeichneter Sprung vor liegt in
+        der doppelten Zeit: die ganze doppelte Zeit bleibt unbekannt (bei einem Start 400 Tage
+        zurück der ganze Verlauf vor dem Stopp, für die Aufbewahrung). Beim Start fehlt die
+        Messung, ob die Uhr die Linie vor dem Rücksprung fortsetzt.
+      - P2-2 aus dem zweiten Review von PR #72: Mit einem Funk, der dauerhaft aus ist (ein
+        langer Abschnitt ohne neue Basis), bleibt ein korrigierter Rücksprung bis zur ganzen
+        Spanne des Sprungs unbekannt, für die ganze Aufbewahrung (`_clean_cut` endet am Ende
+        dieses Abschnitts). Später beheben, z. B. mit einer neuen Basis auch bei fehlendem Funk
+        oder mit der Zuordnung von Marken zu Abschnitten.
       - Ein Sprung vor mit einer Marke älter als 14 Tage schützt die doppelte Zeit nicht mehr
         vor dem Kürzen.
       - Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups) aus einer Linie vor
         stehen weiter in der Liste der Zeitleiste.
       - Uhr mehr als 14 Tage vor: die Aufbewahrung löscht beim nächsten Takt den echten
         Verlauf davor (schon vor 1.52.1).
-      - P2-2 aus dem Review von PR #72 (nicht behoben, nur hier vermerkt): Client-Marken des
+      - P2-2 aus dem ersten Review von PR #72 (nicht behoben, nur hier vermerkt): Client-Marken des
         zweiten Durchlaufs, die Client Stability bis `tm_clients.TS_SKEW_MAX_S` vor datiert.
         `_unseen_jump` behandelt sie nicht gesondert: Sie lösen nichts aus, gehen aber seit
         P2-1 (behoben: das Ende der doppelten Zeit kommt aus den Marken aller Quoten, Auslöser
@@ -61,6 +78,16 @@ Entwicklerdoku: `docs/time-machine.md`.
         Uplink und Funk gelten an einzelnen Zeitpunkten als bekannt, ohne dass sie beobachtet
         wurden (`*_known_without_observation`); ebenso mit dem Code von 1.52.0 und vor dem
         Review von PR #72, also nicht durch 1.52.1 entstanden. Offen.
+      - `jumpback+jumpfwd` (auch `+restartany`), Startwert 171: ein falscher Uplink
+        (`uplink_wrong`); mit dem Code von 1.52.0 identisch, also nicht durch 1.52.1
+        entstanden (zweites Review von PR #72, P2-4). Offen.
+      - `jumpback` und `jumpback+restartany`, Startwert 59, sowie
+        `jumpback+jumpfwd+restartany`, Startwert 244: `radio_down_but_present_ambiguous` /
+        `radio_wrong_channel_ambiguous` (zwei Funks auf demselben Band, siehe oben); mit dem
+        Code von 1.52.0 identisch. Offen.
+      - `jumpback+restartany`, Startwert 114: `radio_wrong_channel` (ein falscher bekannter
+        Kanal an einzelnen Zeitpunkten); mit dem Code von 1.52.0 und vor dem zweiten Review
+        von PR #72 identisch, also nicht durch 1.52.1 entstanden. Offen.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben
