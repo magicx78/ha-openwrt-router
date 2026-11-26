@@ -1,6 +1,11 @@
 # Network Time Machine (Phase 6): Plan zur Freigabe
 
-Stand: 2026-11-21 · Basis: v1.49.3 (`main` = `ea8781f`) · vom Nutzer am 2026-11-21 freigegeben (Entscheidungen in Abschnitt 15); Umsetzung beginnt mit Phase A
+Stand: 2026-11-26 · Basis: v1.49.3 (`main` = `ea8781f`) · vom Nutzer am 2026-11-21 freigegeben (Entscheidungen in Abschnitt 15)
+
+**Umsetzungsstand:** alle Phasen gebaut. Phase A in 1.50.0, Phasen B und C in 1.51.0, Phasen D bis F in
+1.52.0 (PR #71, noch nicht gemergt). Was gebaut wurde und welche Grenzen bleiben, steht in
+`docs/time-machine.md` und im CHANGELOG; dieses Dokument ist der freigegebene Plan von damals und
+wird nicht mehr fortgeschrieben.
 
 <!-- Ablage: docs/plans/2026-11-21-network-time-machine.entwurf-zur-freigabe.md · ungetrackt, bis der
      Nutzer freigibt. Keine Adressen, Hostnamen, SSIDs oder MACs echter Geräte in diesem Dokument. -->

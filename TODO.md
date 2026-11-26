@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-22 · Version: v1.52.0
+Stand: 2026-11-26 · Version: v1.52.0
 
 ---
 
@@ -28,7 +28,14 @@ Entwicklerdoku: `docs/time-machine.md`.
       im Configuration Manager die Version auswählen (bisher der Router).
 - [ ] **Bekannte Grenzen von 1.52.0:** Zustand erst ab dem Update auf 1.52.0 bekannt; kein
       WAN-Zustand zum Zeitpunkt; Versionen sind die neuesten behaltenen; Export ohne
-      Client-Verläufe und ohne Client-Filter.
+      Client-Verläufe und ohne Client-Filter; nach einem Rücksprung der Uhr keine Aufzeichnung,
+      bis die Uhr die alte Zeit überholt hat.
+- [ ] **Offene Befunde des erweiterten Orakels (zweites Review 1.52.0)**, nur bei Startwerten
+      außerhalb der festen, zum großen Teil schon vor dem Review vorhanden:
+      - nach einem unsauberen Stopp fehlt ein Uplink-/Rollenwechsel, der vor dem letzten
+        Schreiben zuerst gesehen und erst danach bestätigt wurde (seine Marke geht verloren);
+      - zwei Funks auf demselben Band: ein Kanaltausch wird dem falschen Funk zugeordnet;
+      - `gap_s` einer unsauberen `ha_gap` kann nach einem Uhrsprung negativ sein.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben

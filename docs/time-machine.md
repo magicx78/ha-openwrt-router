@@ -754,7 +754,7 @@ allem aus).
 | `config_fingerprint_changed` | `config_snapshot.fingerprint_from_coordinator` | Hash (16 hex) zwei Polls gleich und anders als der vorige; nur mit vorigem Wert |
 | `uplink_changed`, `router_role_changed` | Topologie von Network Intelligence (nur lesend) | Eltern-Router bzw. Rolle Gateway/Knoten zwei Polls gleich und anders; gemerkte (nicht gesehene) Kanten zählen nicht; `peers` vorher/nachher |
 | Verweise (`tm_refs`) | Audit-Log des Enterprise Core (Abonnement) | jeder veröffentlichte Eintrag der Arten `config_drift`, `config_event`, `rf_event`, `diag_finding`, `traffic_anomaly`, `security_incident`, der keinen Client betrifft: Verweis mit Audit-ID, Code = Audit-Typ, Zahlen wie beim Audit-Adapter |
-| `clock_shift` | Uhr | Wanduhr springt zwischen zwei Takten (300 s) um mehr als 300 s gegenüber der monotonen Uhr, oder beim Start liegt `saved_at` mehr als 300 s in der Zukunft; dann **kein** `ha_gap` (`test_clock_backwards_and_jumps_are_marked_not_gaps`) |
+| `clock_shift` | Uhr | Wanduhr springt zwischen zwei Prüfungen (Poll oder Takt) um mehr als 300 s gegenüber der monotonen Uhr (`shift_s`, rückwärts mit `lead_s`), oder beim Start liegt `saved_at` mehr als 300 s in der Zukunft; dann **kein** `ha_gap` (`test_clock_backwards_and_jumps_are_marked_not_gaps`) |
 | `tm_started` / `tm_disabled` | Schalter | `first_start`, `switched_on` (mit `off_s`), `switched_off` |
 
 Unterdrückt (Entprellung): Fingerabdruck, Uplink und Rolle brauchen zwei gleiche Polls;
@@ -1227,15 +1227,31 @@ Ein Wert ist nie geraten. Es gilt:
   (`not_recorded`, auch: vor dem Update auf 1.2 und vor „Verlauf löschen“), bis zu einer
   verlorenen Marke (`evicted`: eine Marke derselben Quote wurde vor Ablauf der Aufbewahrung
   verdrängt, gekürzt oder gelöscht).
-- **Uhrsprung zurück** (Review A): Springt die Wanduhr um mehr als 300 s (`CLOCK_JUMP_S`)
-  zurück, bei einem Tick (Wanduhr gegen monotone Uhr) oder über einen Neustart (gegen
-  `saved_at` der Datei), schreibt die Engine die Marke `clock_shift` (`code: "backwards"`,
-  `params.shift_s` < 0). Die Wanduhrzeit `[ts + shift_s, ts − shift_s]` kann doppelt belegt
-  sein und ist `clock_shift`; außerdem zählt alles **vor** der alten Wanduhrzeit als verloren
-  (`lost` der Quoten Infrastruktur und Clients bis dahin, also `evicted`), weil die Marken
-  zweier Zeitlinien sich dort mischen. Eine neue Basis entsteht erst, wenn die Wanduhr die alte
-  Zeit überholt hat. Ein Sprung **vor** (`code: "forwards"`) belegt nichts doppelt und macht
-  nichts unbekannt (Tests `test_a_*`).
+- **Uhrsprung zurück** (Review A, feine Regel seit dem zweiten Review): Springt die Wanduhr
+  um mehr als 300 s (`CLOCK_JUMP_S`) zurück, bei einem Poll oder Tick (Wanduhr gegen monotone
+  Uhr seit der letzten Prüfung) oder über einen Neustart (gegen `saved_at` der Datei),
+  schreibt die Engine die Marke `clock_shift` (`code: "backwards"`, `params.shift_s` < 0,
+  `params.lead_s` = Sekunden seit der Prüfung davor, beim Neustart 0). Der Sprung liegt in
+  diesen `lead_s` vor `ts`; unbekannt (`clock_shift`) ist nur die Wanduhrzeit
+  `[ts − lead_s − 1, ts − shift_s + 1]` (je eine Sekunde für das Runden), die doppelt belegt
+  sein kann. Davor wurde die Zeit nur einmal gelebt und bleibt bekannt; es wird **nichts**
+  verdrängt (`lost` steigt nicht). Dafür beendet die Engine beim Sprung jeden verfolgten
+  Abschnitt und öffnet einen neuen erst, wenn die Wanduhr die alte Zeit überholt hat
+  (`_follow_from`, beim Start aus den gespeicherten `clock_shift`-Marken gelesen, auch nach
+  einem Neustart in der doppelten Zeit); keine Marke des ersten Durchlaufs gerät so in einen
+  späteren Abschnitt. Ein gefestigtes Uplink und eine gefestigte Rolle gehen als Basis in den
+  ersten neuen Abschnitt über. Eine Lücke aus fehlgeschlagenen Polls vor dem Sprung bleibt
+  eine Lücke (sie wird nicht wie eine kurze Lücke verworfen); `gap_s` ist nie negativ. Eine
+  Marke ohne `lead_s` (1.51.0) behält den Beginn `ts + shift_s`. Ein Sprung **vor**
+  (`code: "forwards"`) belegt nichts doppelt und macht nichts unbekannt (Tests `test_a_*` in
+  `tests/test_tm_review_v1520.py` und `tests/test_tm_review_k_v1520.py`).
+- **LAN-Ausfall** (Review K): Die Marke `lan_down` beginnt, wenn der **letzte** Router
+  ausfiel (spätester Beginn der eigenen Ausfälle), nicht beim ersten einzelnen Ausfall. Ein
+  Router gilt erst ab seinem eigenen ersten fehlgeschlagenen Poll als „nicht erreichbar“;
+  das gilt auch für eine zurückdatierte Marke einer 1.51.0-Datei (deren Beginn zählt für die
+  anderen erst ab dem Zeitpunkt, an dem alle ausgefallen waren). Meldet sich ein Router,
+  während der LAN-Ausfall läuft, gleicht der nächste Poll die Ausfälle ab
+  (`test_k_*`).
 - **je Router unbekannt**: eigene Beobachtungslücke (`observation_gap`); Router zu `at` nicht
   verfolgt oder vor seinem ersten Funk-/Topologie-Wert (`not_observed`); Funk und Topologie
   während eines Ausfalls (`router_down`, `lan_down`); eine Marke passt zu keinem oder zu
@@ -1265,7 +1281,11 @@ Ein Wert ist nie geraten. Es gilt:
   ab der ersten Marke `client_flapping` (Tagesgrenze 200 Marken je Client erreicht), solange
   der betroffene Client verbunden sein kann, ohne dass eine Session ihn zeigt: bis zu seiner
   nächsten aufgezeichneten Session nach der letzten gedeckelten Marke, auch über Mitternacht
-  (Review G, `test_g_a_capped_client_keeps_the_list_partial_past_midnight`).
+  (Review G, `test_g_a_capped_client_keeps_the_list_partial_past_midnight`). Auch ein
+  Trennen oder die `client_flapping`-Marke des nächsten Tags beenden das; war die letzte
+  gedeckelte Marke ein Trennen (Parameter `gone`, im Panel „zuletzt getrennt“), endet
+  `partial` mit dem Ende der Marke (zweites Review, `test_g_*` in
+  `tests/test_tm_review_k_v1520.py`).
 - **„Client vergessen“** senkt die Client-Zahlen der Vergangenheit (Zustand, Vergleich) um
   diesen Client, **ohne** die Zeitpunkte als unbekannt oder unvollständig zu markieren
   (gewollt; `test_j_forget_client_lowers_past_counts_without_a_mark`).
@@ -1273,11 +1293,16 @@ Ein Wert ist nie geraten. Es gilt:
   Clients), dem Neuladen eines Routers und dem Laden nach einem Neustart setzt die Engine
   laufende Ausfälle (`router_down`, `lan_down`), Beobachtungslücken und aus gebliebene Funks
   ab diesem Moment fort (abgeleitet). Eine Lücke, die über das Löschen läuft, zählt für die
-  Lückenschwelle ab ihrem ersten fehlgeschlagenen Poll (Tests `test_c_*`).
+  Lückenschwelle ab ihrem ersten fehlgeschlagenen Poll (Tests `test_c_*`). Ein aus
+  gebliebener Funk bleibt auch nach „Verlauf löschen“ vermerkt (Review E, die Liste wird vor
+  dem Löschen der Marken gelesen; `test_e_*`).
 - **Zeitauflösung** ist der Poll: Ein Wert gilt ab dem Poll, der ihn sah („aus“ ab dem ersten
   Poll, der den Funk vermisste), bis zur nächsten Marke. Ein Ausfall gilt ab dem ersten
   fehlgeschlagenen Poll; ein fehlgeschlagener Poll kürzer als die Lückenschwelle der Engine
-  hinterlässt keine Lücke, der Router gilt dort als erreichbar.
+  hinterlässt keine Lücke, der Router gilt dort als erreichbar. Ausnahme nach einem Neustart
+  (Review L): Bis zum ersten erfolgreichen Poll eines Routers bleibt eine Lücke stehen, auch
+  eine kurze; erreichbar ist er erst ab diesem Poll
+  (`test_l_after_a_restart_a_router_is_reachable_from_its_first_good_poll`).
 
 Geprüft über die echten Schreibwege (`tests/test_tm_state_v1520.py`): Kanalwechsel genau auf
 der Marke, kurz davor und danach, vor dem Start und hinter der Aufbewahrung; Funk aus und an;
@@ -1291,7 +1316,17 @@ unbekannt, nie etwas Falsches
 des Reviewers (`tests/test_tm_oracle_review_v1520.py`): drei Router, 400 Poll-Runden, die
 Wahrheit allein aus den Eingaben der Polls, Modi `base`, `evict` (Quote 25), `clear`,
 `remove` und `jumpfwd`, je 12 feste Startwerte (darunter 4, 32 und 33); jede Abweichung, die
-nicht „unbekannt“ sagt, ist ein Fehler.
+nicht „unbekannt“ sagt, ist ein Fehler. Seit dem zweiten Review auch dessen erweitertes
+Orakel (`test_extended_oracle_is_the_truth_or_unknown`): Wanduhr mit Epochen für doppelt
+belegte Zeit, Modi mit Uhrsprüngen zurück und vor, Neustarts an beliebiger Stelle (sauber
+und unsauber), fehlschlagenden Kandidaten, Flottenausfällen, „Verlauf löschen“ (auch
+während eines Ausfalls), Verdrängung (auch offener Intervalle) und aus gebliebenen Funks,
+je mit und ohne Auswertung zwischendurch, 14 feste Startwerte. Ein Messtest
+(`test_a_one_jump_back_leaves_the_time_before_it_known`) prüft, dass nach einem Sprung
+zurück die Zeit davor bekannt bleibt (Anteil bekannter Antworten je beobachtetem
+Router-Moment vor dem Sprungziel, 40 Startwerte: Erreichbarkeit 15 % → 71 %, Funk 24 % →
+116 % (je Funk eine Antwort, daher über 100 %), Topologie 7 % → 33 %; das entspricht dem
+Stand vor der groben Regel).
 
 ### 20.4 Rechte
 
@@ -1496,7 +1531,9 @@ Ereignisschleife.
 `/compare` las `other_sources` zuerst über die ganze Zeitleiste (alle Marken auch des
 eigenen Index in Wörterbücher, zusammenführen, sortieren, Seite von 500): 1 Router 21–25 ms,
 64 Router 29–48 ms. Seit 1.52.0 zählt es nur (oben). Einen teuren kalten ersten Aufruf gibt
-es nicht (erster Aufruf 1–5 ms über den weiteren).
+es nicht (erster Aufruf 1–5 ms über den weiteren). Einzelne Läufe können durch die
+Speicherbereinigung von Python einen längeren Block zeigen (wie bei der Zeitleiste, oben);
+die Tests zählen deshalb Arbeit, keine Zeit.
 
 Die Tests prüfen **gezählte Arbeit, keine Zeit** (eine Zeitgrenze hält auf einem geteilten
 CI-Runner nicht; dort maß der Test für `/compare` einmal einen Block von 0,6 s): Python-Aufrufe ins Paket bei einem
@@ -1514,8 +1551,16 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 
 **Bekannte Grenzen.**
 
-- Ein Rücksprung der Uhr um mehr als 300 s macht die ganze Zeit vor der alten Wanduhrzeit
-  unbekannt (`evicted`), nicht nur die doppelt belegte Spanne.
+- Ein Rücksprung der Uhr um mehr als 300 s macht die doppelt belegte Spanne unbekannt und
+  verfolgt danach nichts, bis die Wanduhr die alte Zeit überholt hat (bei einer Stunde
+  Rücksprung also rund eine Stunde ohne Aufzeichnung, `not_recorded`).
+- Nach einem unsauberen Stopp kann ein Uplink- oder Rollenwechsel, den die Engine vor dem
+  letzten Schreiben zuerst sah und erst danach bestätigte, in der Rekonstruktion fehlen
+  (die Marke geht mit dem Absturz verloren); das erweiterte Orakel findet das bei einzelnen
+  Startwerten außerhalb der festen. Offen.
+- Zwei Funks auf demselben Band: ein Kanalwechsel kann dem falschen zugeordnet werden, wenn
+  beide den Kanal tauschen; das Orakel findet das bei einzelnen Startwerten mit Uhrsprung.
+  Offen.
 - „Router entfernen“ macht den Verlauf der Router unbekannt, deren Marken ihn als Peer
   nannten; Client- und Flotten-Marken mit ihm heben `lost` für alle.
 - „Client vergessen“ senkt frühere Client-Zahlen ohne Markierung.
@@ -1529,7 +1574,7 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 
 ## 25. Panel für D bis F (1.52.0)
 
-`_PANEL_VERSION` `20261122-timemachine7`. Das Panel liest die Routen `timeline`, `sessions`,
+`_PANEL_VERSION` `20261126-timemachine8`. Das Panel liest die Routen `timeline`, `sessions`,
 `state`, `compare` und `export` und fügt nichts hinzu. Dateien unter
 `frontend/topology/src/enterprise/timemachine/`: `tmState.ts` (Zerlegen der Antworten,
 Reducer, Texte und Werte in Worten, Vergleichszeilen, Sprungziele; ohne React),
@@ -1637,7 +1682,10 @@ nennt wie im Zustand den Grund in Worten.
   Öffnen liegt der Fokus auf „Abbrechen“, Escape bricht ab, Tab und Umschalt+Tab bleiben bei
   seinen Schaltflächen, nach dem Schließen geht der Fokus zurück auf „Exportieren“ (während
   des Exports `aria-disabled`, nicht `disabled`, damit er fokussierbar bleibt). Logik als
-  reine Funktionen `dialogKey` und `dialogFocus`. Nach dem Export steht, wenn
+  reine Funktionen `dialogKey` und `dialogFocus`. Den fokussierten Knopf liest `activeIn`
+  aus der Wurzel des Dialogs (`getRootNode()`), denn das Panel liegt in einem Shadow DOM, wo
+  `document.activeElement` nur der Shadow-Host ist (vorher lief Tab dort nicht im Kreis;
+  Browser-Prüfung). Nach dem Export steht, wenn
   `omitted_client_marks` > 0, „n Client-Einträge sind nicht enthalten.“ (die Zahl gilt für das
   ganze Fenster und ist auf jeder Seite gleich).
 - Client-Kürzel: `title` „<Name> · tmc_…“, ohne Namen nur das Pseudonym. Der Client-Filter ist

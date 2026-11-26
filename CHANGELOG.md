@@ -21,7 +21,7 @@ hinzu, geschrieben beim nächsten Speichern); eine 1.51.0-Datei lädt unverände
 bleiben stehen, bis 1.51.0 selbst speichert. Zustand und Vergleich sind darum
 **erst für Zeiten ab dem Update bekannt, davor „nicht aufgezeichnet“**. Bei ausgeschalteter
 Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
-`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261122-timemachine7`.
+`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261126-timemachine8`.
 
 ### Hinzugefügt
 
@@ -90,9 +90,12 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
   eine 1.51.0-Datei lädt unverändert, die Zeit davor gilt als nicht aufgezeichnet.
 - Review vor dem Release (Backend, je ein Test über die echten Schreibwege, ohne die Korrektur
   rot; dazu das Zufalls-Orakel des Reviews mit festen Startwerten in der Suite):
-  - Springt die Uhr um mehr als 300 s **zurück**, ist die doppelt belegte Zeit „unbekannt“ mit
-    dem neuen Grund `clock_shift` und alles davor „verdrängt“; ein Sprung vor macht nichts
-    unbekannt.
+  - Springt die Uhr um mehr als 300 s **zurück**, ist nur die doppelt belegte Zeit
+    „unbekannt“ mit dem neuen Grund `clock_shift`; die Zeit davor bleibt bekannt. Erkannt
+    wird der Sprung jetzt auch beim Poll; die Marke trägt `lead_s` (Sekunden seit der
+    Prüfung davor, die Grenze der doppelten Zeit). Bis die Wanduhr die alte Zeit überholt
+    hat, verfolgt die Engine nichts (auch nicht nach einem Neustart in dieser Zeit). Ein
+    Sprung vor macht nichts unbekannt.
   - Uplink- und Rollenwechsel: die Unsicherheit zählt ab dem ersten Poll, der den neuen Wert
     sah (Marken-Parameter `since`), auch über fehlgeschlagene Polls hinweg; ein noch
     unbestätigter Wechsel macht Uplink und Rolle „jetzt“ unbekannt (`settling`).
@@ -101,12 +104,24 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
     ausgefallener Router danach „erreichbar“.
   - Ein verdrängter laufender Ausfall macht die Zeit bis zu seinem Ende unbekannt (vorher
     „erreichbar“).
+  - LAN-Ausfall der ganzen Flotte: die Marke beginnt, wenn der letzte Router ausfiel, nicht
+    beim ersten einzelnen Ausfall; jeder Router ist erst ab seinem eigenen ersten
+    fehlgeschlagenen Poll „nicht erreichbar“, auch bei einer zurückdatierten Marke aus
+    1.51.0.
+  - „Verlauf löschen“ vergisst einen aus gebliebenen Funk nicht mehr.
+  - Nach einem Neustart ist ein Router erst ab seinem ersten erfolgreichen Poll
+    „erreichbar“; eine kurze Lücke davor wird nicht mehr verworfen.
   - Der Funk-Block sagt nur noch `ok`, wenn er vollständig ist; ein über einen Neustart aus
     gebliebener Funk macht ihn `partial`.
   - Vergleich: Marken zählen im Fenster der Zeitleiste (`t1 ≤ ts < t2`); neues Feld
     `changes.other_sources` zählt die Einträge der anderen Quellen dazwischen.
   - Client-Liste bleibt `partial` (`flapping`), solange ein Client über der Tagesgrenze
-    ohne Session verbunden sein kann, auch über Mitternacht.
+    ohne Session verbunden sein kann, auch über Mitternacht. War seine letzte gedeckelte
+    Marke ein Trennen (neuer Parameter `gone`, „zuletzt getrennt“), endet `partial` mit der
+    Marke; auch ein späteres Trennen beendet es.
+  - Zweites Review: das erweiterte Zufalls-Orakel des Reviewers (Uhrsprünge, Neustarts an
+    beliebiger Stelle, Flottenausfälle, Löschen, Verdrängung, aus gebliebene Funks; 14 feste
+    Startwerte) und ein Messtest für die Zeit vor einem Uhrsprung sind fester Teil der Suite.
   - Ein Fehler beim Lesen von Traffic oder WiFi RF macht nur diesen Teil `unreadable` und
     die Antwort `partial` (vorher Fehler 500).
   - Export: Client-Marken fallen schon in der Abfrage weg, eine Seite fasst bis zu 5000
@@ -121,7 +136,8 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
     über die Kaskade und ist mit der alten Regel rot.
   - Export-Bestätigung: `aria-modal`, Beschreibung über den Text, Fokus beim Öffnen auf
     „Abbrechen“, Escape bricht ab, Tab bleibt im Dialog, danach Fokus zurück auf
-    „Exportieren“. Nach dem Export „n Client-Einträge sind nicht enthalten.“
+    „Exportieren“. Tab und Umschalt+Tab laufen auch im Shadow DOM des Panels im Kreis (der
+    fokussierte Knopf wird aus der Wurzel des Dialogs gelesen, nicht aus `document`). Nach dem Export „n Client-Einträge sind nicht enthalten.“
   - Client-Kürzel: Tooltip „Name · tmc_…“ (ohne Namen nur das Pseudonym); der Client-Filter
     ist am Handy mindestens 24 px hoch und hat den Fokusring des Tabs.
   - Ein Grund steht beim Funk eines ausgefallenen Routers nur einmal; ein über einen
@@ -132,7 +148,7 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
     Uhrzeit gibt es wegen der Zeitumstellung nicht.“), eine der doppelten Stunde gilt als die
     erste, mit Hinweis.
   - Uplink- und Rollenwechsel zeigen „zuerst gesehen HH:MM:SS“; der Grund `clock_shift`
-    hat Satz und Kurztext.
+    hat Satz und Kurztext; die Parameter `lead_s` und `gone` haben Texte.
 - Traffic und WiFi RF: neue reine Lesefunktionen `window_at` und `client_ref_for_mac`,
   Security Center: `client_ref_for_mac` (Test: gleiche Ausgaben und Zustände mit und ohne
   Aufruf).
@@ -157,7 +173,11 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
   Konfiguration; die Zahl „neue Versionen“ im Vergleich zählt Versionen, nicht geänderte
   Einstellungen.
 - Der Export enthält keine Client-Verläufe und berücksichtigt den Client-Filter nicht.
-- Ein Rücksprung der Uhr macht die ganze Zeit vor der alten Uhrzeit unbekannt.
+- Nach einem Rücksprung der Uhr zeichnet die Zeitreise nichts auf, bis die Uhr die alte
+  Zeit überholt hat (bei einer Stunde Rücksprung rund eine Stunde „nicht aufgezeichnet“).
+- Nach einem Absturz kann ein Uplink- oder Rollenwechsel fehlen, der kurz vor dem letzten
+  Speichern begann; zwei Funks auf demselben Band können bei einem Kanaltausch verwechselt
+  werden. Beides findet das Orakel nur bei einzelnen Startwerten; offen.
 - „Client vergessen“ senkt die Client-Zahlen der Vergangenheit, ohne das zu markieren.
 - Sprünge in WiFi Intelligence, Netzwerkdiagnose und Traffic Analytics öffnen nur den Tab;
   Einträge der Network Intelligence führen in keinen Tab.
