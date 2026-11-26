@@ -1245,6 +1245,109 @@ Ein Wert ist nie geraten. Es gilt:
   Marke ohne `lead_s` (1.51.0) behält den Beginn `ts + shift_s`. Ein Sprung **vor**
   (`code: "forwards"`) belegt nichts doppelt und macht nichts unbekannt (Tests `test_a_*` in
   `tests/test_tm_review_v1520.py` und `tests/test_tm_review_k_v1520.py`).
+- **Uhrsprung zurück, Dauer und Neustart (1.52.1)**, Tests
+  `tests/test_tm_clock_jump_v1521.py`:
+  - *Aufbewahrung:* Eine `clock_shift`-Marke (rückwärts) bleibt, solange ihre doppelte Zeit
+    in den 14 Tagen liegt (`Mark.kept_until` = Ende der doppelten Zeit, `tm_marks.shift_until`;
+    `prune` und der Verdrängungs-Wasserstand nutzen es). Vorher wurde sie 14 Tage nach `ts`
+    gelöscht; ein Neustart danach vergaß `_follow_from`, und die später datierten Marken des
+    ersten Durchlaufs kamen als bekannte Werte zurück.
+  - *Sprung vor in der Wartezeit:* Die Linie seit dem letzten Rücksprung lebte nur bis zur
+    Wanduhrzeit kurz vor dem Sprung vor (`now − shift`). Die doppelte Zeit dieser Marke endet
+    dort (`params.wait_s`, Sekunden ab `ts`, `ceil`; `_jumped_ahead`), aber nie innerhalb
+    eines Abschnitts der Linie davor, der vor diesem Punkt begann (`_clean_cut`: dann am Ende
+    dieses Abschnitts). `tm_state` spielt in einem Abschnitt jede Marke nach seiner Basis nach
+    der Zeit ab, also auch die, die die Linie zurück dort datierte (ein Kanal, den der Router
+    nie hatte). Der Verlauf vor einem falschen Rücksprung (z. B. ein Start 400 Tage zurück, den
+    NTP eine Minute später korrigiert) ist so sofort wieder bekannt; liegt der Sprung in der
+    Aufbewahrung, bleibt zusätzlich der Rest des Abschnitts unbekannt, in den er fiel (ein
+    Abschnitt bekommt nach einem Tag eine neue Basis, `REBASE_S`, nicht solange ein Funk
+    fehlt oder aus ist). Liegt die Uhr danach noch vor der alten Wanduhrzeit,
+    ist der Rest bis dahin wieder doppelt belegt: eine neue Rücksprung-Marke ab jetzt. Der
+    Sprung zählt nicht als gewartete Zeit (`_waits` wird um ihn verschoben, ebenso bei einem
+    weiteren Rücksprung).
+  - *Beim Start schon vorbei:* Ist die Uhr beim Start hinter der alten Wanduhrzeit der
+    letzten Rücksprung-Marke (NTP stellte sie bei ausgeschaltetem HA, oder HA war so lange
+    aus), endet deren doppelte Zeit beim `saved_at` der Datei (der letzte Lauf schrieb nichts
+    danach; `_past_at_start`; ebenso nie innerhalb eines Abschnitts, `_clean_cut`), und die
+    HA-Lücke beginnt an der alten Wanduhrzeit statt am falschen `saved_at`.
+  - *Nicht gekürzt* wird eine doppelte Zeit, in die eine aufgezeichnete Linie vor geschrieben
+    haben kann (`_ahead_inside`: eine `clock_shift`-Marke `forwards` mit kleinerer `seq` und
+    `ts` vor dem Ende der doppelten Zeit). Deren Werte sind vielleicht falsch datiert; sie
+    bleiben unbekannt. **Ausnahme** beim Sprung vor im Betrieb (`_undoes`, nicht beim Start):
+    Der Sprung vor um `shift` hebt den Rücksprung `B` auf, wenn `shift + B.shift_s` zwischen
+    −300 und +300 s liegt (beide gegen die monotone Uhr gemessen); hat `B` `lead_s` 0 (beim
+    Start geschrieben, die Zeit, die HA davor aus war, steckt nicht in `B.shift_s`), reicht
+    `shift + B.shift_s` ≥ −300. Dann läuft die Uhr wieder auf der Linie vor `B` weiter, die
+    Linie dazwischen war die falsche, und die doppelte Zeit wird wie oben gekürzt. Das ist der
+    Fall eines Geräts ohne Uhrenbatterie, das nach einem harmlosen Sprung vor (zehn Minuten,
+    oder das NTP eines früheren Starts weit zurück) wieder weit zurück startet (Tests
+    `test_p1_*`). **Grenze, eine bewusste und dokumentierte Ausnahme von „wahr oder
+    unbekannt“**, auf zwei Wegen: (1) Eine falsche Zeitquelle geht zweimal um dieselbe Spanne
+    vor (`test_a_clock_set_ahead_again_by_the_same_amount_is_trusted`). (2) Nach einem
+    Rücksprung, den ein Start fand (die Uhr wurde gestellt, während HA aus war; `lead_s` 0),
+    zählt in der restlichen Wartezeit jeder größere Sprung vor, z. B. ein Host, der länger
+    angehalten war als die restliche Wartezeit
+    (`test_a_jump_back_found_at_a_start_trusts_any_larger_jump_ahead`). Dann gilt die neue
+    Uhr als richtig, und die Werte, die die frühere Linie vor aufzeichnete, lesen sich als
+    bekannt, zu einem Datum, das um den alten Vorlauf zu spät ist. Es sind echte Messungen mit
+    falschem Datum; 1.52.0 zeigte dort „unbekannt“. Gelöscht wird nichts.
+  - *Nichts wird gelöscht* (Entscheidung nach dem zweiten Review des PR). Ein früherer Stand
+    löschte nach einem Tag Warten, was ein aufgezeichneter Sprung vor „erklärte“
+    (`_explained_from`, nach einer Kopie `.bak`). Das Review fand drei Fälle, in denen das
+    echten Verlauf löschte, und jede strengere Regel scheitert an demselben Punkt: Ein Sprung
+    vor um X und später ein Sprung zurück um X sehen gleich aus, ob die Linie dazwischen vor
+    stand (dann wäre Löschen richtig) oder die Linien davor und danach zurück standen (dann
+    löscht es die Wahrheit), z. B. wenn die Time Machine zum ersten Mal mit einer Uhr weit
+    zurück startet und NTP nur den Sprung vor hinterlässt. Darum löscht die Engine wegen eines
+    Uhrsprungs nichts (kein `drop_after`, kein `async_backup`), und die Wartezeit geht immer
+    bis zur alten Wanduhrzeit, ohne Obergrenze, außer ein Sprung vor kürzt sie (oben) oder
+    „Verlauf löschen“ beendet sie. Schlimmster Fall: so lange ohne Aufzeichnung, wie die Uhr
+    zurück stand. Ein Sprung vor, der die Uhr nicht bis zur alten Zeit bringt, verkürzt das
+    Warten nur um seine Größe.
+  - *Langes Warten:* `_waits` hält je Rücksprung-Marke die Wanduhrzeit des Sprungs (`0` für
+    einen Sprung ohne Marke), verschoben um jeden späteren Uhrsprung (Uhrsprünge sind keine
+    gewartete Zeit; über Neustarts zählt die Wanduhrzeit des Sprungs). Läuft eine Wartezeit
+    `CLOCK_WAIT_LONG_S` (86 400 s; geprüft bei jedem Poll, Tick und Start, `_check_wait`),
+    steigt der Zähler `clock_waits_long` und eine Info steht im Log (nur Zahlen), einmal je
+    Wartezeit und Lauf. Sonst hat der Wert keine Wirkung.
+  - *Uhr vor, dann zurück:* Was die Linie vor datierte, bleibt in der Datei und liegt in der
+    doppelten Zeit des Rücksprungs; es liest sich `clock_shift` (unbekannt), solange die
+    Marke bleibt, und fällt danach mit der Aufbewahrung weg. Die Zeit, die die Uhr vor stand,
+    wird danach ohne Aufzeichnung noch einmal gelebt (`test_a_clock_ahead_then_corrected_*`,
+    `test_gap2_*`).
+
+    Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups), die in der ersten
+    Zeitlinie datiert sind, stehen weiter in der Liste der Zeitleiste; sie liegen in deren
+    eigenem Speicher.
+  - *Abschnitte und offene Intervalle am Sprung:* Bei jedem Sprung (vor oder zurück) endet
+    jeder verfolgte Abschnitt bei der letzten Prüfung davor; bei einem Rücksprung im Betrieb
+    enden offene Intervalle dort mit `unknown` (eine offene Lücke behält `gap_s`), und was
+    noch läuft, wird ab jetzt neu erfasst. Sonst beanspruchte ein Abschnitt über einen
+    Sprung vor die übersprungene Zeit, oder die neue Linie schloss das Intervall der alten
+    bei einer früheren Wanduhrzeit (vom Orakel gefunden).
+  - *Neustart:* `_jumps_from_index` liest `_follow_from` und die laufenden Wartezeiten aus den
+    Marken (eine mit `wait_s` ist entschieden und wartet nicht mehr); stehen `lost`-Werte mehr
+    als 300 s vor jetzt (die Marke selbst wurde verdrängt), wartet die Engine bis dahin
+    (`_lost_ahead`; auch wenn danach eine andere Rücksprung-Marke gekürzt wird,
+    `_follow_until`).
+    `_unseen_jump`: Liegt das Neueste der Datei (Marken der Infrastruktur-Quote, Abschnitte)
+    mehr als 300 s nach `saved_at`, sprang die Uhr vor dem Stopp zurück, ohne dass ein Poll
+    oder Tick es sah; der Start schreibt dann `clock_shift` bei `saved_at` mit
+    `lead_s` = 600 (`UNSEEN_LEAD_S`) und wartet wie sonst. Die doppelte Zeit endet am Neuesten
+    jeder Quote (eine Client- oder Modul-Marke kann später datiert sein); Auslöser bleibt nur
+    die Infrastruktur.
+  - *Löschen:* „Verlauf löschen“ beendet jede Wartezeit, „Nur Client-Verläufe“ nicht.
+  - *Ausfallbeginn:* Der Flotten-Tracker kann einen Beginn aus dem ersten Durchlauf
+    behalten. Liegt er nach jetzt oder in der doppelten Zeit irgendeiner `clock_shift`-Marke
+    (der ganzen, ohne `wait_s`), wird er nicht übernommen (`_outage_since`): Der Ausfall
+    beginnt bei der offenen Lücke, die er übernimmt, sonst jetzt; dasselbe gilt für den
+    Beginn eines LAN-Ausfalls.
+  - *Speicher:* kein neuer Schlüssel, `wait_s` ist ein Marken-Parameter. 1.52.0 und 1.51.0
+    laden eine 1.52.1-Datei ohne Verlust (ihr `_migrate` nimmt jede Unterversion von
+    Version 1, `unpack` jeden gültigen Parameter); sie warten ohne `wait_s` wieder bis zur
+    alten Wanduhrzeit, zeigen aber nichts Falsches: Was eine Linie vor datierte, liegt in der
+    doppelten Zeit ohne `wait_s`.
 - **LAN-Ausfall** (Review K): Die Marke `lan_down` beginnt, wenn der **letzte** Router
   ausfiel (spätester Beginn der eigenen Ausfälle), nicht beim ersten einzelnen Ausfall. Ein
   Router gilt erst ab seinem eigenen ersten fehlgeschlagenen Poll als „nicht erreichbar“;
@@ -1552,8 +1655,47 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 **Bekannte Grenzen.**
 
 - Ein Rücksprung der Uhr um mehr als 300 s macht die doppelt belegte Spanne unbekannt und
-  verfolgt danach nichts, bis die Wanduhr die alte Zeit überholt hat (bei einer Stunde
-  Rücksprung also rund eine Stunde ohne Aufzeichnung, `not_recorded`).
+  verfolgt danach nichts, bis die Wanduhr die alte Zeit überholt hat oder ein Sprung vor die
+  Wartezeit beendet (bei einer Stunde Rücksprung also rund eine Stunde ohne Aufzeichnung,
+  `not_recorded`; Abschnitt 20.3).
+- **Wegen eines Uhrsprungs wird nichts gelöscht** (20.3). Stand die Uhr **zurück** und wird
+  nicht vorgestellt (z. B. Start ohne RTC und ohne NTP), wird nichts verfolgt, bis die Uhr
+  die alte Zeit erreicht: ohne Obergrenze, schlimmstenfalls so lange, wie die Uhr zurück
+  stand (bis „Verlauf löschen“). Ein Sprung vor in dieser Zeit, der die Uhr nicht bis zur
+  alten Zeit bringt, verkürzt das nur um seine Größe. Der Verlauf davor bleibt erhalten;
+  wird die Uhr vorgestellt, bleibt unbekannt die Zeit, die die Uhr zurück lief, und der Rest
+  des Abschnitts, in den sie fiel (meist bis zu einem Tag). Fiel sie in den letzten
+  Abschnitt vor dem Stopp, bleibt die Zeit bis zum Stopp unbekannt wie in 1.52.0.
+- **Funk dauerhaft aus** (zweites Review, P2-2): Solange ein Funk fehlt oder aus ist, bekommt
+  ein Abschnitt keine neue Basis (`REBASE_S`); fällt ein korrigierter Rücksprung in so einen
+  langen Abschnitt, bleibt die Zeit bis zu dessen Ende unbekannt, bis zur ganzen Spanne des
+  Rücksprungs, für die ganze Aufbewahrung (`_clean_cut`). Offen (`TODO.md`).
+- Stand die Uhr **vor** und wurde zurückgestellt: So lange, wie die Uhr vor stand, wird nichts
+  verfolgt (eine Minute 400 Tage vor: 400 Tage). Was die Linie vor aufzeichnete, bleibt in der
+  Datei und liest sich unbekannt (`clock_shift`), bis es mit der Aufbewahrung wegfällt. Ging
+  die Uhr schon beim Start vor (kein gesehener Sprung vor), gilt dasselbe. Bewusste,
+  dokumentierte Ausnahme von „wahr oder unbekannt“ (20.3, `_undoes`), auf zwei Wegen: Die Uhr
+  wird danach genau um dieselbe Spanne wieder vorgestellt; oder sie wurde zurückgestellt,
+  während HA aus war (der Start fand den Rücksprung), und in der restlichen Wartezeit kommt
+  irgendein größerer Sprung vor (z. B. ein Host, der länger angehalten war als die restliche
+  Wartezeit). Dann gilt die neue Uhr als richtig, und die Werte der früheren Linie vor lesen
+  sich als bekannt, zu einem Datum, das um den alten Vorlauf zu spät ist: echte Messungen mit
+  falschem Datum, wo 1.52.0 „unbekannt“ zeigte.
+- Stellt NTP die Uhr, während HA aus ist, und liegt ein aufgezeichneter Sprung vor in der
+  doppelten Zeit (z. B. ein Sprung vor um zehn Minuten zwei Tage vor einem Start 400 Tage
+  zurück), bleibt die ganze doppelte Zeit unbekannt, solange sie in der Aufbewahrung liegt:
+  im Beispiel der ganze Verlauf vor dem Stopp. Beim Start ist nicht zu sehen, ob die Uhr die
+  Linie vor dem Rücksprung fortsetzt (`_past_at_start` nutzt `_undoes` nicht). Gelöscht wird
+  nichts. Stellt NTP die Uhr im Betrieb, ist der Verlauf bekannt.
+- Ein Sprung vor, dessen Marke schon älter als 14 Tage ist (eine Linie vor, die mehr als
+  14 Tage lief), schützt die doppelte Zeit nicht mehr vor dem Kürzen (`_ahead_inside` sieht
+  ihn nicht).
+- Steht die Uhr mehr als 14 Tage vor, löscht die normale Aufbewahrung (sie rechnet mit der
+  Wanduhr) beim nächsten Takt den echten Verlauf davor (so schon vor 1.52.1).
+- Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups), die in einer Linie vor
+  datiert sind, stehen weiter in der Liste der Zeitleiste.
+- Eine 1.52.0-Datei, in der die Uhr die Zeit des ersten Durchlaufs schon wieder erreicht hat,
+  wird nicht repariert.
 - Nach einem unsauberen Stopp kann ein Uplink- oder Rollenwechsel, den die Engine vor dem
   letzten Schreiben zuerst sah und erst danach bestätigte, in der Rekonstruktion fehlen
   (die Marke geht mit dem Absturz verloren); das erweiterte Orakel findet das bei einzelnen
@@ -1594,7 +1736,12 @@ Reihe (32 px). Test: `tmRender.test.mjs`, „the four-chip view switch …“.
 ### 25.2 Zustand
 
 Feld `datetime-local` (Ortszeit, Sekunden, Vorgabe jetzt), „Jetzt“, „−1 h“, „−24 h“,
-Router-Auswahl. Eine Eingabe lädt nach 400 ms; bei „Jetzt“ fragt die Ansicht `at = jetzt − 1 s`
+Router-Auswahl. Das Öffnen der Ansicht lädt sofort mit den vorbelegten Feldern, eine Eingabe
+nach 400 ms (`loadDelay`, `TM_DEBOUNCE_MS`; auf einer verborgenen Seite erst, wenn sie wieder
+sichtbar ist). Vor der ersten Antwort steht „Zustand wird geladen …“ bzw. „Vergleich wird
+geladen …“; der Hinweis „Einen Zeitpunkt wählen.“ / „„Von“ und „Bis“ wählen.“ nur, wenn ein
+Feld wirklich leer ist (`waitingBody`; 1.52.1, bis dahin stand er in der Pause vor dem ersten
+Laden unter vorbelegten Feldern). Bei „Jetzt“ fragt die Ansicht `at = jetzt − 1 s`
 (keine Zukunft durch eine Uhrabweichung), setzt das Feld auf genau diese Zeit
 (`stateLoadAt`; Überschrift und Feld stimmen immer überein, auch nach dem Zurückkehren in die
 Ansicht) und lädt höchstens alle 60 s neu, solange die Seite sichtbar ist; unter „Jetzt“ ist

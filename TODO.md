@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-26 · Version: v1.52.0
+Stand: 2026-11-26 · Version: v1.52.1
 
 ---
 
@@ -28,14 +28,75 @@ Entwicklerdoku: `docs/time-machine.md`.
       im Configuration Manager die Version auswählen (bisher der Router).
 - [ ] **Bekannte Grenzen von 1.52.0:** Zustand erst ab dem Update auf 1.52.0 bekannt; kein
       WAN-Zustand zum Zeitpunkt; Versionen sind die neuesten behaltenen; Export ohne
-      Client-Verläufe und ohne Client-Filter; nach einem Rücksprung der Uhr keine Aufzeichnung,
-      bis die Uhr die alte Zeit überholt hat.
+      Client-Verläufe und ohne Client-Filter.
+- [ ] **Bekannte Grenzen von 1.52.1 (Uhrsprung, `docs/time-machine.md` 20.3 und 24):**
+      Wegen eines Uhrsprungs wird nichts gelöscht (Entscheidung nach dem zweiten Review von
+      PR #72); dafür:
+      - Rücksprung, den kein Sprung vor korrigiert (Start ohne RTC und ohne NTP): keine
+        Aufzeichnung, bis die Uhr die alte Zeit erreicht, ohne Obergrenze (schlimmster Fall:
+        so lange, wie die Uhr zurück stand; „Verlauf löschen“ beendet es). Ein kleiner Sprung
+        vor verkürzt das nur um seine Größe. Nach der Korrektur bleibt dazu der Rest des
+        Abschnitts unbekannt, in den die Zeit zurück fiel (meist bis zu einem Tag; im letzten
+        Abschnitt vor dem Stopp bis zum Stopp). Besser ginge es nur mit der Zuordnung von
+        Marken zu Abschnitten (Speicherformat).
+      - Uhr vor, dann zurückgestellt: keine Aufzeichnung, so lange die Uhr vor stand; was die
+        Linie vor aufzeichnete, bleibt und liest sich unbekannt, bis es mit der Aufbewahrung
+        wegfällt. Bewusste, dokumentierte Ausnahme von „wahr oder unbekannt“ (`_undoes`), auf
+        zwei Wegen: Die Uhr wird danach genau um dieselbe Spanne wieder vorgestellt; oder sie
+        wurde zurückgestellt, während HA aus war (der Start fand den Rücksprung), und in der
+        restlichen Wartezeit kommt irgendein größerer Sprung vor (z. B. ein Host, der länger
+        angehalten war als die restliche Wartezeit). Dann lesen sich die Werte der früheren
+        Linie vor als bekannt, zu einem Datum, das um den alten Vorlauf zu spät ist: echte
+        Messungen mit falschem Datum, wo 1.52.0 „unbekannt“ zeigte.
+      - Später, Idee: das Warten sicher verkürzen. Dafür braucht es einen Beleg, dass die
+        Uhr vor stand (nicht nur einen aufgezeichneten Sprung vor; ein Sprung vor und ein
+        gleich großer Sprung zurück sehen gleich aus, ob die Linie dazwischen vor stand oder
+        die Linien darum zurück), z. B. eine vertrauenswürdige Zeitquelle oder die Zeit des
+        Routers. Ohne Beleg: weiter warten, nichts löschen.
+      - NTP stellt die Uhr, während HA aus ist, und ein aufgezeichneter Sprung vor liegt in
+        der doppelten Zeit: die ganze doppelte Zeit bleibt unbekannt (bei einem Start 400 Tage
+        zurück der ganze Verlauf vor dem Stopp, für die Aufbewahrung). Beim Start fehlt die
+        Messung, ob die Uhr die Linie vor dem Rücksprung fortsetzt.
+      - P2-2 aus dem zweiten Review von PR #72: Mit einem Funk, der dauerhaft aus ist (ein
+        langer Abschnitt ohne neue Basis), bleibt ein korrigierter Rücksprung bis zur ganzen
+        Spanne des Sprungs unbekannt, für die ganze Aufbewahrung (`_clean_cut` endet am Ende
+        dieses Abschnitts). Später beheben, z. B. mit einer neuen Basis auch bei fehlendem Funk
+        oder mit der Zuordnung von Marken zu Abschnitten.
+      - Ein Sprung vor mit einer Marke älter als 14 Tage schützt die doppelte Zeit nicht mehr
+        vor dem Kürzen.
+      - Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups) aus einer Linie vor
+        stehen weiter in der Liste der Zeitleiste.
+      - Uhr mehr als 14 Tage vor: die Aufbewahrung löscht beim nächsten Takt den echten
+        Verlauf davor (schon vor 1.52.1).
+      - P2-2 aus dem ersten Review von PR #72 (nicht behoben, nur hier vermerkt): Client-Marken des
+        zweiten Durchlaufs, die Client Stability bis `tm_clients.TS_SKEW_MAX_S` vor datiert.
+        `_unseen_jump` behandelt sie nicht gesondert: Sie lösen nichts aus, gehen aber seit
+        P2-1 (behoben: das Ende der doppelten Zeit kommt aus den Marken aller Quoten, Auslöser
+        bleibt die Infrastruktur) in das Ende der doppelten Zeit ein.
 - [ ] **Offene Befunde des erweiterten Orakels (zweites Review 1.52.0)**, nur bei Startwerten
       außerhalb der festen, zum großen Teil schon vor dem Review vorhanden:
       - nach einem unsauberen Stopp fehlt ein Uplink-/Rollenwechsel, der vor dem letzten
         Schreiben zuerst gesehen und erst danach bestätigt wurde (seine Marke geht verloren);
       - zwei Funks auf demselben Band: ein Kanaltausch wird dem falschen Funk zugeordnet;
-      - `gap_s` einer unsauberen `ha_gap` kann nach einem Uhrsprung negativ sein.
+      - `gap_s` einer unsauberen `ha_gap` kann nach einem Uhrsprung negativ sein;
+      - `radiooff+restartany+jumpback+jumpfwd+eval`, Startwert 41: Erreichbarkeit, Rolle,
+        Uplink und Funk gelten an einzelnen Zeitpunkten als bekannt, ohne dass sie beobachtet
+        wurden (`*_known_without_observation`); ebenso mit dem Code von 1.52.0 und vor dem
+        Review von PR #72, also nicht durch 1.52.1 entstanden. Offen.
+      - `jumpback+jumpfwd` (auch `+restartany`), Startwert 171: ein falscher Uplink
+        (`uplink_wrong`); mit dem Code von 1.52.0 identisch, also nicht durch 1.52.1
+        entstanden (zweites Review von PR #72, P2-4). Offen.
+      - `jumpback` und `jumpback+restartany`, Startwert 59, sowie
+        `jumpback+jumpfwd+restartany`, Startwert 244: `radio_down_but_present_ambiguous` /
+        `radio_wrong_channel_ambiguous` (zwei Funks auf demselben Band, siehe oben); mit dem
+        Code von 1.52.0 identisch. Offen.
+      - `jumpback+restartany`, Startwert 114: `radio_wrong_channel` (ein falscher bekannter
+        Kanal an einzelnen Zeitpunkten); mit dem Code von 1.52.0 und vor dem zweiten Review
+        von PR #72 identisch, also nicht durch 1.52.1 entstanden. Offen.
+      - `jumpback+jumpfwd`, Startwerte 264 und 298, sowie `jumpback+jumpfwd+restartany`,
+        Startwerte 261 und 264: schon mit dem Code von 1.52.0 vorhanden (das Review von PR #72
+        bestätigte, dass die Befunde des Stands von 1.52.1 eine Teilmenge derer von 1.52.0
+        sind). Offen.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben
