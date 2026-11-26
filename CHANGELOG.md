@@ -4,6 +4,76 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.52.1] - 2026-11-26
+
+Network Time Machine: zwei Lücken nach einem **Rücksprung der Uhr** geschlossen, dazu zwei
+verwandte, die die Prüfung dabei fand. Grundsatz unverändert: „wahr oder unbekannt“, nie ein
+falscher bekannter Wert. Bei ausgeschalteter Time Machine keine Wirkung (die Datei wird weder
+gelesen noch geschrieben), kein zusätzlicher Router-Aufruf, keine neue Entität, keine
+geänderte unique_id, keine Änderung am Panel. Entwicklerdoku: `docs/time-machine.md`,
+Abschnitt 20.3 („Uhrsprung zurück“) und 24.
+
+### Behoben
+
+- **Ein Rücksprung um mehr als 14 Tage überlebt einen Neustart.** Bisher wurde die Wartezeit
+  nach dem Sprung beim Start nur aus der Marke `clock_shift` gelesen, und diese Marke wurde
+  14 Tage nach dem Sprung gelöscht. Ein Neustart danach vergaß die Wartezeit, und die Marken
+  des ersten Durchlaufs (später datiert, länger behalten) kamen als bekannte Werte zurück,
+  z. B. ein Kanal, den der Router in dieser Zeit nie hatte. Jetzt bleibt die Marke so lange,
+  wie die doppelt belegte Zeit, die sie nennt, in den 14 Tagen liegt.
+- **Die Wartezeit hat eine Obergrenze: einen Tag ab dem Sprung** (`CLOCK_WAIT_MAX_S` =
+  86 400 s). Bisher stand die Uhr z. B. kurz 400 Tage vor, und nach der Korrektur zeichnete
+  die Zeitreise 400 Tage nichts auf. Bleibt die Uhr einen Tag lang hinter ihrer alten Zeit,
+  gilt sie als richtig und der erste Durchlauf der Zeit danach als falsch: Alle Marken,
+  Abschnitte, Abdeckungen und Checkpoints, die nach „jetzt“ datiert sind, werden gelöscht
+  (nur der erste Durchlauf kann sie geschrieben haben), und die Aufzeichnung geht weiter.
+  Was jetzt noch läuft (ein Ausfall, ein fehlschlagender Router, ein ausgeschalteter Funk, ein
+  verbundener Client), wird ab jetzt neu erfasst wie nach „Verlauf löschen“. Die doppelt
+  belegte Zeit bis zum Löschen bleibt „unbekannt“ (`clock_shift`); die Marke hält ihre Länge
+  im neuen Parameter `wait_s`. Im Log steht eine Warnung (nur Zahlen), in der Diagnose der
+  Zähler `clock_waits_capped`. Ein Neustart in der Wartezeit ändert nichts, die Frist zählt
+  ab dem Sprung; war HA über die Frist hinaus aus, wird beim nächsten Start gelöscht.
+- **„Verlauf löschen“ beendet eine laufende Wartezeit.** „Nur Client-Verläufe löschen“ lässt
+  sie stehen.
+- **Ein Rücksprung kurz vor dem Stopp wird beim Start erkannt** (gab es schon in 1.52.0):
+  Sprang die Uhr zurück und HA hielt an, bevor ein Poll oder Tick es sah, war die Datei vor
+  ihren eigenen Marken datiert, und die doppelte Zeit zeigte die Werte des ersten Durchlaufs.
+  Liegt das Neueste der Datei mehr als 300 s nach ihrem `saved_at`, schreibt der Start jetzt
+  eine `clock_shift`-Marke (`lead_s` 600) und wartet wie bei jedem Rücksprung.
+- **Ein Ausfallbeginn des Flotten-Trackers aus der doppelt belegten Zeit wird nicht mehr
+  übernommen** (vom strengeren Orakel nach dem Löschen gefunden): Der Tracker kann einen
+  Beginn aus dem ersten Durchlauf behalten. Übernahm der Ausfall dann eine offene Lücke,
+  begann er bei diesem Zeitpunkt, und der Router galt zwischen Lücke und diesem Zeitpunkt als
+  „erreichbar“. Liegt der Beginn nach „jetzt“ oder in der doppelten Zeit einer
+  `clock_shift`-Marke (der ganzen, die Frist kürzt sie dafür nicht), beginnt der Ausfall bei
+  der Lücke, die er übernimmt, sonst jetzt. Ohne Rücksprung bleibt alles wie bisher.
+
+### Geändert
+
+- Speicher bleibt Version 1.2 (`minor_version` 2), kein neuer Schlüssel; neu ist nur der
+  Marken-Parameter `wait_s` an einer gekürzten `clock_shift`-Marke. Eine Datei aus 1.52.0
+  oder 1.51.0 lädt ohne Verlust (Tests mit Dateien, die der unveränderte Code dieser
+  Versionen geschrieben hat); eine laufende Wartezeit aus der alten Datei wird einen Tag nach
+  ihrem Sprung gekürzt.
+- Zurück auf 1.52.0 oder 1.51.0 (geprüft mit deren Code und dem echten HA-Store): Die Datei
+  lädt ohne Fehler und ohne verworfene Marke; beide nehmen jede Unterversion von Version 1 an
+  und behalten den unbekannten Parameter. Sie kennen `wait_s` nicht und warten wieder bis zur
+  alten Wanduhrzeit, zeichnen also bis dahin nichts auf; falsche Werte gibt es dabei nicht,
+  weil die Marken des ersten Durchlaufs schon gelöscht sind. 1.51.0 lässt beim eigenen
+  Speichern die Schlüssel von 1.2 weg (wie schon bei 1.52.0).
+
+### Bekannte Grenzen
+
+- Nach einem Rücksprung um mehr als einen Tag ist die Zeit bis zum Löschen, also bis zu einem
+  Tag, „unbekannt“ bzw. „nicht aufgezeichnet“. Bei kürzeren Sprüngen wie bisher: bei einer
+  Stunde rund eine Stunde.
+- Stand die Uhr falsch **zurück** und wird erst nach mehr als einem Tag korrigiert, gilt der
+  echte Verlauf nach dem Löschzeitpunkt als erster Durchlauf und ist verloren; nach der
+  Korrektur (ein Sprung vor) geht die Aufzeichnung weiter.
+- Eine 1.52.0-Datei, in der die Uhr die Zeit des ersten Durchlaufs schon wieder erreicht hat,
+  wird nicht repariert (die beiden Durchläufe sind nicht mehr zu trennen).
+- Die übrigen Grenzen von 1.52.0 gelten weiter.
+
 ## [1.52.0] - 2026-11-26
 
 Network Time Machine, Phasen D bis F: Der Tab „Zeitreise“ zeigt den **Zustand des Netzes zu

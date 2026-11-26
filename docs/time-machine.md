@@ -1245,6 +1245,42 @@ Ein Wert ist nie geraten. Es gilt:
   Marke ohne `lead_s` (1.51.0) behält den Beginn `ts + shift_s`. Ein Sprung **vor**
   (`code: "forwards"`) belegt nichts doppelt und macht nichts unbekannt (Tests `test_a_*` in
   `tests/test_tm_review_v1520.py` und `tests/test_tm_review_k_v1520.py`).
+- **Uhrsprung zurück, Dauer und Neustart (1.52.1)**, Tests
+  `tests/test_tm_clock_jump_v1521.py`:
+  - *Aufbewahrung:* Eine `clock_shift`-Marke (rückwärts) bleibt, solange ihre doppelte Zeit
+    in den 14 Tagen liegt (`Mark.kept_until` = Ende der doppelten Zeit, `tm_marks.shift_until`;
+    `prune` und der Verdrängungs-Wasserstand nutzen es). Vorher wurde sie 14 Tage nach `ts`
+    gelöscht; ein Neustart danach vergaß `_follow_from`, und die später datierten Marken des
+    ersten Durchlaufs kamen als bekannte Werte zurück.
+  - *Obergrenze:* Die Wartezeit endet an der alten Wanduhrzeit oder spätestens
+    `CLOCK_WAIT_MAX_S` (86 400 s) nach dem Sprung (`_waits`: Marke → Wanduhrzeit des Sprungs,
+    `0` für einen Sprung ohne Marke; geprüft bei jedem Poll, Tick und Start,
+    `_check_wait`). Dann löscht `_end_wait` alles, was nach jetzt datiert ist: Marken
+    (`MarkIndex.drop_after`: Intervalle, die danach enden, enden jetzt mit `unknown`; `lost`
+    wird auf jetzt begrenzt), Abschnitte, Abdeckung und Client-Abdeckung, Checkpoints
+    (`TmStore.drop_after`). Offene Intervalle, die nach jetzt begannen, werden ab jetzt neu
+    erfasst wie nach „Verlauf löschen“ (`_after_reset`, `ClientRecorder.reopen`). Jede noch
+    wartende `clock_shift`-Marke bekommt `params.wait_s` (Sekunden ab `ts`, `ceil`); ihre
+    doppelte Zeit endet damit jetzt und bleibt bis dahin unbekannt. Vor jetzt wird nichts
+    angefasst. Zähler `clock_waits_capped`, Warnung im Log nur mit Zahlen.
+  - *Neustart:* `_jumps_from_index` liest `_follow_from` und die laufenden Wartezeiten aus den
+    Marken (mit `wait_s`); stehen `lost`-Werte mehr als 300 s vor jetzt (die Marke selbst
+    wurde verdrängt), wartet die Engine bis dahin und die Frist läuft ab dem Start.
+    `_unseen_jump`: Liegt das Neueste der Datei (Marken der Infrastruktur-Quote, Abschnitte)
+    mehr als 300 s nach `saved_at`, sprang die Uhr vor dem Stopp zurück, ohne dass ein Poll
+    oder Tick es sah; der Start schreibt dann `clock_shift` bei `saved_at` mit
+    `lead_s` = 600 (`UNSEEN_LEAD_S`) und wartet wie sonst.
+  - *Löschen:* „Verlauf löschen“ beendet jede Wartezeit, „Nur Client-Verläufe“ nicht.
+  - *Ausfallbeginn:* Der Flotten-Tracker kann einen Beginn aus dem ersten Durchlauf
+    behalten. Liegt er nach jetzt oder in der doppelten Zeit irgendeiner `clock_shift`-Marke
+    (der ganzen, ohne `wait_s`), wird er nicht übernommen (`_outage_since`): Der Ausfall
+    beginnt bei der offenen Lücke, die er übernimmt, sonst jetzt; dasselbe gilt für den
+    Beginn eines LAN-Ausfalls.
+  - *Speicher:* kein neuer Schlüssel, `wait_s` ist ein Marken-Parameter. 1.52.0 und 1.51.0
+    laden eine 1.52.1-Datei ohne Verlust (ihr `_migrate` nimmt jede Unterversion von
+    Version 1, `unpack` jeden gültigen Parameter); sie warten ohne `wait_s` wieder bis zur
+    alten Wanduhrzeit, zeigen aber nichts Falsches, weil die Marken des ersten Durchlaufs
+    schon gelöscht sind.
 - **LAN-Ausfall** (Review K): Die Marke `lan_down` beginnt, wenn der **letzte** Router
   ausfiel (spätester Beginn der eigenen Ausfälle), nicht beim ersten einzelnen Ausfall. Ein
   Router gilt erst ab seinem eigenen ersten fehlgeschlagenen Poll als „nicht erreichbar“;
@@ -1552,8 +1588,13 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 **Bekannte Grenzen.**
 
 - Ein Rücksprung der Uhr um mehr als 300 s macht die doppelt belegte Spanne unbekannt und
-  verfolgt danach nichts, bis die Wanduhr die alte Zeit überholt hat (bei einer Stunde
-  Rücksprung also rund eine Stunde ohne Aufzeichnung, `not_recorded`).
+  verfolgt danach nichts, bis die Wanduhr die alte Zeit überholt hat, höchstens einen Tag
+  ab dem Sprung (bei einer Stunde Rücksprung also rund eine Stunde ohne Aufzeichnung,
+  `not_recorded`; seit 1.52.1 nach einem Tag Schluss, Abschnitt 20.3).
+- Endet die Wartezeit an der Obergrenze, ist alles nach diesem Zeitpunkt Datierte gelöscht.
+  Stand die Uhr falsch zurück und wurde erst nach mehr als einem Tag korrigiert, ist damit
+  der echte Verlauf danach verloren. Eine 1.52.0-Datei, in der die Uhr die Zeit des ersten
+  Durchlaufs schon wieder erreicht hat, wird nicht repariert.
 - Nach einem unsauberen Stopp kann ein Uplink- oder Rollenwechsel, den die Engine vor dem
   letzten Schreiben zuerst sah und erst danach bestätigte, in der Rekonstruktion fehlen
   (die Marke geht mit dem Absturz verloren); das erweiterte Orakel findet das bei einzelnen

@@ -29,7 +29,9 @@ Entwicklerdoku: `docs/time-machine.md`.
 - [ ] **Bekannte Grenzen von 1.52.0:** Zustand erst ab dem Update auf 1.52.0 bekannt; kein
       WAN-Zustand zum Zeitpunkt; Versionen sind die neuesten behaltenen; Export ohne
       Client-Verläufe und ohne Client-Filter; nach einem Rücksprung der Uhr keine Aufzeichnung,
-      bis die Uhr die alte Zeit überholt hat.
+      bis die Uhr die alte Zeit überholt hat, seit 1.52.1 höchstens einen Tag (danach wird
+      alles nach jetzt Datierte gelöscht; ein erst nach über einem Tag korrigierter falscher
+      Rücksprung kostet den echten Verlauf danach).
 - [ ] **Offene Befunde des erweiterten Orakels (zweites Review 1.52.0)**, nur bei Startwerten
       außerhalb der festen, zum großen Teil schon vor dem Review vorhanden:
       - nach einem unsauberen Stopp fehlt ein Uplink-/Rollenwechsel, der vor dem letzten
