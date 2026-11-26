@@ -6,7 +6,7 @@ Home Assistant custom integration für OpenWrt Router via ubus/rpcd JSON-RPC.
 GitHub: https://github.com/magicx78/ha-openwrt-router
 Domain: `openwrt_router`
 HACS: Custom Repository (Ziel: Default Store)
-Stand: Version 1.52.0 (2026-11-22)
+Stand: Version 1.52.0 (2026-11-26)
 
 ## Projektstruktur
 

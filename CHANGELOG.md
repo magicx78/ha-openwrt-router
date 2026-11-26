@@ -4,7 +4,7 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
-## [1.52.0] - 2026-11-22
+## [1.52.0] - 2026-11-26
 
 Network Time Machine, Phasen D bis F: Der Tab „Zeitreise“ zeigt den **Zustand des Netzes zu
 einem Zeitpunkt**, **vergleicht zwei Zeitpunkte**, **exportiert** die Marken eines Fensters
@@ -21,7 +21,7 @@ hinzu, geschrieben beim nächsten Speichern); eine 1.51.0-Datei lädt unverände
 bleiben stehen, bis 1.51.0 selbst speichert. Zustand und Vergleich sind darum
 **erst für Zeiten ab dem Update bekannt, davor „nicht aufgezeichnet“**. Bei ausgeschalteter
 Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
-`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261126-timemachine8`.
+`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261126-timemachine9`.
 
 ### Hinzugefügt
 
@@ -149,6 +149,19 @@ Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
     erste, mit Hinweis.
   - Uplink- und Rollenwechsel zeigen „zuerst gesehen HH:MM:SS“; der Grund `clock_shift`
     hat Satz und Kurztext; die Parameter `lead_s` und `gone` haben Texte.
+- Zweite Browser-Prüfung vor dem Merge (Panel), je mit Test, in Chrome bei 360 und 1280 px
+  nachgeprüft:
+  - Export ohne Marke: Hat die Antwort weder Marken noch laufende Intervalle (Zeitreise läuft
+    nicht oder ist aus, nichts im gewählten Fenster), speichert das Panel **keine Datei** mehr
+    und sagt warum, z. B. „Nichts zu exportieren, es wurde keine Datei gespeichert. Die
+    Zeitreise läuft gerade nicht.“ oder „… Im gewählten Zeitfenster gibt es mit den gewählten
+    Filtern keine exportierbaren Marken.“ Vorher wurde eine leere Datei gespeichert und
+    „Export gespeichert.“ gemeldet. Ein Export mit Marken bleibt unverändert.
+  - Export-Bestätigung: Nach einem Klick oder Tippen auf ihren Text bleiben Tab und
+    Umschalt+Tab im Dialog und Escape schließt ihn (Fokus zurück auf „Exportieren“); vorher
+    fiel der Fokus auf die Seite, Umschalt+Tab verließ den Dialog und Escape wirkte nicht. Der
+    Dialog nimmt den Fokus eines Klicks selbst an (nicht in der Tab-Reihenfolge); fällt er
+    doch auf die Seite, gilt dieselbe Tastenregel, solange der Dialog offen ist.
 - Traffic und WiFi RF: neue reine Lesefunktionen `window_at` und `client_ref_for_mac`,
   Security Center: `client_ref_for_mac` (Test: gleiche Ausgaben und Zustände mit und ohne
   Aufruf).
