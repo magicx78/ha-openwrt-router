@@ -1282,10 +1282,16 @@ Ein Wert ist nie geraten. Es gilt:
     Linie dazwischen war die falsche, und die doppelte Zeit wird wie oben gekürzt. Das ist der
     Fall eines Geräts ohne Uhrenbatterie, das nach einem harmlosen Sprung vor (zehn Minuten,
     oder das NTP eines früheren Starts weit zurück) wieder weit zurück startet (Tests
-    `test_p1_*`). Grenze: Geht eine falsche Zeitquelle zweimal um dieselbe Spanne vor, gilt
-    die zweite als richtig, und die Werte der ersten Linie vor lesen sich als bekannt zu ihrer
-    (falschen) Zeit, wie bei jeder Uhr vor, die nie zurückgestellt wird
-    (`test_a_clock_set_ahead_again_by_the_same_amount_is_trusted`).
+    `test_p1_*`). **Grenze, eine bewusste und dokumentierte Ausnahme von „wahr oder
+    unbekannt“**, auf zwei Wegen: (1) Eine falsche Zeitquelle geht zweimal um dieselbe Spanne
+    vor (`test_a_clock_set_ahead_again_by_the_same_amount_is_trusted`). (2) Nach einem
+    Rücksprung, den ein Start fand (die Uhr wurde gestellt, während HA aus war; `lead_s` 0),
+    zählt in der restlichen Wartezeit jeder größere Sprung vor, z. B. ein Host, der länger
+    angehalten war als die restliche Wartezeit
+    (`test_a_jump_back_found_at_a_start_trusts_any_larger_jump_ahead`). Dann gilt die neue
+    Uhr als richtig, und die Werte, die die frühere Linie vor aufzeichnete, lesen sich als
+    bekannt, zu einem Datum, das um den alten Vorlauf zu spät ist. Es sind echte Messungen mit
+    falschem Datum; 1.52.0 zeigte dort „unbekannt“. Gelöscht wird nichts.
   - *Nichts wird gelöscht* (Entscheidung nach dem zweiten Review des PR). Ein früherer Stand
     löschte nach einem Tag Warten, was ein aufgezeichneter Sprung vor „erklärte“
     (`_explained_from`, nach einer Kopie `.bak`). Das Review fand drei Fälle, in denen das
@@ -1667,9 +1673,14 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 - Stand die Uhr **vor** und wurde zurückgestellt: So lange, wie die Uhr vor stand, wird nichts
   verfolgt (eine Minute 400 Tage vor: 400 Tage). Was die Linie vor aufzeichnete, bleibt in der
   Datei und liest sich unbekannt (`clock_shift`), bis es mit der Aufbewahrung wegfällt. Ging
-  die Uhr schon beim Start vor (kein gesehener Sprung vor), gilt dasselbe. Wird die Uhr danach
-  genau um dieselbe Spanne wieder vorgestellt, gilt die neue Uhr als richtig, und die Werte der
-  ersten Linie vor lesen sich als bekannt zu ihrer falschen Zeit (20.3, `_undoes`).
+  die Uhr schon beim Start vor (kein gesehener Sprung vor), gilt dasselbe. Bewusste,
+  dokumentierte Ausnahme von „wahr oder unbekannt“ (20.3, `_undoes`), auf zwei Wegen: Die Uhr
+  wird danach genau um dieselbe Spanne wieder vorgestellt; oder sie wurde zurückgestellt,
+  während HA aus war (der Start fand den Rücksprung), und in der restlichen Wartezeit kommt
+  irgendein größerer Sprung vor (z. B. ein Host, der länger angehalten war als die restliche
+  Wartezeit). Dann gilt die neue Uhr als richtig, und die Werte der früheren Linie vor lesen
+  sich als bekannt, zu einem Datum, das um den alten Vorlauf zu spät ist: echte Messungen mit
+  falschem Datum, wo 1.52.0 „unbekannt“ zeigte.
 - Stellt NTP die Uhr, während HA aus ist, und liegt ein aufgezeichneter Sprung vor in der
   doppelten Zeit (z. B. ein Sprung vor um zehn Minuten zwei Tage vor einem Start 400 Tage
   zurück), bleibt die ganze doppelte Zeit unbekannt, solange sie in der Aufbewahrung liegt:

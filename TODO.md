@@ -41,8 +41,13 @@ Entwicklerdoku: `docs/time-machine.md`.
         Marken zu Abschnitten (Speicherformat).
       - Uhr vor, dann zurückgestellt: keine Aufzeichnung, so lange die Uhr vor stand; was die
         Linie vor aufzeichnete, bleibt und liest sich unbekannt, bis es mit der Aufbewahrung
-        wegfällt. Wird die Uhr danach genau um dieselbe Spanne wieder vorgestellt, gelten die
-        Werte der ersten Linie vor als bekannt zu ihrer falschen Zeit (`_undoes`).
+        wegfällt. Bewusste, dokumentierte Ausnahme von „wahr oder unbekannt“ (`_undoes`), auf
+        zwei Wegen: Die Uhr wird danach genau um dieselbe Spanne wieder vorgestellt; oder sie
+        wurde zurückgestellt, während HA aus war (der Start fand den Rücksprung), und in der
+        restlichen Wartezeit kommt irgendein größerer Sprung vor (z. B. ein Host, der länger
+        angehalten war als die restliche Wartezeit). Dann lesen sich die Werte der früheren
+        Linie vor als bekannt, zu einem Datum, das um den alten Vorlauf zu spät ist: echte
+        Messungen mit falschem Datum, wo 1.52.0 „unbekannt“ zeigte.
       - Später, Idee: das Warten sicher verkürzen. Dafür braucht es einen Beleg, dass die
         Uhr vor stand (nicht nur einen aufgezeichneten Sprung vor; ein Sprung vor und ein
         gleich großer Sprung zurück sehen gleich aus, ob die Linie dazwischen vor stand oder
@@ -88,6 +93,10 @@ Entwicklerdoku: `docs/time-machine.md`.
       - `jumpback+restartany`, Startwert 114: `radio_wrong_channel` (ein falscher bekannter
         Kanal an einzelnen Zeitpunkten); mit dem Code von 1.52.0 und vor dem zweiten Review
         von PR #72 identisch, also nicht durch 1.52.1 entstanden. Offen.
+      - `jumpback+jumpfwd`, Startwerte 264 und 298, sowie `jumpback+jumpfwd+restartany`,
+        Startwerte 261 und 264: schon mit dem Code von 1.52.0 vorhanden (das Review von PR #72
+        bestätigte, dass die Befunde des Stands von 1.52.1 eine Teilmenge derer von 1.52.0
+        sind). Offen.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben

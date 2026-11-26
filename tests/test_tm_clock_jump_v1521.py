@@ -987,6 +987,46 @@ async def test_a_clock_set_ahead_again_by_the_same_amount_is_trusted(disks) -> N
         known(s, w.clock.t - 30, 36)
 
 
+@pytest.mark.parametrize("factor", [1.0, 3.0, 50.0], ids=["1x", "3x", "50x"])
+async def test_a_jump_back_found_at_a_start_trusts_any_larger_jump_ahead(
+    disks, factor
+) -> None:
+    """A known limit (1.52.1, documented), not desired behaviour: the clock
+    four hours ahead while HA runs (seen), an hour on channel 100, HA stops;
+    the clock is corrected while HA is off for 30 minutes, so the start
+    finds a jump back (``lead_s`` 0: the time HA was off is not in it). 20
+    minutes into the remaining wait the clock jumps ahead by 1, 3 or 50
+    times the jump back (a bad time source again, or a host suspended longer
+    than the remaining wait). For a jump back found at a start ``_undoes``
+    accepts any jump ahead at least as large, so the doubled time is cut and
+    channel 100, a real reading, reads as known at a date four hours too
+    late. 1.52.0 showed "unknown" there. Nothing is deleted."""
+    with world(disks, routers=1) as w:
+        await w.start()
+        await rounds(w, ch(36), 60)
+        w.engine.tick()
+        ahead = w.clock.t + 4 * HOUR
+        tick_jump(w, 4 * HOUR)
+        await rounds(w, ch(100), 60)
+        saved = w.clock.t
+        await w.ha_stop_and_write()
+        w.clock.t = saved - 4 * HOUR + 30 * 60  # corrected while HA was off
+        w.clock.mono += 30 * 60
+        await w.start()
+        back = back_mark(w)
+        assert back.params["lead_s"] == 0
+        before = seqs(w)
+        await rounds(w, ch(36), 20)
+        w.engine.tick()
+        tick_jump(w, factor * -back.params["shift_s"])
+        await rounds(w, ch(36), 60)
+        assert "wait_s" in back.params
+        nothing_dropped(w, before)
+        s = await snap(w)
+        assert channels(s, R1, ahead + 30 * 60) == {"5g0": (100, "up")}
+        known(s, w.clock.t - 30, 36)
+
+
 @pytest.mark.parametrize("ahead_s", [HOUR, 20 * DAY])
 async def test_clearing_the_history_during_a_wait_ends_it(disks, ahead_s) -> None:
     with world(disks, routers=1) as w:

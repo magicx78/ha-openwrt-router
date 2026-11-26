@@ -113,10 +113,15 @@ Entität, keine geänderte unique_id. Entwicklerdoku: `docs/time-machine.md`, Ab
   „unbekannt (Uhrsprung)“. Was die Linie vor aufzeichnete, bleibt in der Datei, liest sich
   aber ebenfalls „unbekannt (Uhrsprung)“, solange die Rücksprung-Marke bleibt (so lange, wie
   ihre doppelte Zeit in den 14 Tagen liegt); danach fällt es mit der Aufbewahrung weg. Der
-  Verlauf vor dem Sprung vor bleibt bekannt. Ausnahme: Wird die Uhr danach genau um dieselbe
-  Spanne wieder vorgestellt (eine falsche Zeitquelle zweimal), gilt die Uhr, mit der sie
-  dann läuft, als richtig, und die Werte der ersten Linie vor lesen sich als bekannt zu der
-  Zeit, auf die sie datiert sind, wie bei jeder Uhr vor, die nie zurückgestellt wird.
+  Verlauf vor dem Sprung vor bleibt bekannt. **Bewusste, dokumentierte Ausnahme vom Grundsatz
+  „wahr oder unbekannt“** (`_undoes`), auf zwei Wegen: (1) Die Uhr wird danach genau um
+  dieselbe Spanne wieder vorgestellt (eine falsche Zeitquelle zweimal). (2) Wurde die Uhr
+  zurückgestellt, während HA aus war (der Start fand den Rücksprung), zählt in der restlichen
+  Wartezeit jeder größere Sprung vor ebenso, z. B. ein Host, der länger angehalten war als die
+  restliche Wartezeit. In beiden Fällen gilt die Uhr, mit der sie dann läuft, als richtig, und
+  die Werte, die die frühere Linie vor aufzeichnete, lesen sich als bekannt, zu einem Datum,
+  das um den alten Vorlauf zu spät ist. Es sind echte Messungen mit falschem Datum; 1.52.0
+  zeigte dort „unbekannt“. Gelöscht wird nichts.
 - Stellt NTP die Uhr, während HA aus ist, und liegt ein aufgezeichneter Sprung vor in der
   doppelten Zeit (z. B. zehn Minuten vor, zwei Tage vor einem Start 400 Tage zurück), bleibt
   die ganze doppelte Zeit unbekannt, solange sie in den 14 Tagen liegt: im Beispiel der ganze
