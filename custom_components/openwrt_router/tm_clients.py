@@ -111,11 +111,11 @@ class ClientRecorder:
         self._open.clear()
 
     def reopen(self) -> None:
-        """The engine dropped marks dated after now (1.52.1, a capped wait
-        after a clock jump back): an open session whose mark is gone is
-        forgotten, and a client online now without one gets a resumed
-        session (derived), so the list after now is complete again. A
-        session evicted while open stays until its end is booked (review D)."""
+        """The engine closed every open interval at a clock jump back
+        (1.52.1): an open session whose mark is closed or gone is forgotten,
+        and a client online now without one gets a resumed session
+        (derived), so the list after the jump is complete again. A session
+        evicted while open stays until its end is booked (review D)."""
         index = self.engine.index
         self._open = {
             client: seq

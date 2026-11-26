@@ -49,9 +49,10 @@ the engine follows no stretch until the wall clock is past it.
 ``shift_s`` names the doubled wall time up to :func:`shift_until`, and it
 lives as long as that time is inside the retention (not 14 days from its
 own ``ts``: the first occupant's marks are dated later). Evicted or
-trimmed, its quota counts as lost up to there. When the engine stops
-waiting (``tm_engine.CLOCK_WAIT_MAX_S``) it caps the mark (``wait_s``) and
-drops everything dated after now (:meth:`MarkIndex.drop_after`).
+trimmed, its quota counts as lost up to there. When a jump ahead (or a
+start past the old wall clock) shows that the line behind lived only up to
+some moment, the engine cuts the doubled time there (``wait_s``). Nothing
+is ever deleted because of a clock jump.
 """
 
 from __future__ import annotations
@@ -248,9 +249,9 @@ def shift_until(mark: Mark) -> float | None:
     """The end of the wall time a clock jump back occupies twice (1.52.1).
 
     For a ``clock_shift`` mark with a negative ``shift_s``: the old wall
-    clock ``ts - shift_s``, or ``ts + wait_s`` when the engine stopped
-    waiting earlier (``wait_s``, written then; it dropped every mark dated
-    after that moment). None for any other mark. Whole seconds: the
+    clock ``ts - shift_s``, or ``ts + wait_s`` when the engine cut the
+    doubled time earlier (``wait_s``, written then: the line behind lived
+    only up to that moment). None for any other mark. Whole seconds: the
     readers add one for the rounding.
     """
     if mark.kind != "clock_shift":
@@ -789,34 +790,6 @@ class MarkIndex:
             for key in [k for k in table if k[1] < oldest_day]:
                 del table[key]
         self.counters["pruned"] += dropped
-        return dropped
-
-    def drop_after(self, at: float) -> int:
-        """A clock jump back whose wait the engine capped (1.52.1): every
-        mark dated after ``at`` goes (only the first occupant of that wall
-        time can have written it), a closed interval ending after ``at``
-        ends there with an unknown end, and ``lost`` above ``at`` comes down
-        to it (what was lost after ``at`` belonged to the first occupant).
-        Open intervals that began by ``at`` stay. No ``lost`` is raised: the
-        marks gone speak only about the time after ``at``."""
-        at = to_ms(at) / 1000
-        dropped = self.remove_where(lambda m: m.ts <= at)
-        for mark in self.marks.values():
-            if not mark.is_open and mark.end is not None and mark.end > at:
-                mark.end = at
-                if mark.kind != "client_flapping":
-                    mark.end_state = END_UNKNOWN
-                self.touched.add(mark.seq)
-        for table in (self.lost, self.lost_router):
-            for key in [k for k, v in table.items() if v > at]:
-                table[key] = at
-        self._newest = max((m.last_ts for m in self.marks.values()), default=-math.inf)
-        last_day = int(at // DAY_S)
-        for key in [k for k in self._day if k[1] > last_day]:
-            del self._day[key]
-        for key in [k for k, s in self._flap.items() if s not in self.marks]:
-            del self._flap[key]
-        self.changed = True
         return dropped
 
     def set_param(self, seq: int | None, key: str, value: int) -> None:

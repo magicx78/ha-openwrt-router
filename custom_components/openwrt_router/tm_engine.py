@@ -28,11 +28,9 @@ A tick every ``TICK_S`` prunes the index (14 days), checks the clock,
 writes a heartbeat (so a crash still leaves a recent ``saved_at``) and
 takes the daily checkpoint. After a jump back of the wall clock no stretch
 is followed until the clock is past its old time or a jump ahead ends the
-wait (1.52.1). After ``CLOCK_WAIT_MAX_S`` of waiting, what a recorded line
-ahead dated after now is dropped, after a ``.bak`` copy, only when that jump
-ahead explains the doubled time (:meth:`TimeMachine._explained_from`,
-:meth:`TimeMachine._end_wait`); otherwise nothing is dropped and the wait
-goes on. Writes are delayed and bundled
+wait (1.52.1). Nothing is ever deleted because of a clock jump: the wait
+has no upper bound; after ``CLOCK_WAIT_LONG_S`` a counter and one log line
+say that it still runs. Writes are delayed and bundled
 (``tm_store.SAVE_DELAY_S``); HA writes the last one at shutdown.
 
 Client sessions (Phase C) live in ``tm_clients`` and are attached only
@@ -70,6 +68,7 @@ from .tm_marks import (
     QUOTA_INFRA,
     REF_KINDS,
     RETENTION_S,
+    Mark,
     MarkIndex,
     shift_until,
     to_ms,
@@ -95,15 +94,13 @@ CLOCK_JUMP_S: Final = 300.0  # plan §5.4
 # 1.52.0: a followed stretch gets a new base from the current state once
 # its base is this old (tm_state needs every mark after a base)
 REBASE_S: Final = 86_400.0
-# 1.52.1: how long a wait after a jump back of the wall clock runs before the
-# engine looks for its explanation (counted while HA runs without the clock
-# jumps, and from the jump across restarts). Only when a recorded jump ahead
-# explains the doubled time (the clock was ahead and was corrected,
-# :meth:`TimeMachine._explained_from`) is what the line ahead dated after
-# now dropped, after a ``.bak`` copy of the file; otherwise the wait goes on
-# up to the old wall clock. A wrong jump back that NTP corrects ends its
-# doubled time at the correction (:meth:`TimeMachine._jumped_ahead`).
-CLOCK_WAIT_MAX_S: Final = 86_400.0
+# 1.52.1: after this much waiting behind a jump back of the wall clock
+# (counted while HA runs without the clock jumps, and from the jump across
+# restarts) the counter ``clock_waits_long`` and one log line say that the
+# wait still runs. It has no other effect: the wait goes on up to the old
+# wall clock and nothing is deleted. A wrong jump back that NTP corrects
+# ends its doubled time at the correction (:meth:`TimeMachine._jumped_ahead`).
+CLOCK_WAIT_LONG_S: Final = 86_400.0
 # 1.52.1: a jump back no clock check saw before a write (HA stopped first)
 # began at most this long before the write (a tick checks every TICK_S)
 UNSEEN_LEAD_S: Final = 2 * TICK_S
@@ -264,18 +261,17 @@ class TimeMachine:
         self._back_seq = 0
         # 1.52.1: the jumps back still waited for (mark seq -> wall time of
         # the jump, moved by every later clock jump of this run; 0: a jump
-        # whose mark is gone, waited for up to ``_lost_ahead``)
+        # whose mark is gone), only for ``clock_waits_long``
         self._waits: dict[int, float] = {}
+        # 1.52.1: the doubled time of a jump back whose mark is gone (evicted,
+        # trimmed, or not taken by the quota): waited for up to here
         self._lost_ahead = -math.inf
-        self._cap_task: Any = None
         self._checkpoint_day: date | None = None
         self.counters: dict[str, int] = {
             "refs_taken": 0,
             "gaps_dropped": 0,
             "clock_shifts": 0,
-            "clock_waits_capped": 0,
-            "clock_waits_unexplained": 0,
-            "clock_backups_failed": 0,
+            "clock_waits_long": 0,
         }
 
     @property
@@ -342,10 +338,8 @@ class TimeMachine:
             self._drop_clients()
         await self.async_sync_clients()
         self._on_outage()
-        # 1.52.1: HA may have been off when the wait would have ended
-        due = self._check_wait(now, schedule=False)
-        if due is not None:
-            await self._async_drop_explained(due)
+        # 1.52.1: HA may have been off for the day of a wait
+        self._check_wait(now)
         self._checkpoint("start", now)
         self.store.schedule()
 
@@ -457,7 +451,7 @@ class TimeMachine:
         the stored marks (a restart inside the doubled time is no jump of
         its own). 1.52.1: the mark is kept while its doubled time is inside
         the retention (``tm_marks.shift_until``), so a restart never forgets
-        the wait; a capped one (``wait_s``) ends where it was capped. A jump
+        the wait; a cut one (``wait_s``) ends where it was cut. A jump
         whose mark was evicted or trimmed left its doubled time as lost,
         dated after now: the wait goes on up to there from this start."""
         for mark in self.index:
@@ -518,14 +512,12 @@ class TimeMachine:
         the end of a stretch across it, :meth:`_clean_cut`), as at a jump
         ahead while HA runs (:meth:`_jumped_ahead`). Still behind
         the old wall clock, or a recorded line ahead may have written in the
-        doubled time (:meth:`_ahead_inside`): nothing changes. Returns where
-        the HA gap of this start begins when it was cut (the old wall
-        clock: the line before the jump recorded up to there), else None."""
-        latest = max(
-            (m for m in self.index if shift_until(m) is not None),
-            key=lambda m: m.seq,
-            default=None,
-        )
+        doubled time (:meth:`_ahead_inside`; HA was off, so nothing shows
+        that the clock now goes on from the line before the jump): nothing
+        changes. Returns where the HA gap of this start begins when it was
+        cut (the old wall clock: the line before the jump recorded up to
+        there), else None."""
+        latest = self._latest_back()
         if latest is None:
             return None
         until = shift_until(latest)
@@ -539,12 +531,25 @@ class TimeMachine:
         cut = self._clean_cut(saved_at)
         if cut >= until:
             return None
-        self.index.set_param(latest.seq, "wait_s", max(0, math.ceil(cut - latest.ts)))
-        self._waits.pop(latest.seq, None)
+        self._cut_back(latest, cut)
         self._follow_from = self._follow_until()
         if now >= self._follow_from:
             self._waits.clear()
         return until
+
+    def _latest_back(self) -> Mark | None:
+        """The stored jump back with the greatest seq (1.52.1)."""
+        return max(
+            (m for m in self.index if shift_until(m) is not None),
+            key=lambda m: m.seq,
+            default=None,
+        )
+
+    def _cut_back(self, back: Mark, cut: float) -> None:
+        """The doubled time of ``back`` ends at ``cut`` (``wait_s``, 1.52.1);
+        its wait is over."""
+        self.index.set_param(back.seq, "wait_s", max(0, math.ceil(cut - back.ts)))
+        self._waits.pop(back.seq, None)
 
     def _clean_cut(self, at: float) -> float:
         """Where a doubled time cut at ``at`` may end (1.52.1): not inside
@@ -560,11 +565,12 @@ class TimeMachine:
                     cut = max(cut, seg.end)
         return cut
 
-    def _ahead_inside(self, back: Any, until: float) -> bool:
+    def _ahead_inside(self, back: Mark, until: float) -> bool:
         """A jump ahead recorded before ``back`` whose line ahead may have
         written in the doubled time of ``back`` (1.52.1): its values there
-        are wrong, so that doubled time is never cut short (it stays
-        unknown, or the explained drop removes them)."""
+        may be dated wrong, so that doubled time is not cut short (it stays
+        unknown), unless :meth:`_undoes` shows the clock goes on from the
+        line before ``back``."""
         return any(
             m.kind == "clock_shift"
             and m.code == "forwards"
@@ -573,13 +579,35 @@ class TimeMachine:
             for m in self.index
         )
 
+    @staticmethod
+    def _undoes(back: Mark, shift: float) -> bool:
+        """The jump ahead by ``shift`` puts the clock back on the line that
+        ``back`` left (1.52.1): it goes ahead by what ``back`` went back,
+        within ``CLOCK_JUMP_S`` (both are measured against the monotonic
+        clock). A jump back found at a start (``lead_s`` 0) does not hold the
+        time HA was off before it, so the jump ahead may be larger by that.
+        Then the clock now agrees with the line before ``back``, and the
+        line between them is the one that was wrong."""
+        back_s = back.params.get("shift_s")
+        if not isinstance(back_s, int | float) or isinstance(back_s, bool):
+            return False
+        excess = shift + back_s
+        if excess < -CLOCK_JUMP_S:
+            return False
+        return back.params.get("lead_s") == 0 or excess <= CLOCK_JUMP_S
+
     def _jumped_back(
-        self, now: float, old_wall: float, mark: Any, *, seen_to: float | None = None
+        self,
+        now: float,
+        old_wall: float,
+        mark: Mark | None,
+        *,
+        seen_to: float | None = None,
     ) -> None:
         """The wall clock went back (review A): every followed stretch ends
         (at ``seen_to``, the last check before the jump, else now); the next
         begins once the wall clock is past ``old_wall`` (1.52.1: or once a
-        jump ahead or an explained drop ends the wait)."""
+        jump ahead ends the wait)."""
         self._follow_from = max(self._follow_from, old_wall)
         if mark is None:  # the quota took no mark: wait up to there anyway
             self._lost_ahead = max(self._lost_ahead, old_wall)
@@ -596,7 +624,7 @@ class TimeMachine:
         """The tracker's start of one outage; ``now`` for a start it may
         have taken in the other time line of a jump back (1.52.1): ahead of
         now, or inside the doubled wall time of a ``clock_shift`` (all of it,
-        a capped wait does not shorten what the tracker may still hold)."""
+        a cut ``wait_s`` does not shorten what the tracker may still hold)."""
         began = _epoch(outage.since)
         if began is None or began > now:
             return now
@@ -609,151 +637,27 @@ class TimeMachine:
                 return now
         return began
 
-    def _check_wait(self, now: float, *, schedule: bool = True) -> int | None:
-        """A wait after a jump back ends at the old wall clock. Once it ran
-        ``CLOCK_WAIT_MAX_S`` (1.52.1), the engine looks for what explains
-        it: a jump ahead recorded right before the jump back
-        (:meth:`_explained_from`). Explained: the mark's seq is returned
-        (``schedule``: a task writes the ``.bak`` copy and then drops,
-        :meth:`_async_drop_explained`). Not explained: nothing is dropped
-        and the wait goes on up to the old wall clock."""
+    def _check_wait(self, now: float) -> None:
+        """A wait after a jump back ends at the old wall clock (or when a
+        jump ahead cuts it). Once one ran ``CLOCK_WAIT_LONG_S`` (1.52.1),
+        ``clock_waits_long`` counts it and one log line says so, once per
+        wait and run; nothing is deleted and the wait goes on."""
         if not self._waits:
-            return None
+            return
         if now > self._follow_from:
             self._waits.clear()
-            return None
-        due = None
+            return
         for seq, since in list(self._waits.items()):
-            if now - since < CLOCK_WAIT_MAX_S:
+            if now - since < CLOCK_WAIT_LONG_S:
                 continue
-            mark = self.index.get(seq) if seq else None
-            if mark is not None and self._explained_from(mark) is not None:
-                due = seq
-                continue
-            # nothing explains the doubled time: never dropped, waited for
             del self._waits[seq]
-            self.counters["clock_waits_unexplained"] += 1
+            self.counters["clock_waits_long"] += 1
             _LOGGER.info(
-                "Time Machine: the clock stayed %d s behind its earlier time "
-                "for a day and no recorded jump ahead explains it; nothing is "
-                "dropped, recording goes on once the clock is past that time",
+                "Time Machine: the clock has been behind its earlier time for "
+                "a day; nothing is deleted, recording goes on in %d s, once "
+                "the clock is past that time (or after Verlauf löschen)",
                 round(max(0.0, self._follow_from - now)),
             )
-        if due is not None and schedule and self._cap_task is None:
-            self._cap_task = self.hass.async_create_task(
-                self._async_drop_explained(due)
-            )
-        return due
-
-    def _explained_from(self, back: Any) -> float | None:
-        """The wall time after which only a line ahead wrote, for the jump
-        back ``back`` (1.52.1); None when nothing explains its doubled time.
-
-        Explained means, conservatively: the ``clock_shift`` recorded right
-        before ``back`` (by seq) is a jump **ahead** by ``shift_s`` to its
-        ``ts``; ``back`` went to before that ``ts`` (the clock ahead was set
-        back again); no jump back before it reached past ``ts - shift_s``
-        (the latest wall time of the line before the jump ahead), and no
-        mark dated after that time was evicted. Then everything dated after
-        ``ts - shift_s`` up to the old wall clock of ``back`` was written by
-        the line ahead, and only that may be dropped."""
-        if self._lost_ahead != -math.inf:
-            return None  # a jump whose mark is gone: nothing to check
-        shifts = sorted(
-            (m for m in self.index if m.kind == "clock_shift"), key=lambda m: m.seq
-        )
-        before = [m for m in shifts if m.seq < back.seq]
-        if not before or any(m.seq > back.seq and m.code == "forwards" for m in shifts):
-            return None
-        ahead = before[-1]
-        shift = ahead.params.get("shift_s")
-        if (
-            ahead.code != "forwards"
-            or not isinstance(shift, int | float)
-            or isinstance(shift, bool)
-            or shift <= CLOCK_JUMP_S
-            or back.ts >= ahead.ts
-        ):
-            return None
-        start = ahead.ts - shift
-        if any((u := shift_until(m)) is not None and u > start for m in before):
-            return None
-        # an evicted jump mark dated after it could sit between the two
-        if self.index.lost.get(QUOTA_INFRA, -math.inf) > start:
-            return None
-        return start
-
-    async def _async_drop_explained(self, seq: int) -> None:
-        """Write the ``.bak`` copy, then drop (1.52.1). Nothing is dropped
-        when the copy fails or the wait changed meanwhile."""
-        try:
-            if self.closed or seq not in self._waits:
-                return
-            if not await self.store.async_backup():
-                self.counters["clock_backups_failed"] += 1
-                self._waits.pop(seq, None)  # no copy, no drop: waited for
-                return
-            mark = self.index.get(seq)
-            now = self.clock()
-            if (
-                self.closed
-                or seq not in self._waits
-                or mark is None
-                or now > self._follow_from
-            ):
-                return
-            start = self._explained_from(mark)
-            if start is not None:
-                self._end_wait(now, mark, max(now, start))
-        finally:
-            self._cap_task = None
-
-    def _end_wait(self, now: float, back: Any, at: float) -> None:
-        """Drop what a line ahead of a corrected clock dated after ``at``
-        (1.52.1; ``at`` >= now, :meth:`_explained_from`). Every mark,
-        stretch, coverage pair and checkpoint dated after ``at`` goes; an
-        open interval that began after it is recorded again from now, as
-        after "Verlauf löschen"; ``back`` gets ``wait_s`` (its doubled time
-        ends at ``at``, so the wait goes on only up to there). Nothing dated
-        before ``at`` is touched: the time before the jump stays as known as
-        it was and the doubled time up to ``at`` stays unknown."""
-        index = self.index
-        behind = max(0.0, self._follow_from - now)
-        doomed = {m.seq for m in index.open_marks() if m.ts > at}
-        for entry_id in [e for e, s in self._outage_seq.items() if s in doomed]:
-            del self._outage_seq[entry_id]
-        if self._lan_seq in doomed:
-            self._lan_seq = None
-        for router in self.routers.values():
-            if router.gap_seq in doomed:
-                router.gap_seq = router.gap_since = None
-            for key, seq in list(router.radio_down.items()):
-                if seq in doomed:
-                    self._note_off(router.router_id, (index.get(seq),))
-                    del router.radio_down[key]
-            router.rejoin = True
-        dropped = index.drop_after(at)
-        self.store.drop_after(at)
-        index.set_param(back.seq, "wait_s", max(0, math.ceil(at - back.ts)))
-        self._waits.pop(back.seq, None)
-        self._follow_from = self._follow_until()
-        if now >= self._follow_from:
-            self._waits.clear()
-        self._after_reset(now)
-        # a gap opened now may have begun in the other time line: never
-        # dropped as short (as the gaps written before the jump)
-        self._back_seq = index.next_seq
-        if self.recorder is not None:
-            self.recorder.reopen()
-        self.counters["clock_waits_capped"] += 1
-        _LOGGER.warning(
-            "Time Machine: the clock was ahead and was set back %d s; after a "
-            "day %d marks the clock ahead dated were dropped (copy kept as "
-            ".bak), recording goes on",
-            round(behind),
-            dropped,
-        )
-        self.store.schedule()
 
     def _follow_until(self) -> float:
         """``_follow_from`` from the stored jumps back (and a gone one)."""
@@ -772,21 +676,17 @@ class TimeMachine:
         or at the end of a stretch across it, :meth:`_clean_cut`),
         so the history before a wrong jump back is known again at once
         (not when a recorded line ahead may have written in it,
-        :meth:`_ahead_inside`). If
-        the clock is still behind the old wall clock, the rest up to it is
-        doubled again: a new jump back from now (``lead_s`` the time since
-        the last check)."""
+        :meth:`_ahead_inside`, unless this jump undoes the jump back,
+        :meth:`_undoes`). If the clock is still behind the old wall clock,
+        the rest up to it is doubled again: a new jump back from now
+        (``lead_s`` the time since the last check)."""
         for key in self._waits:
             self._waits[key] += shift
         before = now - shift
         if self._follow_from <= before:
             return
         target = self._follow_from
-        latest = max(
-            (m for m in self.index if shift_until(m) is not None),
-            key=lambda m: m.seq,
-            default=None,
-        )
+        latest = self._latest_back()
         if latest is not None:
             until = shift_until(latest)
             cut = self._clean_cut(before)
@@ -794,12 +694,11 @@ class TimeMachine:
                 until is not None
                 and until > cut
                 and before >= latest.ts
-                and not self._ahead_inside(latest, until)
-            ):
-                self.index.set_param(
-                    latest.seq, "wait_s", max(0, math.ceil(cut - latest.ts))
+                and (
+                    self._undoes(latest, shift) or not self._ahead_inside(latest, until)
                 )
-                self._waits.pop(latest.seq, None)
+            ):
+                self._cut_back(latest, cut)
         self._follow_from = self._follow_until()
         if self._follow_from < target and now + 1 < target:
             self.counters["clock_shifts"] += 1
@@ -2058,7 +1957,7 @@ def async_register_time_machine_services(hass: HomeAssistant) -> None:
 
 
 __all__ = [
-    "CLOCK_WAIT_MAX_S",
+    "CLOCK_WAIT_LONG_S",
     "DEBOUNCE_POLLS",
     "GAP_MIN_S",
     "REBASE_S",

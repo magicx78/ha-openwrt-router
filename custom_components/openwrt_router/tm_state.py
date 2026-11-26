@@ -675,8 +675,8 @@ def _shift_window(mark: Mark) -> tuple[float, float] | None:
     A jump ahead occupies no time twice: the skipped wall time had no real
     time in it, nothing to reconstruct there differs from the last poll
     before it. 1.52.1: the end is ``tm_marks.shift_until`` (``ts +
-    wait_s`` when the engine stopped waiting before the old wall clock and
-    dropped what was dated after that moment).
+    wait_s`` when the engine cut the doubled time before the old wall
+    clock: the line behind lived only up to that moment).
     """
     until = shift_until(mark)
     if until is None:

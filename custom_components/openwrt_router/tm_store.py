@@ -114,7 +114,6 @@ _COUNTERS: Final = (
     "load_failed",
     "trimmed_rows",
     "copies_removed",
-    "backups",
 )
 
 
@@ -506,29 +505,6 @@ class TimeMachineStore:
         self.counters["copies_removed"] += removed
         return removed
 
-    async def async_backup(self) -> bool:
-        """Write now and keep one copy ``<file>.bak`` (1.52.1: before marks a
-        clock ahead dated are dropped; the next copy overwrites it, "Verlauf
-        löschen" and switching off delete it). File work in the executor;
-        False when it failed (never raises)."""
-        if self._store is None or self.closed:
-            return False
-        try:
-            await self._store.async_save(self.payload())
-            path = getattr(self._store, "path", None)
-            copied = bool(
-                await self.hass.async_add_executor_job(core_store._backup_file, path)
-            )
-        except Exception as err:  # noqa: BLE001 - no copy means no drop
-            _LOGGER.warning(
-                "Time Machine store: no backup copy (%s); nothing is dropped",
-                type(err).__name__,
-            )
-            return False
-        if copied:
-            self.counters["backups"] += 1
-        return copied
-
     async def async_flush(self, stop: str | None = None) -> None:
         """Write now (switched off, last router gone); never raises."""
         if self._store is None:
@@ -653,26 +629,6 @@ class TimeMachineStore:
             seen[rid] = [seg]
         self.seen = seen
 
-    def drop_after(self, at: float) -> None:
-        """A capped wait after a clock jump back (1.52.1, with
-        ``MarkIndex.drop_after``): stretches, coverage and checkpoints dated
-        after ``at`` go, those reaching past it end there. A running
-        coverage pair that began after ``at`` goes on from ``at``."""
-        for rid in list(self.seen):
-            kept = [s for s in self.seen[rid] if s.start <= at]
-            for seg in kept:
-                if seg.end is not None and seg.end > at:
-                    seg.end = at
-            if kept:
-                self.seen[rid] = kept
-            else:
-                del self.seen[rid]
-        self.coverage = _cut_pairs(self.coverage, at)
-        self.clients_cov = _cut_pairs(self.clients_cov, at)
-        self.checkpoints = [
-            row for row in self.checkpoints if int(row.split("|", 1)[0]) / 1000 <= at
-        ]
-
     def clients_from(self, start: float) -> None:
         """The client recorder records from ``start`` on."""
         if any(p[1] is None for p in self.clients_cov):
@@ -717,19 +673,6 @@ def _pairs(raw: Any) -> list[list[float | None]]:
         ):
             out.append([float(pair[0]), pair[1]])
     return out[-COVERAGE_MAX:]
-
-
-def _cut_pairs(pairs: list[list[float | None]], at: float) -> list[list[float | None]]:
-    """``[start, end|None]`` pairs without the time after ``at`` (1.52.1)."""
-    running = any(p[1] is None for p in pairs)
-    out: list[list[float | None]] = []
-    for start, end in pairs:
-        if start is None or start > at:
-            continue
-        out.append([start, end if end is None or end <= at else at])
-    if running and not any(p[1] is None for p in out):
-        out.append([at, None])
-    return out
 
 
 __all__ = [
