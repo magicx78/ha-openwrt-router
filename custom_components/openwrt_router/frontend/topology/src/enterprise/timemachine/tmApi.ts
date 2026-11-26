@@ -119,7 +119,10 @@ export function createTmApi(getHass: () => TmHass | null, deps: TmApiDeps = {}):
     const content = text ?? JSON.stringify(body);
     return {
       blob: new Blob([content], { type: 'application/json' }),
+      status: typeof b.status === 'string' ? b.status : '',
+      reason: typeof b.reason === 'string' ? b.reason : null,
       marks: Array.isArray(b.marks) ? b.marks.length : 0,
+      spanning: Array.isArray(b.spanning) ? b.spanning.length : 0,
       truncated: b.truncated === true,
       nextCursor: cursorOf(b.next_cursor),
       omittedClientMarks: typeof b.omitted_client_marks === 'number' && Number.isFinite(b.omitted_client_marks)

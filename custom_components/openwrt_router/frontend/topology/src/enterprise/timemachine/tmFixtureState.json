@@ -4618,6 +4618,152 @@
    "details": {}
   }
  },
+ "export_empty": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "kind": "openwrt_router.time_machine.export",
+   "status": "ok",
+   "reason": null,
+   "generated_at": 1800000600.0,
+   "window": {
+    "from": 1799996400.0,
+    "until": 1799998200.0
+   },
+   "limit": 5000,
+   "marks": [],
+   "spanning": [],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "empty",
+     "reason": null,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "empty",
+     "reason": null,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    }
+   ],
+   "truncated": false,
+   "spanning_truncated": false,
+   "next_cursor": null,
+   "omitted_client_marks": 0
+  }
+ },
+ "export_empty_partial": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "kind": "openwrt_router.time_machine.export",
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800000600.0,
+   "window": {
+    "from": 1799996400.0,
+    "until": 1799998200.0
+   },
+   "limit": 5000,
+   "marks": [],
+   "spanning": [],
+   "sources": [
+    {
+     "id": "core_audit",
+     "state": "empty",
+     "reason": null,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "config_versions",
+     "state": "off",
+     "reason": "module_off",
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "ni_events",
+     "state": "unreadable",
+     "reason": "not_running",
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "ni_incidents",
+     "state": "unreadable",
+     "reason": "not_running",
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "security_timeline",
+     "state": "unreadable",
+     "reason": "not_running",
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "tm_index",
+     "state": "empty",
+     "reason": null,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    },
+    {
+     "id": "tm_refs",
+     "state": "empty",
+     "reason": null,
+     "oldest": null,
+     "truncated": false,
+     "cut": null,
+     "duplicates": 0,
+     "count": 0
+    }
+   ],
+   "truncated": false,
+   "spanning_truncated": false,
+   "next_cursor": null,
+   "omitted_client_marks": 0
+  }
+ },
  "state_clients_off": {
   "status": 200,
   "body": {
@@ -4796,6 +4942,28 @@
    "clients": null
   }
  },
+ "export_unavailable": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "kind": "openwrt_router.time_machine.export",
+   "status": "unavailable",
+   "reason": "not_running",
+   "generated_at": 1800000600.0,
+   "window": {
+    "from": null,
+    "until": null
+   },
+   "limit": 5000,
+   "marks": [],
+   "spanning": [],
+   "sources": [],
+   "truncated": false,
+   "spanning_truncated": false,
+   "next_cursor": null,
+   "omitted_client_marks": 0
+  }
+ },
  "state_off": {
   "status": 200,
   "body": {
@@ -4829,6 +4997,28 @@
    "before": null,
    "after": null,
    "changes": null
+  }
+ },
+ "export_off": {
+  "status": 200,
+  "body": {
+   "v": 1,
+   "kind": "openwrt_router.time_machine.export",
+   "status": "off",
+   "reason": null,
+   "generated_at": 1800000600.0,
+   "window": {
+    "from": null,
+    "until": null
+   },
+   "limit": 5000,
+   "marks": [],
+   "spanning": [],
+   "sources": [],
+   "truncated": false,
+   "spanning_truncated": false,
+   "next_cursor": null,
+   "omitted_client_marks": 0
   }
  }
 }

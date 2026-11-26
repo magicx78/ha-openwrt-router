@@ -50,9 +50,10 @@ import {
   type ClientNames, type ListState, type RouterNames, type SessionListState,
 } from './tmLogic.ts';
 import {
-  COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE, activeIn, dialogFocus, dialogKey, exportOmittedText,
+  COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE, activeIn, dialogFocus, dialogKey, exportEmptyText,
+  exportOmittedText, focusLost,
 } from './tmState.ts';
-import type { CustomWindow, Filters, Mark, Session, SessionFilters, TimelineQuery, TmApi } from './tmTypes';
+import type { CustomWindow, ExportFile, Filters, Mark, Session, SessionFilters, TimelineQuery, TmApi } from './tmTypes';
 import {
   Chip, ClientFilterContext, ClientLabel, ErrorBox, Frame, JumpContext, MarkRow, OffBox, RouterSelect, Spinner,
   pageVisible, saveBlob, type JumpApi,
@@ -222,9 +223,33 @@ export interface ExportState {
   next: { query: TimelineQuery; cursor: string } | null;
   /** Client marks of the window not in the file (omitted_client_marks of the last page), null before the first. */
   omitted?: number | null;
+  /** The last answer had no mark: no file was saved, this says why (tmState.exportEmptyText); null otherwise. */
+  empty?: string | null;
 }
 
-export const EXPORT_INIT: ExportState = { confirm: false, busy: false, error: null, saved: null, next: null, omitted: null };
+export const EXPORT_INIT: ExportState = { confirm: false, busy: false, error: null, saved: null, next: null, omitted: null, empty: null };
+
+/**
+ * What one export answer does (pure; browser check before the merge): with a
+ * mark or an interval in it the file is saved under `save` (page 2 on as
+ * "…-2.json") as before; without one nothing is saved (`save` null) and the
+ * state carries the message why. The pages saved before stay counted.
+ */
+export function exportStep(file: Pick<ExportFile, 'status' | 'reason' | 'marks' | 'spanning' | 'truncated' | 'nextCursor' | 'omittedClientMarks'>,
+  page: number, query: TimelineQuery, prev: ExportState): { save: string | null; state: ExportState } {
+  const empty = exportEmptyText(file, page);
+  if (empty !== null) {
+    return { save: null, state: { ...EXPORT_INIT, saved: page > 1 ? prev.saved : null, empty } };
+  }
+  return {
+    save: page === 1 ? EXPORT_FILENAME : EXPORT_FILENAME.replace(/\.json$/, `-${page}.json`),
+    state: {
+      confirm: false, busy: false, error: null, saved: page, empty: null,
+      next: file.truncated && file.nextCursor ? { query, cursor: file.nextCursor } : null,
+      omitted: file.omittedClientMarks,
+    },
+  };
+}
 
 export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
   state: ExportState; onAsk: () => void; onConfirm: () => void; onCancel: () => void; onNext: () => void;
@@ -233,6 +258,8 @@ export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
   const cancel = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
   const wasOpen = useRef(state.confirm);
+  const cancelNow = useRef(onCancel);
+  cancelNow.current = onCancel;
   const textId = useId();
   // open: focus on "Abbrechen"; closed (cancelled or confirmed): back to the button that opened it
   useEffect(() => {
@@ -241,14 +268,34 @@ export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
     if (target === 'cancel') cancel.current?.focus();
     else if (target === 'trigger') trigger.current?.focus();
   }, [state.confirm]);
-  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+  // Escape, Tab and Shift+Tab by the dialog's rule (dialogKey); `active` is the focused element
+  const onDialogKey = (e: { key: string; shiftKey: boolean; preventDefault: () => void }, active: Element | null) => {
     const buttons = Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? []);
-    const step = dialogKey(e.key, e.shiftKey, buttons.indexOf(activeIn(dialog.current) as HTMLButtonElement), buttons.length);
+    const step = dialogKey(e.key, e.shiftKey, buttons.indexOf(active as HTMLButtonElement), buttons.length);
     if (!step) return;
     e.preventDefault();
-    if (step.action === 'cancel') onCancel();
+    if (step.action === 'cancel') cancelNow.current();
     else buttons[step.index]?.focus();
   };
+  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => onDialogKey(e, activeIn(dialog.current));
+  // Browser check: a tap outside the buttons can put the focus on <body>, where
+  // the dialog hears no key. While it is open, such keys go by the same rule
+  // (a key in the dialog or with a real focus elsewhere is left alone).
+  const onDialogKeyNow = useRef(onDialogKey);
+  onDialogKeyNow.current = onDialogKey;
+  useEffect(() => {
+    if (!state.confirm) return undefined;
+    const doc = dialog.current?.ownerDocument;
+    if (!doc) return undefined;
+    const onDocKey = (e: KeyboardEvent) => {
+      const box = dialog.current;
+      if (!box || e.defaultPrevented || e.composedPath().includes(box)) return;
+      if (!focusLost(activeIn(box, doc), doc.activeElement, doc.body)) return;
+      onDialogKeyNow.current(e, null);
+    };
+    doc.addEventListener('keydown', onDocKey);
+    return () => doc.removeEventListener('keydown', onDocKey);
+  }, [state.confirm]);
   const omitted = state.error === null && !state.busy ? exportOmittedText(state.omitted ?? null) : null;
   return (
     <div className="tm-export">
@@ -258,8 +305,9 @@ export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
           onClick={() => { if (!state.busy) onAsk(); }}>Exportieren</button>
       )}
       {state.confirm && (
+        // tabIndex -1 (browser check): a tap on its text focuses the dialog itself, so its keys stay here; not in the Tab order
         <div className="cfg-notice cfg-notice--info tm-export__ask" role="alertdialog" aria-label="Export bestätigen"
-          aria-modal="true" aria-describedby={textId} ref={dialog} onKeyDown={onKey}>
+          aria-modal="true" aria-describedby={textId} tabIndex={-1} ref={dialog} onKeyDown={onKey}>
           <span id={textId}>{EXPORT_CONFIRM_TEXT}</span>
           <span className="tm-export__buttons">
             <button type="button" className="diag-btn cfg-btn" disabled={state.busy} onClick={onConfirm}>Exportieren</button>
@@ -269,7 +317,10 @@ export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
       )}
       {state.busy && <span className="cfg-spinner"><span className="cfg-spinner__dot" />Export läuft …</span>}
       {state.error !== null && <ErrorBox of="export" error={state.error} />}
-      {state.saved !== null && state.error === null && !state.busy && (
+      {state.empty && state.error === null && !state.busy && (
+        <span className="cfg-hint tm-export__empty" role="status">{state.empty}</span>
+      )}
+      {state.saved !== null && !state.empty && state.error === null && !state.busy && (
         <span className="cfg-hint tm-export__done" role="status">
           {state.next
             ? `Seite ${state.saved} gespeichert. Der Export ist gekürzt; die nächste Seite folgt mit „Weitere Seite exportieren“.`
@@ -562,6 +613,8 @@ export function TimelineContainer({ api, active, viewSwitch, isAdmin = false, re
   const [routers, setRouters] = useState<RouterNames>({});
   const [clients, setClients] = useState<ClientNames>({});
   const [exp, setExp] = useState<ExportState>(EXPORT_INIT);
+  const expRef = useRef(exp);
+  expRef.current = exp;
   const [state, dispatch] = useReducer(listReducer, LIST_INIT);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -668,12 +721,10 @@ export function TimelineContainer({ api, active, viewSwitch, isAdmin = false, re
     api.exportFile({ ...query, cursor }).then(
       file => {
         if (n !== exportSeq.current) return;
-        saveBlob(file.blob, page === 1 ? EXPORT_FILENAME : EXPORT_FILENAME.replace(/\.json$/, `-${page}.json`));
-        setExp({
-          confirm: false, busy: false, error: null, saved: page,
-          next: file.truncated && file.nextCursor ? { query, cursor: file.nextCursor } : null,
-          omitted: file.omittedClientMarks,
-        });
+        // an answer without a mark saves no file, it says why (exportStep)
+        const step = exportStep(file, page, query, expRef.current);
+        if (step.save !== null) saveBlob(file.blob, step.save);
+        setExp(step.state);
       },
       error => {
         if (n !== exportSeq.current) return;
@@ -694,7 +745,7 @@ export function TimelineContainer({ api, active, viewSwitch, isAdmin = false, re
     },
   };
   // a new filter (window, source, router …) is a new export: the "next page" of the old one goes
-  useEffect(() => { setExp(e => (e.next || e.saved !== null ? { ...EXPORT_INIT } : e)); }, [key]);
+  useEffect(() => { setExp(e => (e.next || e.saved !== null || e.empty ? { ...EXPORT_INIT } : e)); }, [key]);
 
   if (!active) return null;
   return (

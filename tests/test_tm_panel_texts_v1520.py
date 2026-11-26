@@ -17,7 +17,10 @@ The tab shows its texts from tables in ``tmTexts.ts``. This test reads them
   ``_OBJECT``, in both directions;
 * ``JUMP_TAB_TEXT``: exactly the ``tm_sources.TAB_*`` ids, each one a tab
   the panel registers (``registerEnterpriseTab`` in a ``register.ts``) with
-  the same title, and every registered tab a jump may name has a text.
+  the same title, and every registered tab a jump may name has a text;
+* ``EXPORT_UNAVAILABLE_TEXT`` (browser check before the merge): exactly the
+  reasons of an ``unavailable`` export answer (``tm_export.async_export``),
+  whole sentences after "Nichts zu exportieren, …".
 """
 
 from __future__ import annotations
@@ -28,7 +31,12 @@ from pathlib import Path
 
 from test_tm_panel_texts_v1500 import _table
 
-from custom_components.openwrt_router import channel_plan, tm_sources, tm_state
+from custom_components.openwrt_router import (
+    channel_plan,
+    tm_export,
+    tm_sources,
+    tm_state,
+)
 
 _ENTERPRISE = (
     Path(__file__).parents[1]
@@ -137,3 +145,18 @@ def test_every_jump_tab_is_a_registered_panel_tab_and_back() -> None:
     # every tab of the tables is a known tab (or by_kind / none)
     named = set(_table("JUMP_REF_TAB").values()) | set(_table("JUMP_KIND_TAB").values())
     assert named - {"by_kind", "none"} <= backend
+
+
+def test_every_unavailable_reason_of_the_export_has_a_text() -> None:
+    """An export without a mark says why (no file is saved for it)."""
+    src = inspect.getsource(tm_export.async_export)
+    names = set(re.findall(r"\b(REASON_[A-Z_]+)\b", src))
+    assert names == {"REASON_NOT_RUNNING", "REASON_NOT_LOADED"}, names
+    reasons = {getattr(tm_sources, n) for n in names}
+    table = _table("EXPORT_UNAVAILABLE_TEXT")
+    assert set(table) == reasons, (
+        "EXPORT_UNAVAILABLE_TEXT names exactly the reasons the export sends"
+    )
+    for key, text in table.items():
+        assert text[0].isupper() and text.endswith("."), (key, text)
+        assert "_" not in text, key

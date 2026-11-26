@@ -569,3 +569,74 @@ test('export confirmation in a Shadow DOM: the focused button is found in the sh
   assert.equal(activeIn({ getRootNode: () => ({}) }, doc), host);
   assert.equal(activeIn(undefined, null), null);
 });
+
+// ── browser check before the merge: an export without a mark, focus after a click ──
+
+import { EXPORT_EMPTY_MORE, EXPORT_EMPTY_TITLE, exportEmptyText, focusLost } from './tmState.ts';
+import { EXPORT_UNAVAILABLE_TEXT } from './tmTexts.ts';
+
+test('export without a mark: nothing to save, and why in words (real route answers)', async () => {
+  const calls = [];
+  const api = fakeHass(calls, [F.export_unavailable, F.export_empty, F.export_empty_partial, F.export_off, F.export, F.export_cut]);
+  const q = { from: 100, until: 200, sources: null, minSeverity: null, routerId: null, spans: true, cursor: null, client: null };
+  const unavailable = await api.exportFile(q);
+  assert.deepEqual([unavailable.status, unavailable.reason, unavailable.marks, unavailable.spanning], ['unavailable', 'not_running', 0, 0]);
+  assert.equal(EXPORT_EMPTY_TITLE, 'Nichts zu exportieren, es wurde keine Datei gespeichert.');
+  assert.equal(exportEmptyText(unavailable), 'Nichts zu exportieren, es wurde keine Datei gespeichert. Die Zeitreise läuft gerade nicht.');
+  const empty = await api.exportFile(q);
+  assert.deepEqual([empty.status, empty.reason, empty.marks, empty.spanning], ['ok', null, 0, 0]);
+  assert.equal(exportEmptyText(empty),
+    'Nichts zu exportieren, es wurde keine Datei gespeichert. Im gewählten Zeitfenster gibt es mit den gewählten Filtern keine exportierbaren Marken.');
+  const partial = await api.exportFile(q);
+  assert.equal(partial.status, 'partial');
+  assert.equal(exportEmptyText(partial),
+    'Nichts zu exportieren, es wurde keine Datei gespeichert. Im gewählten Zeitfenster gibt es mit den gewählten Filtern keine exportierbaren Marken. '
+    + 'Mindestens eine Quelle ließ sich nicht lesen.');
+  const off = await api.exportFile(q);
+  assert.equal(exportEmptyText(off), 'Nichts zu exportieren, es wurde keine Datei gespeichert. Die Zeitreise ist ausgeschaltet.');
+  // an answer with marks is saved as before
+  const data = await api.exportFile(q);
+  assert.ok(data.marks > 0);
+  assert.equal(exportEmptyText(data), null);
+  assert.equal(exportEmptyText(await api.exportFile(q)), null);
+  const file = (o = {}) => ({ status: 'ok', reason: null, marks: 0, spanning: 0, omittedClientMarks: 0, ...o });
+  // only running intervals in the window: the file holds them, it is saved
+  assert.equal(exportEmptyText(file({ spanning: 2 })), null);
+  // only client marks: they are never exported, so nothing is saved, and the count says why
+  assert.equal(exportEmptyText(file({ omittedClientMarks: 4 })),
+    'Nichts zu exportieren, es wurde keine Datei gespeichert. Im gewählten Zeitfenster gibt es mit den gewählten Filtern keine exportierbaren Marken. '
+    + '4 Client-Einträge werden nie exportiert.');
+  assert.ok(exportEmptyText(file({ omittedClientMarks: 1 })).endsWith(' 1 Client-Eintrag wird nie exportiert.'));
+  // the other reason of the route, and one it may send later
+  assert.equal(exportEmptyText(file({ status: 'unavailable', reason: 'not_loaded' })),
+    'Nichts zu exportieren, es wurde keine Datei gespeichert. Der gespeicherte Verlauf wird noch geladen; bitte gleich noch einmal versuchen.');
+  assert.equal(exportEmptyText(file({ status: 'unavailable', reason: 'something_new' })),
+    'Nichts zu exportieren, es wurde keine Datei gespeichert. Die Zeitreise ist gerade nicht verfügbar.');
+  assert.equal(exportEmptyText(file({ status: 'unknown_status' })), EXPORT_EMPTY_TITLE);
+  // a later page without a mark: no further file
+  assert.equal(EXPORT_EMPTY_MORE, 'Keine weiteren Marken, es wurde keine weitere Datei gespeichert.');
+  assert.equal(exportEmptyText(file(), 2), EXPORT_EMPTY_MORE);
+  assert.equal(exportEmptyText(file({ status: 'unavailable', reason: 'not_running' }), 3), `${EXPORT_EMPTY_MORE} Die Zeitreise läuft gerade nicht.`);
+  assert.deepEqual(Object.keys(EXPORT_UNAVAILABLE_TEXT).sort(), ['not_loaded', 'not_running']);
+  assert.ok(calls.every(x => x.url.startsWith(`${TM_BASE}/export?`)));
+});
+
+test('export confirmation: a focus fallen to <body> (a tap on the text) is lost; a real focus elsewhere is not', () => {
+  const body = { n: 'body' };
+  const host = { n: 'shadow host' };
+  const button = { n: 'Abbrechen' };
+  const other = { n: 'a chip of the filters' };
+  // in the panel's shadow root nothing is focused and the document's focus is on <body>
+  assert.equal(focusLost(null, body, body), true);
+  // without a Shadow DOM the dialog's root is the document: activeIn gives <body>
+  assert.equal(focusLost(body, body, body), true);
+  assert.equal(focusLost(null, null, body), true);
+  // a button, the focus in another tree (the HA sidebar: the document's is its host) or another control: not lost
+  assert.equal(focusLost(button, host, body), false);
+  assert.equal(focusLost(null, host, body), false);
+  assert.equal(focusLost(other, other, body), false);
+  // a lost focus goes by the dialog's rule: Tab to the first button, Shift+Tab to the last, Escape cancels
+  assert.deepEqual(dialogKey('Tab', false, -1, 2), { action: 'focus', index: 0 });
+  assert.deepEqual(dialogKey('Tab', true, -1, 2), { action: 'focus', index: 1 });
+  assert.deepEqual(dialogKey('Escape', false, -1, 2), { action: 'cancel' });
+});

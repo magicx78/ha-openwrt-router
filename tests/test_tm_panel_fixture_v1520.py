@@ -22,7 +22,13 @@ and ``.../timeline`` (client filter) as an administrator and as a user:
   ok with one audit entry (``compare_other``) and unreadable (the audit
   API without ``events``, ``compare_unreadable``);
 * export: one page, a page cut by a lowered limit (``EXPORT_MAX_MARKS`` 1,
-  with ``next_cursor``), the audit log refusing (503);
+  with ``next_cursor``), the audit log refusing (503), and the answers
+  without a mark (1.52.0 browser check: the panel saves no file for them):
+  a window before the recording with the readable sources
+  (``export_empty``, status ``ok``) and with all of them
+  (``export_empty_partial``: the modules of the world are not running), the
+  Time Machine not running (``export_unavailable``, reason ``not_running``)
+  and off (``export_off``);
 * timeline: the client filter of an administrator.
 
 The route's clock is the test clock; mark ids and pseudonyms are
@@ -170,16 +176,24 @@ async def build(disks: Any, disk: Any) -> tuple[dict[str, Any], list[bytes]]:
         )
         out["export_user"] = await get("/export", window, USER_ID)
         w.hass.data.pop(PANEL_ACCESS)
+        # -- an export window without a mark (before the recording) --------------------
+        before = {"from": str(int(T0 - 3600)), "until": str(int(T0 - 1800))}
+        out["export_empty"] = await get(
+            "/export", {**before, "source": "core_audit,tm_index,tm_refs"}
+        )
+        out["export_empty_partial"] = await get("/export", before)
         # -- the client switch off, the Time Machine not running and off ---------------
         await w.engine.async_set_clients(False)
         out["state_clients_off"] = await get("/state", {"at": at})
         engine = w.hass.data.pop(DATA_TIME_MACHINE_ENGINE)
         out["state_unavailable"] = await get("/state", {"at": at})
+        out["export_unavailable"] = await get("/export", window)
         w.hass.data[DATA_TIME_MACHINE_ENGINE] = engine
         for entry in w.entries:
             entry.options[OPTION_TIME_MACHINE_ENABLED] = False
         out["state_off"] = await get("/state", {"at": at})
         out["compare_off"] = await get("/compare", {"t1": str(moments["r1"]), "t2": at})
+        out["export_off"] = await get("/export", window)
         bodies = list(h.bodies)
     return out, bodies
 
@@ -253,6 +267,24 @@ async def test_the_state_fixture_is_the_real_route_answer(disks, disk) -> None:
     assert cut["truncated"] is True and cut["next_cursor"] is not None
     assert doc["export_refused"]["status"] == 503
     assert doc["export_user"]["status"] == 403
+    # the answers without a mark: the panel saves nothing and says why
+    empty = doc["export_empty"]["body"]
+    assert (empty["status"], empty["reason"]) == ("ok", None)
+    assert empty["marks"] == [] and empty["spanning"] == []
+    partial = doc["export_empty_partial"]["body"]
+    assert (partial["status"], partial["marks"], partial["spanning"]) == (
+        "partial",
+        [],
+        [],
+    )
+    unavailable = doc["export_unavailable"]["body"]
+    assert (unavailable["status"], unavailable["reason"]) == (
+        "unavailable",
+        "not_running",
+    )
+    assert unavailable["marks"] == [] and unavailable["spanning"] == []
+    off = doc["export_off"]["body"]
+    assert (off["status"], off["marks"], off["spanning"]) == ("off", [], [])
     timeline = doc["timeline_client"]["body"]
     assert timeline["marks"] and {m["client"] for m in timeline["marks"]} == {TMC1}
     text = _dump(doc)

@@ -362,6 +362,18 @@ export const UNAVAILABLE_TEXT: Record<string, string> = {
   'not_loaded': 'Der gespeicherte Verlauf wird noch geladen.',
 };
 
+/**
+ * Why an export has nothing in it (status "unavailable" of GET …/export, the
+ * reasons tm_export.async_export sends, checked by
+ * tests/test_tm_panel_texts_v1520.py). Whole sentences after "Nichts zu
+ * exportieren, es wurde keine Datei gespeichert." (browser check before the
+ * merge: no file is saved for such an answer).
+ */
+export const EXPORT_UNAVAILABLE_TEXT: Record<string, string> = {
+  'not_running': 'Die Zeitreise läuft gerade nicht.',
+  'not_loaded': 'Der gespeicherte Verlauf wird noch geladen; bitte gleich noch einmal versuchen.',
+};
+
 /** Groups of the kinds (tm_sources.KIND_GROUP values). */
 export const GROUP_TEXT: Record<string, string> = {
   'infrastructure': 'Infrastruktur',

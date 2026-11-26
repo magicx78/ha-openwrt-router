@@ -1574,7 +1574,7 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 
 ## 25. Panel für D bis F (1.52.0)
 
-`_PANEL_VERSION` `20261126-timemachine8`. Das Panel liest die Routen `timeline`, `sessions`,
+`_PANEL_VERSION` `20261126-timemachine9`. Das Panel liest die Routen `timeline`, `sessions`,
 `state`, `compare` und `export` und fügt nichts hinzu. Dateien unter
 `frontend/topology/src/enterprise/timemachine/`: `tmState.ts` (Zerlegen der Antworten,
 Reducer, Texte und Werte in Worten, Vergleichszeilen, Sprungziele; ohne React),
@@ -1688,6 +1688,23 @@ nennt wie im Zustand den Grund in Worten.
   Browser-Prüfung). Nach dem Export steht, wenn
   `omitted_client_marks` > 0, „n Client-Einträge sind nicht enthalten.“ (die Zahl gilt für das
   ganze Fenster und ist auf jeder Seite gleich).
+- Fokus nach einem Klick (zweite Browser-Prüfung): Der Dialog hat `tabIndex={-1}` (nicht in der
+  Tab-Reihenfolge); ein Klick oder Tippen auf seinen Text fokussiert den Dialog selbst, seine
+  Tasten bleiben bei ihm (vorher fiel der Fokus auf `<body>`, Umschalt+Tab verließ den Dialog,
+  Escape wirkte nicht). Fällt der Fokus trotzdem auf `<body>` (Klick auf eine Stelle ohne
+  Fokus außerhalb des Dialogs), hört ein `keydown` am Dokument, solange der Dialog offen ist,
+  und wendet dieselbe Regel an (`focusLost`: in der Wurzel des Dialogs nichts fokussiert und
+  `document.activeElement` ist `<body>`); einen echten Fokus anderswo lässt es in Ruhe.
+- Export ohne Marke (zweite Browser-Prüfung): Hat die Antwort weder `marks` noch `spanning`,
+  speichert das Panel keine Datei und sagt warum (`exportEmptyText`, `exportStep`): „Nichts zu
+  exportieren, es wurde keine Datei gespeichert.“ und dahinter je Antwort „Die Zeitreise läuft
+  gerade nicht.“ bzw. „Der gespeicherte Verlauf wird noch geladen; bitte gleich noch einmal
+  versuchen.“ (`unavailable`, Tabelle `EXPORT_UNAVAILABLE_TEXT`), „Die Zeitreise ist
+  ausgeschaltet.“ (`off`) oder „Im gewählten Zeitfenster gibt es mit den gewählten Filtern keine
+  exportierbaren Marken.“ (`ok`; bei `partial` dazu „Mindestens eine Quelle ließ sich nicht
+  lesen.“, bei ausgelassenen Client-Marken „n Client-Einträge werden nie exportiert.“). Eine
+  spätere Seite ohne Marke: „Keine weiteren Marken, es wurde keine weitere Datei
+  gespeichert.“ Das Audit vermerkt einen leeren `ok`-Export weiterhin (Backend unverändert).
 - Client-Kürzel: `title` „<Name> · tmc_…“, ohne Namen nur das Pseudonym. Der Client-Filter ist
   unter 600 px mindestens 24 px hoch und hat bei jeder Breite den Fokusring des Tabs.
 

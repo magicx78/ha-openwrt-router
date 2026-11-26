@@ -27,7 +27,7 @@ import {
   routerOptionLabel, startText,
 } from './tmLogic.ts';
 import {
-  GLOBAL_REASON_TEXT, JUMP_KIND_TAB, JUMP_OBJECT, JUMP_REF_TAB, JUMP_TAB_TEXT, PART_STATE_TEXT, RADIO_BAND_TEXT,
+  EXPORT_UNAVAILABLE_TEXT, GLOBAL_REASON_TEXT, JUMP_KIND_TAB, JUMP_OBJECT, JUMP_REF_TAB, JUMP_TAB_TEXT, PART_STATE_TEXT, RADIO_BAND_TEXT,
   RADIO_STATE_TEXT, ROLE_TEXT, SOURCE_TEXT, STATE_REASON_TEXT, TITLE_TEXT,
 } from './tmTexts.ts';
 import type {
@@ -73,6 +73,38 @@ export function exportOmittedText(n: number | null): string | null {
   return n === 1 ? '1 Client-Eintrag ist nicht enthalten.' : `${num(n)} Client-Einträge sind nicht enthalten.`;
 }
 
+/** An export answer without a mark (browser check before the merge): no file is saved, this says so. */
+export const EXPORT_EMPTY_TITLE = 'Nichts zu exportieren, es wurde keine Datei gespeichert.';
+/** The same on a later page of a cut export (the pages before it stay saved). */
+export const EXPORT_EMPTY_MORE = 'Keine weiteren Marken, es wurde keine weitere Datei gespeichert.';
+export const EXPORT_OFF_TEXT = 'Die Zeitreise ist ausgeschaltet.';
+export const EXPORT_UNAVAILABLE_OTHER = 'Die Zeitreise ist gerade nicht verfügbar.';
+export const EXPORT_NO_MARKS_TEXT = 'Im gewählten Zeitfenster gibt es mit den gewählten Filtern keine exportierbaren Marken.';
+export const EXPORT_PARTIAL_TEXT = 'Mindestens eine Quelle ließ sich nicht lesen.';
+
+/**
+ * Null when an export answer has something to save (a mark or an interval
+ * reaching into the window); else the message shown instead of saving a
+ * file: that there is nothing, and why when the answer says it (the Time
+ * Machine off, not running or still loading; nothing in the window and its
+ * filters, a source unreadable, only client marks, which are never exported).
+ * `page` > 1: a later page of a cut export.
+ */
+export function exportEmptyText(file: { status: string; reason: string | null; marks: number; spanning: number; omittedClientMarks: number },
+  page = 1): string | null {
+  if (file.marks > 0 || file.spanning > 0) return null;
+  const why: string[] = [];
+  if (file.status === 'off') why.push(EXPORT_OFF_TEXT);
+  else if (file.status === 'unavailable') why.push((file.reason ? EXPORT_UNAVAILABLE_TEXT[file.reason] : undefined) ?? EXPORT_UNAVAILABLE_OTHER);
+  else if (page <= 1 && (file.status === 'ok' || file.status === 'partial')) {
+    why.push(EXPORT_NO_MARKS_TEXT);
+    if (file.status === 'partial') why.push(EXPORT_PARTIAL_TEXT);
+    const n = file.omittedClientMarks;
+    if (n > 0) why.push(n === 1 ? '1 Client-Eintrag wird nie exportiert.' : `${num(n)} Client-Einträge werden nie exportiert.`);
+  }
+  return [page > 1 ? EXPORT_EMPTY_MORE : EXPORT_EMPTY_TITLE, ...why].join(' ');
+}
+
 /**
  * A key in the export confirmation (role alertdialog, browser review):
  * Escape cancels, Tab and Shift+Tab go round its buttons and never leave it.
@@ -97,6 +129,19 @@ export function activeIn(node: { getRootNode?: () => unknown } | null | undefine
   const root = node?.getRootNode?.() as { activeElement?: Element | null } | undefined;
   if (root && 'activeElement' in root) return root.activeElement ?? null;
   return doc?.activeElement ?? null;
+}
+
+/**
+ * The focus fell out of everything (browser check: a tap on a part of the
+ * page that takes no focus puts it on `<body>`): nothing is focused in the
+ * dialog's root (`inRoot`, from activeIn: null in a shadow root, `<body>`
+ * when the root is the document) and the document's focus is `<body>` or
+ * none. A focus in another tree (the document's is then that tree's host)
+ * or on another control is a real one and is left alone.
+ */
+export function focusLost(inRoot: unknown, docActive: unknown, body: unknown): boolean {
+  if (inRoot !== null && inRoot !== undefined && inRoot !== body) return false;
+  return docActive === null || docActive === undefined || docActive === body;
 }
 
 /**

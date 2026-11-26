@@ -39,7 +39,7 @@ before(async () => {
     stdin: {
       contents: [
         "export * from './tmLogic.ts';",
-        "export { TimeMachineScreen, FilterBar, TimeMachineView, SessionsScreen, ViewSwitch, ExportBox, EXPORT_INIT } from './TimeMachineView';",
+        "export { TimeMachineScreen, FilterBar, TimeMachineView, SessionsScreen, ViewSwitch, ExportBox, EXPORT_INIT, exportStep } from './TimeMachineView';",
         "export { StateScreen, CompareScreen, StateContainer, CompareContainer } from './TimeMachineState';",
         "export { JumpContext, MarkRow } from './tmUi';",
         "export * as TS from './tmState.ts';",
@@ -1400,8 +1400,10 @@ test('the fields on a clock change: an error for the skipped hour, a note for th
 test('export: the confirmation is a modal alertdialog described by its text; the left-out client marks after it', () => {
   const sc = stateScreens(() => null);
   const ask = sc.timelineCustom;
-  const m = /<div class="[^"]*tm-export__ask" role="alertdialog" aria-label="Export bestätigen" aria-modal="true" aria-describedby="([^"]+)">/.exec(ask);
-  assert.ok(m, 'aria-modal and aria-describedby');
+  // tabindex -1 (browser check): a tap on the text keeps the focus in the dialog; not in the Tab order
+  const m = /<div class="[^"]*tm-export__ask" role="alertdialog" aria-label="Export bestätigen" aria-modal="true" aria-describedby="([^"]+)" tabindex="-1">/.exec(ask);
+  assert.ok(m, 'aria-modal, aria-describedby and tabindex -1');
+  assert.ok(!ask.includes('tabindex="0"'));
   assert.ok(ask.includes(`<span id="${m[1]}">${M.TS.EXPORT_CONFIRM_TEXT}</span>`));
   // the last button is "Abbrechen" (focused on open, see dialogFocus); no trigger next to the dialog
   assert.match(ask, /Exportieren<\/button><button type="button" class="diag-btn cfg-btn">Abbrechen<\/button>/);
@@ -1411,4 +1413,55 @@ test('export: the confirmation is a modal alertdialog described by its text; the
   // busy: the trigger stays focusable (aria-disabled), so the focus can come back to it
   const busy = screenC(loadedC('timeline'), { isAdmin: true, exportState: { ...M.EXPORT_INIT, busy: true }, onExport: { ask: noop, confirm: noop, cancel: noop, next: noop } });
   assert.match(busy, /<button type="button" class="diag-btn cfg-btn" aria-disabled="true">Exportieren<\/button>/);
+});
+
+// ── browser check before the merge: an export without a mark ─────────────
+
+const fileOf = name => {
+  const b = FS[name].body;
+  return {
+    blob: null, status: b.status, reason: b.reason, marks: b.marks.length, spanning: b.spanning.length, truncated: b.truncated,
+    nextCursor: b.next_cursor, omittedClientMarks: b.omitted_client_marks,
+  };
+};
+
+test('export without a mark: no file is saved, the message says why, never "Export gespeichert"', () => {
+  const q = qOf({ from: 1, until: 2 });
+  const on = { ask: noop, confirm: noop, cancel: noop, next: noop };
+  for (const name of ['export_unavailable', 'export_empty', 'export_empty_partial', 'export_off']) {
+    const step = M.exportStep(fileOf(name), 1, q, M.EXPORT_INIT);
+    assert.equal(step.save, null, name);
+    assert.equal(step.state.empty, M.TS.exportEmptyText(fileOf(name)), name);
+    assert.deepEqual([step.state.saved, step.state.next, step.state.busy, step.state.confirm], [null, null, false, false], name);
+    const html = screenC(loadedC('timeline'), { isAdmin: true, exportState: step.state, onExport: on });
+    assert.ok(html.includes(`<span class="cfg-hint tm-export__empty" role="status">${step.state.empty}</span>`), name);
+    assert.ok(!text(html).includes('gespeichert.') || text(html).includes('keine Datei gespeichert.'), name);
+    assert.ok(!text(html).includes('Export gespeichert'), name);
+  }
+  assert.ok(text(screenC(loadedC('timeline'), { isAdmin: true, exportState: M.exportStep(fileOf('export_unavailable'), 1, q, M.EXPORT_INIT).state, onExport: on }))
+    .includes('Nichts zu exportieren, es wurde keine Datei gespeichert. Die Zeitreise läuft gerade nicht.'));
+  // with marks exactly as before: the file is saved and "Export gespeichert."
+  const data = M.exportStep(fileOf('export'), 1, q, M.EXPORT_INIT);
+  assert.equal(data.save, M.TS.EXPORT_FILENAME);
+  assert.deepEqual([data.state.saved, data.state.next, data.state.empty], [1, null, null]);
+  assert.equal(data.state.omitted, FS.export.body.omitted_client_marks);
+  const done = text(screenC(loadedC('timeline'), { isAdmin: true, exportState: data.state, onExport: on }));
+  assert.ok(done.includes('Export gespeichert.'), done);
+  assert.ok(!done.includes('Nichts zu exportieren'));
+  // a cut export goes on; its second page is a file of its own
+  const cut = M.exportStep(fileOf('export_cut'), 1, q, M.EXPORT_INIT);
+  assert.deepEqual([cut.save, cut.state.saved, cut.state.next?.cursor], [M.TS.EXPORT_FILENAME, 1, FS.export_cut.body.next_cursor]);
+  const second = M.exportStep(fileOf('export'), 2, q, cut.state);
+  assert.equal(second.save, 'openwrt-router-time-machine-2.json');
+  assert.equal(second.state.saved, 2);
+  // a later page without a mark: no further file, the pages saved so far stay counted
+  const none = M.exportStep(fileOf('export_empty'), 2, q, cut.state);
+  assert.equal(none.save, null);
+  assert.deepEqual([none.state.saved, none.state.next, none.state.empty], [1, null, M.TS.EXPORT_EMPTY_MORE]);
+  const noneHtml = text(screenC(loadedC('timeline'), { isAdmin: true, exportState: none.state, onExport: on }));
+  assert.ok(noneHtml.includes(M.TS.EXPORT_EMPTY_MORE));
+  assert.ok(!noneHtml.includes('Weitere Seite exportieren'));
+  // busy or failed: the message waits
+  const busy = screenC(loadedC('timeline'), { isAdmin: true, exportState: { ...none.state, busy: true }, onExport: on });
+  assert.ok(!busy.includes('tm-export__empty'));
 });

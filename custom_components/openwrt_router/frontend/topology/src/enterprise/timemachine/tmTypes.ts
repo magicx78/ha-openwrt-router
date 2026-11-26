@@ -370,7 +370,12 @@ export interface CompareQuery {
 export interface ExportFile {
   /** The answer as the server sent it (saved as a file, never shown). */
   blob: Blob;
+  /** `ok`, `partial`, `off` or `unavailable` (with `reason`); a file without a mark is never saved. */
+  status: string;
+  reason: string | null;
   marks: number;
+  /** Intervals that began before the window and reach into it (`spanning`). */
+  spanning: number;
   truncated: boolean;
   nextCursor: string | null;
   /** Client marks of the whole window left out of the file (the same on every page). */
