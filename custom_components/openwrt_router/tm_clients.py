@@ -110,6 +110,22 @@ class ClientRecorder:
         """All open sessions were closed by the engine."""
         self._open.clear()
 
+    def reopen(self) -> None:
+        """The engine dropped marks dated after now (1.52.1, a capped wait
+        after a clock jump back): an open session whose mark is gone is
+        forgotten, and a client online now without one gets a resumed
+        session (derived), so the list after now is complete again. A
+        session evicted while open stays until its end is booked (review D)."""
+        index = self.engine.index
+        self._open = {
+            client: seq
+            for client, seq in self._open.items()
+            if seq in index.lost_open
+            or ((mark := index.get(seq)) is not None and mark.is_open)
+        }
+        if self.attached_to is not None:
+            self._resume_online(self.attached_to)
+
     def _resume_online(self, cs: Any) -> None:
         now = self.engine.clock()
         history = cs.history

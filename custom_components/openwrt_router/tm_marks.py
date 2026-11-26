@@ -44,6 +44,14 @@ marks of other routers deleted with a removed router raise only those
 routers' watermark (``lost_router``, J). A clock jump back raises no
 watermark (second review, A): only the doubled wall time is unknown, and
 the engine follows no stretch until the wall clock is past it.
+
+**Clock jumps back** (1.52.1): a ``clock_shift`` mark with a negative
+``shift_s`` names the doubled wall time up to :func:`shift_until`, and it
+lives as long as that time is inside the retention (not 14 days from its
+own ``ts``: the first occupant's marks are dated later). Evicted or
+trimmed, its quota counts as lost up to there. When the engine stops
+waiting (``tm_engine.CLOCK_WAIT_MAX_S``) it caps the mark (``wait_s``) and
+drops everything dated after now (:meth:`MarkIndex.drop_after`).
 """
 
 from __future__ import annotations
@@ -227,6 +235,34 @@ class Mark:
     def last_ts(self) -> float:
         """The later of start and end (for the retention)."""
         return max(self.ts, self.end) if self.end is not None else self.ts
+
+    @property
+    def kept_until(self) -> float:
+        """The latest moment the mark speaks about (1.52.1): ``last_ts``, for
+        a clock jump back the end of the doubled wall time it names."""
+        until = shift_until(self)
+        return self.last_ts if until is None else max(self.last_ts, until)
+
+
+def shift_until(mark: Mark) -> float | None:
+    """The end of the wall time a clock jump back occupies twice (1.52.1).
+
+    For a ``clock_shift`` mark with a negative ``shift_s``: the old wall
+    clock ``ts - shift_s``, or ``ts + wait_s`` when the engine stopped
+    waiting earlier (``wait_s``, written then; it dropped every mark dated
+    after that moment). None for any other mark. Whole seconds: the
+    readers add one for the rounding.
+    """
+    if mark.kind != "clock_shift":
+        return None
+    shift = mark.params.get("shift_s")
+    if not isinstance(shift, int | float) or isinstance(shift, bool) or shift >= 0:
+        return None
+    until = mark.ts - shift
+    wait = mark.params.get("wait_s")
+    if isinstance(wait, int | float) and not isinstance(wait, bool) and wait >= 0:
+        until = min(until, mark.ts + wait)
+    return until
 
 
 # --- packed form ------------------------------------------------------------------------
@@ -457,7 +493,8 @@ class MarkIndex:
     def _upto(self, mark: Mark, now: float | None) -> float:
         if mark.is_open:
             return max(mark.ts, self._newest, now if now is not None else mark.ts)
-        return mark.last_ts
+        # 1.52.1: a gone clock jump back leaves its doubled time unknown
+        return mark.kept_until
 
     def note_lost(self, marks: Iterable[Mark], now: float | None = None) -> None:
         """Marks gone before their retention: raise ``lost`` of their quota
@@ -739,15 +776,59 @@ class MarkIndex:
         return len(doomed)
 
     def prune(self, now: float) -> int:
-        """Drop closed marks that ended before the retention (open ones stay)."""
+        """Drop closed marks that ended before the retention (open ones stay).
+
+        A clock jump back stays while the doubled time it names is inside
+        the retention (1.52.1, ``Mark.kept_until``): the first occupant's
+        marks in it are dated later than the jump and stay longer.
+        """
         cutoff = now - self.retention_s
-        dropped = self.remove_where(lambda m: m.is_open or m.last_ts >= cutoff)
+        dropped = self.remove_where(lambda m: m.is_open or m.kept_until >= cutoff)
         oldest_day = int(cutoff // DAY_S) - 1
         for table in (self._day, self._flap):
             for key in [k for k in table if k[1] < oldest_day]:
                 del table[key]
         self.counters["pruned"] += dropped
         return dropped
+
+    def drop_after(self, at: float) -> int:
+        """A clock jump back whose wait the engine capped (1.52.1): every
+        mark dated after ``at`` goes (only the first occupant of that wall
+        time can have written it), a closed interval ending after ``at``
+        ends there with an unknown end, and ``lost`` above ``at`` comes down
+        to it (what was lost after ``at`` belonged to the first occupant).
+        Open intervals that began by ``at`` stay. No ``lost`` is raised: the
+        marks gone speak only about the time after ``at``."""
+        at = to_ms(at) / 1000
+        dropped = self.remove_where(lambda m: m.ts <= at)
+        for mark in self.marks.values():
+            if not mark.is_open and mark.end is not None and mark.end > at:
+                mark.end = at
+                if mark.kind != "client_flapping":
+                    mark.end_state = END_UNKNOWN
+                self.touched.add(mark.seq)
+        for table in (self.lost, self.lost_router):
+            for key in [k for k, v in table.items() if v > at]:
+                table[key] = at
+        self._newest = max((m.last_ts for m in self.marks.values()), default=-math.inf)
+        last_day = int(at // DAY_S)
+        for key in [k for k in self._day if k[1] > last_day]:
+            del self._day[key]
+        for key in [k for k, s in self._flap.items() if s not in self.marks]:
+            del self._flap[key]
+        self.changed = True
+        return dropped
+
+    def set_param(self, seq: int | None, key: str, value: int) -> None:
+        """Set one numeric param of a mark (within ``PARAMS_MAX``)."""
+        mark = self.get(seq)
+        if mark is None or not _PARAM_KEY.fullmatch(key):
+            return
+        if key not in mark.params and len(mark.params) >= PARAMS_MAX:
+            return
+        mark.params[key] = value
+        self.touched.add(mark.seq)
+        self.changed = True
 
     def forget_client(self, client: str) -> int:
         """Delete every mark of one client pseudonym."""
@@ -793,6 +874,12 @@ class MarkIndex:
         if now is not None and doomed:
             for quota in {m.quota for m in doomed}:
                 self.lost[quota] = max(self.lost.get(quota, -math.inf), now)
+        if now is not None:
+            # 1.52.1: what was dated after now (a clock jump back) is gone
+            # with the rest; the new history starts now
+            for quota in [QUOTA_CLIENTS] if clients_only else list(self.lost):
+                if self.lost.get(quota, -math.inf) > now:
+                    self.lost[quota] = now
         pending = {
             seq: quota
             for seq, quota in self.lost_open.items()
@@ -899,6 +986,7 @@ __all__ = [
     "code_of",
     "pack",
     "quota_of",
+    "shift_until",
     "source_of",
     "to_ms",
     "unpack",

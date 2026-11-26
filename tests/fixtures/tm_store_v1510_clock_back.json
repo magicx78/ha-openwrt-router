@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "minor_version": 1,
+  "key": "openwrt_router.time_machine",
+  "data": {
+    "saved_at": 1800003600.0,
+    "stop": "stop",
+    "next_seq": 6,
+    "routers": [
+      "rtr_11111111111111111111111111111111"
+    ],
+    "marks": [
+      "2|1801729800000|clock_shift||w|forwards||||shift_s=1728000|||",
+      "3|1801729800000|channel_changed|0|i|channel||||band=5;channel_from=36;channel_to=100;width_from=80;width_to=80;dfs=0|||",
+      "4|1800001800000|clock_shift||w|backwards||||shift_s=-1735260|||",
+      "5|1800001800000|channel_changed|0|i|channel||||band=5;channel_from=100;channel_to=36;width_from=80;width_to=80;dfs=0|||"
+    ],
+    "coverage": [
+      [
+        1800000000.0,
+        1800003600.0
+      ]
+    ],
+    "checkpoints": [
+      "1801729800000|day|rtr_11111111111111111111111111111111:u=1,fp=674761070dce23b1,p=-",
+      "1800001800000|day|rtr_11111111111111111111111111111111:u=1,fp=674761070dce23b1,p=-"
+    ],
+    "state": {
+      "rtr_11111111111111111111111111111111": "674761070dce23b1|5g0=36/80||"
+    }
+  }
+}

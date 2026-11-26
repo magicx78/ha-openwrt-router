@@ -62,7 +62,7 @@ from typing import Any, Final
 from homeassistant.core import HomeAssistant
 
 from .tm_engine import _band_num
-from .tm_marks import QUOTA_CLIENTS, QUOTA_INFRA, RETENTION_S, Mark
+from .tm_marks import QUOTA_CLIENTS, QUOTA_INFRA, RETENTION_S, Mark, shift_until
 from .tm_query import (
     _READ,
     API_VERSION,
@@ -674,16 +674,19 @@ def _shift_window(mark: Mark) -> tuple[float, float] | None:
     ``lead_s`` (written before 1.52.0) keeps ``ts - |shift_s|`` as the start.
     A jump ahead occupies no time twice: the skipped wall time had no real
     time in it, nothing to reconstruct there differs from the last poll
-    before it.
+    before it. 1.52.1: the end is ``tm_marks.shift_until`` (``ts +
+    wait_s`` when the engine stopped waiting before the old wall clock and
+    dropped what was dated after that moment).
     """
-    shift = float(mark.params.get("shift_s", 0) or 0)
-    if shift >= 0:
+    until = shift_until(mark)
+    if until is None:
         return None
+    shift = float(mark.params.get("shift_s", 0) or 0)
     lead = mark.params.get("lead_s")
     # both are whole seconds: one more on each side covers the rounding
     if isinstance(lead, int | float) and lead >= 0:
-        return mark.ts - lead - 1, mark.ts - shift + 1
-    return mark.ts + shift - 1, mark.ts - shift + 1
+        return mark.ts - lead - 1, until + 1
+    return mark.ts + shift - 1, until + 1
 
 
 def _first_seen(mark: Mark) -> float:
