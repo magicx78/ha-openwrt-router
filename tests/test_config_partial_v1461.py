@@ -33,7 +33,7 @@ from test_config_provider import (
 )
 from test_config_views import backup, http
 
-from custom_components.openwrt_router import config_provider
+from custom_components.openwrt_router import config_api, config_provider
 from custom_components.openwrt_router.api import (
     OpenWrtAuthError,
     OpenWrtConfigFetchHostKeyError,
@@ -239,7 +239,9 @@ async def test_requested_snapshot_with_an_archive_path_says_requested() -> None:
     assert "archive_not_attempted:requested" in version.meta.warnings
 
 
-async def test_partial_run_without_archive_path_end_to_end(disks, tmp_path):
+async def test_partial_run_without_archive_path_end_to_end(
+    disks, tmp_path, monkeypatch
+):
     # The field case after point 1 and 3: rpcd gives no clear answer on the
     # cgi right, the rpcd config is denied, the SSH pin is pending. The first
     # backup finds out (PR 59 review R2/R3): it asks for the archive, both
@@ -256,6 +258,10 @@ async def test_partial_run_without_archive_path_end_to_end(disks, tmp_path):
         ssh=pending,
     )
     env = await _env(disks, tmp_path, api)
+    # The retention plan reads the real date; on the test clock (2026-11-18)
+    # the partial snapshot was more than 7 days old from 2026-11-25 on and
+    # was pruned. The plan uses the test clock here.
+    monkeypatch.setattr(config_api.dt_util, "now", lambda *_a, **_k: env.clock.local())
     await env.tick()
     [record] = await _records(env)
     assert {"cgi", "ssh"} <= set(methods(api))
