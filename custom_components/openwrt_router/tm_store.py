@@ -114,6 +114,7 @@ _COUNTERS: Final = (
     "load_failed",
     "trimmed_rows",
     "copies_removed",
+    "backups",
 )
 
 
@@ -504,6 +505,29 @@ class TimeMachineStore:
         )
         self.counters["copies_removed"] += removed
         return removed
+
+    async def async_backup(self) -> bool:
+        """Write now and keep one copy ``<file>.bak`` (1.52.1: before marks a
+        clock ahead dated are dropped; the next copy overwrites it, "Verlauf
+        löschen" and switching off delete it). File work in the executor;
+        False when it failed (never raises)."""
+        if self._store is None or self.closed:
+            return False
+        try:
+            await self._store.async_save(self.payload())
+            path = getattr(self._store, "path", None)
+            copied = bool(
+                await self.hass.async_add_executor_job(core_store._backup_file, path)
+            )
+        except Exception as err:  # noqa: BLE001 - no copy means no drop
+            _LOGGER.warning(
+                "Time Machine store: no backup copy (%s); nothing is dropped",
+                type(err).__name__,
+            )
+            return False
+        if copied:
+            self.counters["backups"] += 1
+        return copied
 
     async def async_flush(self, stop: str | None = None) -> None:
         """Write now (switched off, last router gone); never raises."""
