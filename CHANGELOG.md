@@ -2,6 +2,204 @@
 
 All notable changes to the OpenWrt Router integration will be documented in this file.
 
+## [Unreleased]
+
+## [1.52.0] - 2026-11-26
+
+Network Time Machine, Phasen D bis F: Der Tab „Zeitreise“ zeigt den **Zustand des Netzes zu
+einem Zeitpunkt**, **vergleicht zwei Zeitpunkte**, **exportiert** die Marken eines Fensters
+(nur Administratoren) und **springt in den Tab**, der einen Eintrag zeigt. Weiterhin ist die
+ganze Time Machine **standardmäßig aus**; ausgeschaltet keine Wirkung und **kein
+zusätzlicher Router-Aufruf** (Test vergleicht die Aufrufliste zweier Polls mit allem an und
+allem aus). Alles stammt aus dem eigenen Verlauf und aus Lesefunktionen vorhandener Module;
+Erschlossenes ist als „abgeleitet“ gekennzeichnet, Unsicheres heißt ausdrücklich „unbekannt“
+mit Grund, nie geraten. **Wer die Time Machine eingeschaltet hat, bekommt mit dem Update eine
+erweiterte Datei** `.storage/openwrt_router.time_machine` (Speicher 1.2: `minor_version`
+1 → 2, nur die Schlüssel `seen`, `clients_cov`, `lost` und, wenn nötig, `lost_routers` kommen
+hinzu, geschrieben beim nächsten Speichern); eine 1.51.0-Datei lädt unverändert. Zurück auf
+1.51.0 (vom Review bestätigt): Die Datei lädt ohne Verlust, die zusätzlichen Schlüssel
+bleiben stehen, bis 1.51.0 selbst speichert. Zustand und Vergleich sind darum
+**erst für Zeiten ab dem Update bekannt, davor „nicht aufgezeichnet“**. Bei ausgeschalteter
+Time Machine wird die Datei weder gelesen noch geschrieben. Entwicklerdoku:
+`docs/time-machine.md`, Abschnitte 20 bis 25. Panel-Version `20261126-timemachine9`.
+
+### Hinzugefügt
+
+- **Route `GET …/timemachine/state?at=…`** (Zustand zum Zeitpunkt): je Router erreichbar,
+  Rolle, Uplink, Kanal und Breite je Funk, dazu laufende Ausfälle und Lücken, offene
+  NI-Vorfälle, Stundenwerte von Traffic (WAN) und WiFi RF (je Band), für Administratoren die
+  neueste behaltene Konfigurationsversion und (bei eingeschalteten Client-Verläufen) die
+  Clients je Access Point mit Cursor. Rekonstruiertes trägt `derived: true`, Unsicheres ist
+  unbekannt mit festem Grund (Zufalls-Orakel-Test).
+- **Route `GET …/timemachine/compare?t1=…&t2=…`**: nur die Unterschiede je Router, Marken
+  dazwischen je Gruppe, geöffnete und behobene Vorfälle, Versionen dazwischen; höchstens
+  14 Tage Abstand.
+- **Route `GET …/timemachine/export`** (nur Administratoren): Marken eines Fensters als
+  JSON-Datei, ohne Namen und ohne Client-Marken, höchstens 5000 je Seite mit Cursor; jeder
+  Export steht im Audit (`time_machine.exported`), ohne Audit kein Export (503).
+- **Ein Client über Module**: Audit-Einträge von Security Center, Traffic und WiFi RF werden
+  dem TM-Client zugeordnet, über die prozessinterne Funktion „Pseudonym für MAC“ des jeweiligen
+  Moduls, nie durch Vergleich der `cli_`-Werte.
+- **Sprungziele**: dokumentierte Abbildung `ref.module`/`ref.type` (+ `kind`) → Tab und
+  Objekt (`tm_sources.JUMP_TARGETS`); Test, dass jede erzeugte Kombination ein Ziel oder
+  ausdrücklich keines hat. `/state` und `/compare` tragen an Vorfällen und Versionen `target`.
+- **Tab „Zeitreise“, Umschalter „Zeitleiste | Zustand | Vergleich | Client-Sitzungen“**
+  (Client-Sitzungen nur für Administratoren). Bei 360 px zwei Reihen mit je zwei 40 px hohen
+  Chips, bei 768 und 1280 px eine Reihe mit 32 px (Test). Jede Ansicht lädt nur, solange sie
+  sichtbar ist, behält ihren Zustand beim Umschalten und verwirft veraltete Antworten.
+- **Ansicht „Zustand“**: Feld für Datum und Uhrzeit (Ortszeit, Vorgabe jetzt), „Jetzt“,
+  „−1 h“, „−24 h“, Router-Auswahl; lädt kurz nach einer Eingabe und bei „Jetzt“ höchstens alle
+  60 s, solange die Seite sichtbar ist. Je Router eine Karte mit Erreichbar, Rolle, Uplink und
+  Funk; ein unbekannter Wert steht als „unbekannt“ mit seinem Grund (gedämpft, nie grün oder
+  rot), „nicht erreichbar“ in Warnfarbe und als Wort, Erschlossenes mit „abgeleitet“ (Tooltip
+  erklärt es). Abschnitte: laufende Ausfälle und Lücken, offene Vorfälle, Verkehr und
+  Funkauslastung der Stunde, für Administratoren Konfigurationsversionen und verbundene
+  Clients (Zahl je Router, „Weitere laden“). Ist für den Zeitpunkt nichts bekannt, steht nur
+  ein Kasten mit dem Grund (nicht aufgezeichnet, außerhalb der 14 Tage, HA lief nicht, nicht
+  beobachtet, verdrängt). Fehler in Worten am Feld (z. B. „Der Zeitpunkt liegt in der Zukunft.
+  Bitte einen früheren wählen.“). „In der Zeitleiste zeigen“ öffnet die Zeitleiste mit einem
+  eigenen Fenster ±30 min.
+- **Ansicht „Vergleich“**: „Von“/„Bis“, Schnellwahl (letzte Stunde, 24 Stunden, 7 Tage),
+  Router-Auswahl; je Router eine Tabelle „Merkmal | Vorher | Nachher“ (bei schmaler Breite
+  Karten), Geändertes mit „geändert“ (bei Clients „von 2 auf 1 (−1)“), Unverändertes hinter
+  „Unverändertes zeigen“, Unbekanntes ohne Farbe mit Grund. Ein Hinweisband, wenn zu einem der
+  Zeitpunkte nichts bekannt ist; „Ereignisse dazwischen“ mit Zahl je Art und Sprung in die
+  Zeitleiste, Vorfälle, für Administratoren Konfigurationsänderungen; Einträge anderer Module
+  dazwischen als „Dazu n Einträge aus anderen Modulen.“ (bei gekürzter Zählung „mindestens n“).
+  Der Satz „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ steht nur, wenn beide
+  Zeitpunkte bekannt sind, kein Merkmal unbekannt ist, dazwischen nichts geschah und alle
+  anderen Module gelesen wurden und leer sind; ließ sich eine Quelle nicht lesen, steht „Ob
+  dazwischen etwas geschah, ist unbekannt: Eine Quelle ließ sich nicht lesen.“ mit ihrem Namen.
+  „Noch nicht verfügbar“ nennt wie im Zustand den Grund.
+- **Zeitleiste**: fünfter Fensterzustand „Eigenes Fenster“ („Fenster: 21.11. 13:30 – 14:30“,
+  „×“ zurück zu 24 Stunden, ohne automatisches Nachladen); für Administratoren ein Auswahlfeld
+  „Client“ (sendet `client=tmc_…`), ein Klick auf ein Client-Kürzel setzt diesen Filter, und
+  „Exportieren“ mit Bestätigung im Tab („Der Export enthält die Marken des gewählten
+  Zeitfensters ohne Namen und ohne Client-Verläufe. Er wird im Audit-Protokoll vermerkt.“),
+  Speichern als Datei (Blob, kein Token in einer URL), „Weitere Seite exportieren“ bei einem
+  gekürzten Export, 503 als „Export nicht möglich: Das Audit-Protokoll ist nicht verfügbar.“
+- **Sprünge „Im Tab … öffnen →“** an Marken, Vorfällen und Versionen: Security Center (wählt
+  den Vorfall aus), Konfiguration (wählt den Router der Version), WiFi Intelligence,
+  Netzwerkdiagnose und Traffic Analytics (öffnen den Tab). Eine Schaltfläche, per Tastatur
+  erreichbar; keine für Einträge ohne Ziel, für die Zeitreise selbst oder für einen Tab, den
+  der Benutzer nicht hat. Nach dem Sprung liegt der Fokus auf dem Reiter des Ziel-Tabs.
+
+### Geändert
+
+- Time-Machine-Speicher Version 1.2 (additiv: `seen`, `clients_cov`, `lost`, `lost_routers`);
+  eine 1.51.0-Datei lädt unverändert, die Zeit davor gilt als nicht aufgezeichnet.
+- Review vor dem Release (Backend, je ein Test über die echten Schreibwege, ohne die Korrektur
+  rot; dazu das Zufalls-Orakel des Reviews mit festen Startwerten in der Suite):
+  - Springt die Uhr um mehr als 300 s **zurück**, ist nur die doppelt belegte Zeit
+    „unbekannt“ mit dem neuen Grund `clock_shift`; die Zeit davor bleibt bekannt. Erkannt
+    wird der Sprung jetzt auch beim Poll; die Marke trägt `lead_s` (Sekunden seit der
+    Prüfung davor, die Grenze der doppelten Zeit). Bis die Wanduhr die alte Zeit überholt
+    hat, verfolgt die Engine nichts (auch nicht nach einem Neustart in dieser Zeit). Ein
+    Sprung vor macht nichts unbekannt.
+  - Uplink- und Rollenwechsel: die Unsicherheit zählt ab dem ersten Poll, der den neuen Wert
+    sah (Marken-Parameter `since`), auch über fehlgeschlagene Polls hinweg; ein noch
+    unbestätigter Wechsel macht Uplink und Rolle „jetzt“ unbekannt (`settling`).
+  - „Verlauf löschen“, Neuladen eines Routers und Neustart setzen laufende Ausfälle
+    (auch den LAN-Ausfall), Lücken und aus gebliebene Funks fort; vorher zeigte ein noch
+    ausgefallener Router danach „erreichbar“.
+  - Ein verdrängter laufender Ausfall macht die Zeit bis zu seinem Ende unbekannt (vorher
+    „erreichbar“).
+  - LAN-Ausfall der ganzen Flotte: die Marke beginnt, wenn der letzte Router ausfiel, nicht
+    beim ersten einzelnen Ausfall; jeder Router ist erst ab seinem eigenen ersten
+    fehlgeschlagenen Poll „nicht erreichbar“, auch bei einer zurückdatierten Marke aus
+    1.51.0.
+  - „Verlauf löschen“ vergisst einen aus gebliebenen Funk nicht mehr.
+  - Nach einem Neustart ist ein Router erst ab seinem ersten erfolgreichen Poll
+    „erreichbar“; eine kurze Lücke davor wird nicht mehr verworfen.
+  - Der Funk-Block sagt nur noch `ok`, wenn er vollständig ist; ein über einen Neustart aus
+    gebliebener Funk macht ihn `partial`.
+  - Vergleich: Marken zählen im Fenster der Zeitleiste (`t1 ≤ ts < t2`); neues Feld
+    `changes.other_sources` zählt die Einträge der anderen Quellen dazwischen.
+  - Client-Liste bleibt `partial` (`flapping`), solange ein Client über der Tagesgrenze
+    ohne Session verbunden sein kann, auch über Mitternacht. War seine letzte gedeckelte
+    Marke ein Trennen (neuer Parameter `gone`, „zuletzt getrennt“), endet `partial` mit der
+    Marke; auch ein späteres Trennen beendet es.
+  - Zweites Review: das erweiterte Zufalls-Orakel des Reviewers (Uhrsprünge, Neustarts an
+    beliebiger Stelle, Flottenausfälle, Löschen, Verdrängung, aus gebliebene Funks; 14 feste
+    Startwerte) und ein Messtest für die Zeit vor einem Uhrsprung sind fester Teil der Suite.
+  - Ein Fehler beim Lesen von Traffic oder WiFi RF macht nur diesen Teil `unreadable` und
+    die Antwort `partial` (vorher Fehler 500).
+  - Export: Client-Marken fallen schon in der Abfrage weg, eine Seite fasst bis zu 5000
+    Marken ohne Client (vorher 1675 bei 64 Routern); die Schleife gibt alle 1000 Marken ab
+    (längster Block 4 ms statt bis 24 ms).
+  - „Router entfernen“ macht nur den Verlauf der Router unbekannt, deren Marken ihn nannten,
+    nicht mehr den der ganzen Flotte.
+- Review vor dem Merge (Panel, Browser-Prüfung), je mit Test:
+  - Die Zeiten mit Datum (laufende Ausfälle im „Zustand“, Block „Läuft seit vor dem
+    Zeitfenster“) haben die breite Zeitspalte und werden ab 920 px Listenbreite zu Karten;
+    vorher brach das Jahr in der 5em-Spalte um. Ein Strukturtest prüft jede Marke mit Datum
+    über die Kaskade und ist mit der alten Regel rot.
+  - Export-Bestätigung: `aria-modal`, Beschreibung über den Text, Fokus beim Öffnen auf
+    „Abbrechen“, Escape bricht ab, Tab bleibt im Dialog, danach Fokus zurück auf
+    „Exportieren“. Tab und Umschalt+Tab laufen auch im Shadow DOM des Panels im Kreis (der
+    fokussierte Knopf wird aus der Wurzel des Dialogs gelesen, nicht aus `document`). Nach dem Export „n Client-Einträge sind nicht enthalten.“
+  - Client-Kürzel: Tooltip „Name · tmc_…“ (ohne Namen nur das Pseudonym); der Client-Filter
+    ist am Handy mindestens 24 px hoch und hat den Fokusring des Tabs.
+  - Ein Grund steht beim Funk eines ausgefallenen Routers nur einmal; ein über einen
+    Neustart aus gebliebener Funk heißt „Nicht alle Funkmodule sind bekannt: Eines blieb über
+    einen Neustart aus.“, ein nicht lesbarer Teil „Konnte nicht gelesen werden.“
+  - Unter „Jetzt“ folgt das Feld der geladenen Zeit (vorher alte Zeit nach dem Zurückkehren).
+  - Zeitumstellung: Eine Uhrzeit der übersprungenen Stunde ist ein Fehler am Feld („Diese
+    Uhrzeit gibt es wegen der Zeitumstellung nicht.“), eine der doppelten Stunde gilt als die
+    erste, mit Hinweis.
+  - Uplink- und Rollenwechsel zeigen „zuerst gesehen HH:MM:SS“; der Grund `clock_shift`
+    hat Satz und Kurztext; die Parameter `lead_s` und `gone` haben Texte.
+- Zweite Browser-Prüfung vor dem Merge (Panel), je mit Test, in Chrome bei 360 und 1280 px
+  nachgeprüft:
+  - Export ohne Marke: Hat die Antwort weder Marken noch laufende Intervalle (Zeitreise läuft
+    nicht oder ist aus, nichts im gewählten Fenster), speichert das Panel **keine Datei** mehr
+    und sagt warum, z. B. „Nichts zu exportieren, es wurde keine Datei gespeichert. Die
+    Zeitreise läuft gerade nicht.“ oder „… Im gewählten Zeitfenster gibt es mit den gewählten
+    Filtern keine exportierbaren Marken.“ Vorher wurde eine leere Datei gespeichert und
+    „Export gespeichert.“ gemeldet. Ein Export mit Marken bleibt unverändert.
+  - Export-Bestätigung: Nach einem Klick oder Tippen auf ihren Text bleiben Tab und
+    Umschalt+Tab im Dialog und Escape schließt ihn (Fokus zurück auf „Exportieren“); vorher
+    fiel der Fokus auf die Seite, Umschalt+Tab verließ den Dialog und Escape wirkte nicht. Der
+    Dialog nimmt den Fokus eines Klicks selbst an (nicht in der Tab-Reihenfolge); fällt er
+    doch auf die Seite, gilt dieselbe Tastenregel, solange der Dialog offen ist.
+- Traffic und WiFi RF: neue reine Lesefunktionen `window_at` und `client_ref_for_mac`,
+  Security Center: `client_ref_for_mac` (Test: gleiche Ausgaben und Zustände mit und ohne
+  Aufruf).
+- Security Center und Konfiguration lesen beim Start einen Sprung aus der Zeitreise
+  (Registry `openEnterpriseTab`); ohne Sprung starten sie unverändert (Test).
+- Lange Namen ohne Leerzeichen brechen in schmalen Spalten zwischen Buchstaben um; in den
+  Zeilen (Zeitleiste, Block, Sitzungen, Clients) stehen Router- und Client-Namen auf höchstens
+  zwei Zeilen mit dem vollen Namen im Tooltip, in Karten ganz.
+- Fehler in einer Time-Machine-Route werden nur noch mit Typ und Datei:Zeile geloggt, ohne
+  Traceback (dessen Meldung könnte Daten tragen).
+- Audit-Einträge der Art `security_event` führen in keinen Tab mehr (vorher Security).
+- Behoben: Ein `min_severity`-Filter entfernt nicht mehr beide Einträge eines Ereignisses
+  (eigene Marke und NI-Doppel); Test mit einem echten NI-Ereignis der Doppel-Regel.
+
+### Bekannte Grenzen
+
+- Zustand und Vergleich erst für Zeiten ab dem Update (davor „nicht aufgezeichnet“) und
+  höchstens 14 Tage zurück.
+- Kein WAN-Zustand zum Zeitpunkt (der eigene Verlauf hält ihn nicht); Traffic und
+  Funkauslastung nur als Stundenwerte, soweit die Module sie halten.
+- Die Versionen sind die neuesten *behaltenen*, nicht zwingend die zu dem Zeitpunkt laufende
+  Konfiguration; die Zahl „neue Versionen“ im Vergleich zählt Versionen, nicht geänderte
+  Einstellungen.
+- Der Export enthält keine Client-Verläufe und berücksichtigt den Client-Filter nicht.
+- Nach einem Rücksprung der Uhr zeichnet die Zeitreise nichts auf, bis die Uhr die alte
+  Zeit überholt hat (bei einer Stunde Rücksprung rund eine Stunde „nicht aufgezeichnet“).
+- Nach einem Absturz kann ein Uplink- oder Rollenwechsel fehlen, der kurz vor dem letzten
+  Speichern begann; zwei Funks auf demselben Band können bei einem Kanaltausch verwechselt
+  werden. Beides findet das Orakel nur bei einzelnen Startwerten; offen.
+- „Client vergessen“ senkt die Client-Zahlen der Vergangenheit, ohne das zu markieren.
+- Sprünge in WiFi Intelligence, Netzwerkdiagnose und Traffic Analytics öffnen nur den Tab;
+  Einträge der Network Intelligence führen in keinen Tab.
+- Kein Link aus der Topologie in die Zeitreise (die Topologie kennt die Router-Kennungen
+  `rtr_…` nicht).
+- **Nicht an einer echten Instanz und nicht auf Routern geprüft**; alle Aussagen stammen aus
+  Tests mit Mocks.
+- Der Tab wurde vor dem Merge headless in Firefox bei 360, 768 und 1280 px geprüft (Testserver mit nachgebildeten Antworten). Das Panel hat kein eigenes helles Design und bleibt auch im hellen HA-Thema dunkel. Nicht an einer echten Instanz geprüft.
+
 ## [1.51.0] - 2026-11-21
 
 Network Time Machine, Phasen B und C: Die Zeitreise hat einen **eigenen Verlauf, der

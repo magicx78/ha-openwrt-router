@@ -90,18 +90,22 @@ Zeigt den Verkehr über WAN, Ports, Schnittstellen, VLANs und WLAN-Clients, mit 
 
 ➡️ [Zu Traffic Analytics](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/traffic-analytics.md)
 
-### 🕰️ Zeitreise (Network Time Machine, ab 1.50.0, eigener Verlauf ab 1.51.0)
+### 🕰️ Zeitreise (Network Time Machine, ab 1.50.0, eigener Verlauf ab 1.51.0, Zustand und Vergleich ab 1.52.0)
 
 Legt die Ereignisse der vorhandenen Module auf eine Zeitleiste (Panel-Tab „Zeitreise“): Audit-Log, Konfigurationsversionen, Ereignisse und Vorfälle von Network Intelligence und die Zeitleiste des Security Center, neueste zuerst und nach Tagen geordnet. Seit 1.51.0 kommt ein **eigener Verlauf** dazu, der HA-Neustarts übersteht.
 
 - **Einschalten** mit einem Schalter für alle Router in den Integrationsoptionen („Network Time Machine für alle Router“, `time_machine_enabled`, standardmäßig aus).
 - **Eigener Verlauf** (1.51.0): Router- und Flottenausfälle mit Dauer, HA- und Beobachtungslücken, Kanal-/DFS-Wechsel, fehlende Funkmodule, Uplink- und Rollenwechsel, Konfigurationsänderungen und Verweise auf Audit-Einträge, 14 Tage lang. Ausfälle, die vor dem Zeitfenster begannen, stehen oben im Block „Läuft seit vor dem Zeitfenster“.
 - **Client-Verläufe** (1.51.0) hinter einem eigenen Schalter (`time_machine_clients`, standardmäßig aus): Sitzungen je Client mit Router, Band und Wechseln in der Ansicht „Client-Sitzungen“, nur für Administratoren. Clients nur als Pseudonym. **Ausschalten** des Schalters oder der Time Machine **löscht alle Client-Verläufe sofort**; der Verlauf der Infrastruktur bleibt.
+- **Zustand zum Zeitpunkt** (1.52.0, Ansicht „Zustand“): je Router erreichbar, Rolle, Uplink und Funk zu einem gewählten Zeitpunkt, dazu laufende Ausfälle, offene Vorfälle, Stundenwerte von Verkehr und Funkauslastung, für Administratoren Konfigurationsversionen und verbundene Clients. Erschlossenes heißt „abgeleitet“, Unsicheres „unbekannt“ mit Grund. Bekannt erst für Zeiten ab dem Update auf 1.52.0.
+- **Vergleich** (1.52.0): zwei Zeitpunkte nebeneinander, nur was sich geändert hat, Ereignisse, Vorfälle und (Admins) Konfigurationsänderungen dazwischen.
+- **Export** (1.52.0, nur Administratoren): die Marken des Zeitfensters als JSON-Datei, ohne Namen und ohne Client-Verläufe, jeder Export im Audit-Protokoll.
+- **Sprünge**: „Im Tab … öffnen →“ führt zu Security Center (Vorfall), Konfiguration (Router), WiFi Intelligence, Netzwerkdiagnose oder Traffic Analytics, sofern der Benutzer den Tab hat.
 - **Kein zusätzlicher Router-Aufruf**: alles entsteht aus den Daten, die die Integration ohnehin abruft. Keine Entitäten.
-- **Filter**: Zeitfenster (1 Stunde bis 14 Tage), Quelle, Schwere, Router und Art; „Ältere laden“ blättert zurück.
+- **Filter**: Zeitfenster (1 Stunde bis 14 Tage oder ein eigenes Fenster aus Zustand und Vergleich), Quelle, Schwere, Router, Art und (Admins) Client; „Ältere laden“ blättert zurück.
 - **Rechte**: Administratoren sehen alles; andere Benutzer nur bei freigegebenem Panel und ohne Audit-Log, Konfiguration, Verweise und Client-Verläufe.
 - **Datenschutz**: keine MAC, keine IP, kein Hostname gespeichert. Hostnamen zeigt nur die Ansicht für Administratoren, solange die Client-Stabilität den Client kennt.
-- **Grenzen**: nicht rückwirkend; solange die Time Machine aus ist, wird nichts gekürzt; Konfigurationsänderungen nur als Anzahl. Noch nicht an echten Routern und nicht in einer echten Instanz geprüft; der Tab wurde headless in Firefox angesehen.
+- **Grenzen**: nicht rückwirkend; solange die Time Machine aus ist, wird nichts gekürzt; Konfigurationsänderungen nur als Anzahl. kein WAN-Zustand zum Zeitpunkt; der Export enthält keine Client-Verläufe. Noch nicht an echten Routern und nicht in einer echten Instanz geprüft; die Ansichten bis 1.51.0 wurden headless in Firefox angesehen, Zustand und Vergleich noch nicht.
 
 ➡️ [Zur Time Machine](https://github.com/magicx78/ha-openwrt-router/blob/main/docs/time-machine.md)
 
@@ -130,7 +134,7 @@ Eine manuelle Installation ist ebenfalls möglich. Routervorbereitung, Berechtig
 > [!NOTE]
 > **Aktiv in Entwicklung.** Viele Funktionen aus unserer TODO-Liste sind bereits umgesetzt. Gleichzeitig gibt es offene Punkte, weitere Ideen und Tests auf echter Hardware, an denen wir arbeiten.
 
-**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center, Network Diagnostics, Traffic Analytics und Zeitreise (Phasen A bis C).
+**Bereits umgesetzt:** Topologie-Panel, Network Intelligence, Client-Stabilität sowie die ersten Versionen von Configuration Manager, Security Center, Network Diagnostics, Traffic Analytics und Zeitreise (Phasen A bis F).
 
 **Daran arbeiten wir unter anderem:** weitere Hardware- und Frontend-Tests, Verbesserungen bei Sicherheit und Zuverlässigkeit sowie zusätzliche Funktionen. Ein automatischer Restore und die Verschlüsselung lokaler Konfigurationsarchive stehen noch aus.
 

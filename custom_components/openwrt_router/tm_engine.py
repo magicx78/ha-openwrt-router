@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import re
 import time
 from collections.abc import Callable, Mapping
@@ -60,6 +61,7 @@ from .tm_marks import (
     END_CLOSED,
     END_OPEN,
     END_UNKNOWN,
+    QUOTA_INFRA,
     REF_KINDS,
     RETENTION_S,
     MarkIndex,
@@ -71,6 +73,8 @@ from .tm_store import (
     STOP_HA,
     STOP_UNLOADED,
     TimeMachineStore,
+    pack_radios,
+    unpack_radios,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,6 +85,9 @@ TICK_S: Final = 300.0
 HEARTBEAT_S: Final = 900.0
 _PSEUDONYM: Final = re.compile(r"tmc_[0-9a-f]{16}")
 CLOCK_JUMP_S: Final = 300.0  # plan §5.4
+# 1.52.0: a followed stretch gets a new base from the current state once
+# its base is this old (tm_state needs every mark after a base)
+REBASE_S: Final = 86_400.0
 GAP_MIN_S: Final = 120.0  # an observation gap shorter than this is dropped
 UNLOAD_GAP_MIN_S: Final = 600.0
 # When the integration was set up in this HA run (``async_setup``; review
@@ -111,11 +118,14 @@ class _Debounce:
 
     candidate: str | None = None
     count: int = 0
+    # the first poll that saw the candidate (review B: a failed poll between
+    # it and the confirming one does not feed the debounce)
+    since: float | None = None
 
-    def feed(self, value: str) -> bool:
+    def feed(self, value: str, now: float | None = None) -> bool:
         """True when ``value`` was just seen often enough."""
         if value != self.candidate:
-            self.candidate, self.count = value, 1
+            self.candidate, self.count, self.since = value, 1, now
         else:
             self.count += 1
         return self.count == DEBOUNCE_POLLS
@@ -130,12 +140,18 @@ class _Router:
     unsub: CALLBACK_TYPE | None = None
     router_id: str | None = None
     gap_seq: int | None = None
+    # review C: the first failed poll of a gap reopened after a clear (the
+    # gap's own start is the clear; GAP_MIN_S counts from this one)
+    gap_since: float | None = None
     # radio key -> (first missing ts, polls missing)
     missing: dict[str, tuple[float, int]] = field(default_factory=dict)
     radio_down: dict[str, int] = field(default_factory=dict)  # key -> seq
     fp: _Debounce = field(default_factory=_Debounce)
     uplink: _Debounce = field(default_factory=_Debounce)
     last_dfs: str | None = None
+    # review A: its stretch was ended by a jump back of the wall clock; the
+    # next one begins once the wall clock is past the doubled time
+    rejoin: bool = False
 
 
 def radio_keys(radios: list[Any]) -> dict[str, tuple[int, int, str]]:
@@ -148,22 +164,6 @@ def radio_keys(radios: list[Any]) -> dict[str, tuple[int, int, str]]:
     for band, items in by_band.items():
         for i, radio in enumerate(sorted(items, key=lambda r: r.phy)):
             out[f"{band}{i}"] = (int(radio.channel), int(radio.width), radio.phy)
-    return out
-
-
-def pack_radios(radios: Mapping[str, tuple[int, int]]) -> str:
-    """``5g0=36/80+2.4g0=6/20`` (store form, sorted)."""
-    return "+".join(f"{k}={c}/{w}" for k, (c, w) in sorted(radios.items()))
-
-
-def unpack_radios(raw: str) -> dict[str, tuple[int, int]]:
-    """Inverse of :func:`pack_radios`; odd parts are skipped."""
-    out: dict[str, tuple[int, int]] = {}
-    for part in raw.split("+") if raw else []:
-        key, _, value = part.partition("=")
-        chan, _, width = value.partition("/")
-        if key and chan.isdigit() and width.isdigit():
-            out[key] = (int(chan), int(width))
     return out
 
 
@@ -219,6 +219,10 @@ class TimeMachine:
         self._core: Any = None
         self._api_unsubs: list[Callable[[], None]] = []
         self._outage_seq: dict[str, int] = {}  # entry_id -> router_down seq
+        # review E: per router the bands of radios that were off when the
+        # engine lost sight of them (restart, clear, reload): they are not in
+        # the radio state, so a base set without them is incomplete
+        self._radios_off: dict[str, list[int | float]] = {}
         self._lan_seq: int | None = None
         self._last_wall: float | None = None
         self._last_mono: float | None = None
@@ -226,6 +230,19 @@ class TimeMachine:
         # start of this run: an outage seen at start that began earlier is
         # recorded from here on (the time before is the restart's gap)
         self._live_from: float = 0.0
+        # review L: after a restart (``_restarted``) a router's state since
+        # its last answer before the restart is unknown up to its first
+        # successful poll of this run, so a gap before that poll is never
+        # dropped; ``_answered``: entries with a successful poll in this run
+        self._restarted = False
+        self._answered: set[str] = set()
+        # review A: after a jump back of the wall clock no stretch is
+        # followed up to ``_follow_from`` (the old wall clock): the marks of
+        # the first occupant of that time never enter a new stretch; a gap
+        # written before ``_back_seq`` (the index's next seq at the jump) may
+        # have begun in the other time line and is never dropped as short
+        self._follow_from = -math.inf
+        self._back_seq = 0
         self._checkpoint_day: date | None = None
         self.counters: dict[str, int] = {
             "refs_taken": 0,
@@ -255,10 +272,15 @@ class TimeMachine:
                 code="store_recovered",
             )
         saved_at = result.saved_at
+        self._jumps_from_index()
+        # 1.52.0: nothing was followed after the last write of the last run
+        self.store.seen_close_all(saved_at if saved_at is not None else now)
+        self.store.clients_until(saved_at if saved_at is not None else now)
         if saved_at is not None:
             self.store.cover_until(saved_at)
             self._close_all_open(saved_at, END_UNKNOWN)
             self._mark_restart(now, saved_at, result.stop)
+            self._restarted = True
         else:
             self._close_all_open(now, END_UNKNOWN)
             if not result.failed:
@@ -296,14 +318,17 @@ class TimeMachine:
         index = self.index
         if now < saved_at - CLOCK_JUMP_S:
             self.counters["clock_shifts"] += 1
+            # review A: the wall time from now up to the old wall clock is
+            # occupied twice (``lead_s`` 0: this run has nothing before now)
             index.add(
                 ts=now,
                 kind="clock_shift",
                 router=None,
                 severity="warning",
                 code="backwards",
-                params={"shift_s": round(now - saved_at)},
+                params={"shift_s": round(now - saved_at), "lead_s": 0},
             )
+            self._jumped_back(now, saved_at)
             return
         gap = max(0.0, now - saved_at)
         if stop == STOP_DISABLED:
@@ -365,7 +390,11 @@ class TimeMachine:
     def _close_all_open(self, at: float, state: str) -> None:
         """Every open interval ends (at ``at``, never before its start)."""
         for mark in self.index.open_marks():
+            if mark.kind == "radio_down" and mark.router is not None:
+                self._note_off(mark.router, (mark,))
             self.index.close(mark.seq, at, state)
+        # evicted open intervals end here as well (review D)
+        self.index.resolve_lost_open(at)
         self._outage_seq.clear()
         self._lan_seq = None
         for router in self.routers.values():
@@ -373,6 +402,114 @@ class TimeMachine:
             router.radio_down.clear()
         if self.recorder is not None:
             self.recorder.reset_open()
+
+    def _note_off(self, rid: str | None, marks: Any) -> None:
+        """Radios off whose return the engine will not see as a mark."""
+        if rid is None:
+            return
+        bands = [m.params.get("band") for m in marks if m is not None]
+        if bands:
+            self._radios_off.setdefault(rid, []).extend(b for b in bands if b)
+
+    def _jumps_from_index(self) -> None:
+        """``_follow_from`` / ``_back_seq`` of the jumps back in the stored
+        marks (a restart inside the doubled time is no jump of its own)."""
+        for mark in self.index:
+            if mark.kind != "clock_shift":
+                continue
+            shift = mark.params.get("shift_s")
+            if isinstance(shift, int | float) and shift < 0:
+                # whole seconds: one more covers the rounding
+                self._follow_from = max(self._follow_from, mark.ts - shift + 1)
+                self._back_seq = max(self._back_seq, mark.seq + 1)
+
+    def _jumped_back(self, now: float, old_wall: float) -> None:
+        """The wall clock went back (review A): every followed stretch ends
+        here; the next begins once the wall clock is past ``old_wall``."""
+        self._follow_from = max(self._follow_from, old_wall)
+        self._back_seq = self.index.next_seq
+        self.store.seen_close_all(now)
+        for router in self.routers.values():
+            router.rejoin = True
+
+    def _check_clock(self, now: float, mono: float) -> None:
+        """Wall clock against the monotonic one since the last check (tick
+        or poll): a jump of more than ``CLOCK_JUMP_S`` is a ``clock_shift``."""
+        if self._last_wall is not None and self._last_mono is not None:
+            lead = mono - self._last_mono
+            shift = (now - self._last_wall) - lead
+            if abs(shift) > CLOCK_JUMP_S:
+                self.counters["clock_shifts"] += 1
+                if shift < 0:
+                    # review A: the jump lies within the ``lead_s`` before
+                    # now; the wall time from then up to the old wall clock
+                    # (now - shift) is occupied twice, nothing before it
+                    self.index.add(
+                        ts=now,
+                        kind="clock_shift",
+                        router=None,
+                        severity="warning",
+                        code="backwards",
+                        params={"shift_s": round(shift), "lead_s": round(lead)},
+                    )
+                    self._jumped_back(now, now - shift)
+                else:
+                    self.index.add(
+                        ts=now,
+                        kind="clock_shift",
+                        router=None,
+                        severity="warning",
+                        code="forwards",
+                        params={"shift_s": round(shift)},
+                    )
+        self._last_wall, self._last_mono = now, mono
+
+    def _rejoin(
+        self, router: _Router, rid: str, state: RouterState, now: float
+    ) -> None:
+        """The first stretch after a jump back: a settled uplink and role go
+        on as its base (the debounce does not see them again until they
+        change), as ``seen_split`` does."""
+        seg = self.store.seen_current(rid)
+        settled = f"{state.parent}|{state.role}"
+        if (
+            seg is not None
+            and seg.topo_at is None
+            and state.role
+            and router.uplink.candidate == settled
+            and router.uplink.count >= DEBOUNCE_POLLS
+        ):
+            seg.topo_at, seg.parent, seg.role = now, state.parent, state.role
+
+    def _after_reset(
+        self, now: float, gap_since: Mapping[str, float] | None = None
+    ) -> None:
+        """Outages, observation gaps and radios off go on after the own
+        history lost its open intervals (clear, reload; review C/E): from
+        ``now`` on, as known by the fleet tracker and the last poll
+        (``gap_since``: per entry the first failed poll of a gap before)."""
+        self._live_from = now
+        self._sync_outages()
+        for router in self.routers.values():
+            rid = self.router_id(router.entry_id)
+            coordinator = router.coordinator
+            if (
+                rid is None
+                or router.gap_seq is not None
+                or router.entry_id in self._outage_seq
+                or getattr(coordinator, "last_update_success", True) is not False
+            ):
+                continue
+            mark = self.index.add(
+                ts=now,
+                kind="observation_gap",
+                router=rid,
+                code="poll_failed",
+                end_state=END_OPEN,
+                derived=True,
+            )
+            router.gap_seq = mark.seq if mark else None
+            router.gap_since = (gap_since or {}).get(router.entry_id)
 
     async def async_stop(self, reason: str) -> None:
         """Detach everything and write now (switched off / last router gone)."""
@@ -393,6 +530,8 @@ class TimeMachine:
         self.closed = True
         if self.loaded:
             self.store.cover_until(now)
+            self.store.seen_close_all(now)
+            self.store.clients_until(now)
             await self.store.async_flush(reason)
         if reason == STOP_DISABLED:
             # the client histories are deleted: no old copy keeps them (K4)
@@ -405,6 +544,8 @@ class TimeMachine:
         now = self.clock()
         self.store.stop_reason = STOP_HA
         self.store.cover_until(now)
+        self.store.seen_close_all(now)
+        self.store.clients_until(now)
         self.store.schedule(0)
 
     # -- core binding ------------------------------------------------------------------
@@ -478,6 +619,34 @@ class TimeMachine:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Time Machine event not emitted (%s)", type(err).__name__)
 
+    def emit_checked(
+        self, event_type: str, *, data: Any = None, user_id: str | None = None
+    ) -> bool:
+        """One own audit event on the security ring (codes and counts only)
+        that must be written (1.52.0, the export): False when there is no
+        core or the audit log refused it."""
+        if self._api is None:
+            return False
+        try:
+            from .core_models import Actor, ActorKind
+
+            actor = (
+                Actor(kind=ActorKind.USER, user_id=user_id)
+                if isinstance(user_id, str) and user_id
+                else None
+            )
+            self._api.emit(
+                event_type,
+                source=MODULE,
+                data=dict(data or {}),
+                actor=actor,
+                security_relevant=True,
+            )
+        except Exception as err:  # noqa: BLE001 - the caller refuses then
+            _LOGGER.warning("Time Machine event not written (%s)", type(err).__name__)
+            return False
+        return True
+
     @callback
     def _on_audit(self, event: Any) -> None:
         """A published audit entry: a reference mark for REF_KINDS."""
@@ -533,7 +702,8 @@ class TimeMachine:
         await self.async_sync_clients()
 
     def _drop_clients(self) -> int:
-        dropped = self.index.clear(clients_only=True)
+        dropped = self.index.clear(clients_only=True, now=self.clock())
+        self.store.clients_cov = []  # what was recorded is gone (1.52.0)
         return dropped
 
     async def async_sync_clients(self) -> None:
@@ -595,6 +765,10 @@ class TimeMachine:
             self._on_poll(entry_id)
 
         router.unsub = coordinator.async_add_listener(_listener)
+        if self.loaded and old is None:
+            # review C: an outage the tracker holds is recorded again (a
+            # reloaded entry lost its open outage in ``remove_entry``)
+            self._on_outage()
 
     @callback
     def remove_entry(self, entry_id: str, *, close: bool = True) -> None:
@@ -604,9 +778,13 @@ class TimeMachine:
             return
         if router.unsub is not None:
             router.unsub()
+        now = self.clock()
+        self.store.seen_close(router.router_id, now)
         if not close:
             return
-        now = self.clock()
+        self._note_off(
+            router.router_id, [self.index.get(s) for s in router.radio_down.values()]
+        )
         for seq in (router.gap_seq, *router.radio_down.values()):
             self.index.close(seq, now, END_UNKNOWN)
         self.index.close(self._outage_seq.pop(entry_id, None), now, END_UNKNOWN)
@@ -633,6 +811,18 @@ class TimeMachine:
         changed = False
         fleet_since = _epoch(view.fleet_since)
         if fleet_since is not None and self._lan_seq is None:
+            # review K: the tracker dates the fleet outage back to the first
+            # single outage; the LAN is down only since the last router
+            # failed (its first failed poll), the earlier single outages stay
+            # intervals of their own
+            fleet_since = max(
+                (
+                    began
+                    for outage in view.down.values()
+                    if (began := _epoch(outage.since)) is not None
+                ),
+                default=fleet_since,
+            )
             mark = index.add(
                 ts=self._since(fleet_since, now),
                 kind="lan_down",
@@ -645,9 +835,9 @@ class TimeMachine:
             self._lan_seq = mark.seq if mark else None
             changed = True
         elif fleet_since is None and self._lan_seq is not None:
-            mark = index.get(self._lan_seq)
-            self._lan_seq = None
-            if _ends(index, mark, now):
+            lan_seq, self._lan_seq = self._lan_seq, None
+            mark = index.get(lan_seq)
+            if _ends(index, mark, now, lan_seq):
                 index.add(
                     ts=now,
                     kind="lan_up",
@@ -676,13 +866,15 @@ class TimeMachine:
                 router = self.routers.get(entry_id)
                 if router is not None and router.gap_seq is not None:
                     gap = router.gap_seq
+                    if index.get(gap) is None:
+                        index.close(gap, now)  # evicted while open (review D)
                     index.remove_where(lambda m, gap=gap: m.seq != gap)
                     router.gap_seq = None
             changed = True
         for entry_id in [e for e in self._outage_seq if e not in view.down]:
             seq = self._outage_seq.pop(entry_id)
             mark = index.get(seq)
-            if _ends(index, mark, now):
+            if _ends(index, mark, now, seq):
                 index.add(
                     ts=now,
                     kind="router_up",
@@ -719,6 +911,15 @@ class TimeMachine:
         if rid is None:
             return False
         index = self.index
+        self._check_clock(now, self.monotonic())
+        # 1.52.0: the router is followed (a stretch of ``seen``) from its
+        # first poll on, failed or not; review A: not before the wall clock
+        # is past the time a jump back made doubled
+        follow = now > self._follow_from
+        if follow:
+            self.store.seen_open(rid, now)
+        else:
+            router.rejoin = True
         if not coordinator.last_update_success:
             if router.gap_seq is None and router.entry_id not in self._outage_seq:
                 mark = index.add(
@@ -732,23 +933,41 @@ class TimeMachine:
                 return mark is not None
             return False
         changed = False
+        first_answer = self._restarted and router.entry_id not in self._answered
+        self._answered.add(router.entry_id)
+        if router.entry_id in self._outage_seq:
+            # review K: a router reported down before a LAN outage comes
+            # back without a tracker event (the fleet issue took its report
+            # over); the tracker no longer holding it ends the outage
+            self._sync_outages()
         if router.gap_seq is not None:
             gap = index.get(router.gap_seq)
+            if gap is None:
+                index.close(router.gap_seq, now)  # evicted while open (D)
             router.gap_seq = None
-            if gap is not None and now - gap.ts < GAP_MIN_S:
+            began = gap.ts if gap is not None else now
+            if router.gap_since is not None:
+                began = min(began, router.gap_since)
+            router.gap_since = None
+            short = 0 <= now - began < GAP_MIN_S and gap is not None
+            if short and not first_answer and gap.seq >= self._back_seq:
                 index.remove_where(lambda m, s=gap.seq: m.seq != s)
                 self.counters["gaps_dropped"] += 1
             elif gap is not None:
                 index.close(gap.seq, now)
-                gap.params["gap_s"] = round(now - gap.ts)
+                gap.params["gap_s"] = round(max(0.0, now - gap.ts))
             changed = True
         data = coordinator.data
         if data is None:
             return changed
         state = RouterState.parse(self.store.state.get(rid))
+        if router.rejoin and follow:
+            router.rejoin = False
+            self._rejoin(router, rid, state, now)
         changed |= self._radios(router, rid, data, state, now)
         changed |= self._fingerprint(router, rid, data, state, now)
         changed |= self._topology(router, rid, state, now)
+        changed |= self._rebase(router, rid, state, now)
         dumped = state.dump()
         if self.store.state.get(rid) != dumped:
             self.store.state[rid] = dumped
@@ -773,6 +992,7 @@ class TimeMachine:
         }
         index = self.index
         changed = False
+        silent = False  # a radio appeared without a mark (1.52.0)
         last = (getattr(data, "dfs", None) or {}).get("last_event")
         for key, (chan, width, phy) in current.items():
             before = state.radios.get(key)
@@ -780,9 +1000,10 @@ class TimeMachine:
                 width = before[1]  # unknown width: keep the previous one
             router.missing.pop(key, None)
             seq = router.radio_down.pop(key, None)
+            silent |= before is None and seq is None
             if seq is not None:
                 mark = index.get(seq)
-                if _ends(index, mark, now):
+                if _ends(index, mark, now, seq):
                     index.add(
                         ts=now,
                         kind="radio_up",
@@ -838,7 +1059,65 @@ class TimeMachine:
                 del state.radios[key]
                 router.missing.pop(key, None)
                 changed = True
+        self._seen_radios(rid, state, now, silent)
         return changed
+
+    def _seen_radios(
+        self, rid: str, state: RouterState, now: float, silent: bool
+    ) -> None:
+        """The radio base of the followed stretch (1.52.0): the first poll
+        with radios sets it; a radio that appeared without a mark later
+        starts a new stretch, so every stretch is complete by its marks."""
+        seg = self.store.seen_current(rid)
+        off = self._radios_off.get(rid)
+        if silent and off:
+            # a radio is back without a mark: one radio of its band less
+            # is off (review E)
+            for key in state.radios:
+                if seg is None or key not in seg.radios:
+                    band = _band_num(key)
+                    if band in off:
+                        off.remove(band)
+            if not off:
+                self._radios_off.pop(rid, None)
+        if seg is not None and seg.radios_at is not None and silent:
+            seg = self.store.seen_split(rid, now, parent=state.parent, role=state.role)
+            seg.off = len(self._radios_off.get(rid, ()))
+        if seg is not None and seg.radios_at is None:
+            seg.radios_at, seg.radios = now, dict(state.radios)
+            seg.off = len(self._radios_off.get(rid, ()))
+
+    def _rebase(
+        self, router: _Router, rid: str, state: RouterState, now: float
+    ) -> bool:
+        """A followed stretch whose base is ``REBASE_S`` old, or older than
+        a lost mark (``MarkIndex.lost``), starts anew from the state after
+        this poll (1.52.0): the marks a stretch needs never reach the 14-day
+        pruning, and a lost one spoils only the time up to it. Not while a radio is missing or off or an
+        uplink / role change is still being debounced (the new base would
+        hide it)."""
+        seg = self.store.seen_current(rid)
+        if seg is None or seg.radios_at is None:
+            return False
+        lost = max(
+            self.index.lost.get(QUOTA_INFRA, -math.inf),
+            self.index.lost_router.get(rid, -math.inf),
+        )
+        if now - seg.radios_at < REBASE_S and lost <= seg.radios_at:
+            return False
+        if lost > now:
+            # a clock jump back (review A): the base waits until the wall
+            # clock passed the time it had before
+            return False
+        if router.missing or router.radio_down:
+            return False
+        if seg.topo_at is not None and router.uplink.candidate != (
+            f"{state.parent}|{state.role}"
+        ):
+            return False
+        seg = self.store.seen_split(rid, now, parent=state.parent, role=state.role)
+        seg.radios_at, seg.radios = now, dict(state.radios)
+        return True
 
     def _fingerprint(
         self, router: _Router, rid: str, data: Any, state: RouterState, now: float
@@ -875,9 +1154,13 @@ class TimeMachine:
         elif uplink is not None:
             parent = state.parent  # a remembered edge changes nothing
         role = "g" if router.entry_id in topology.gateways else "n"
-        if not router.uplink.feed(f"{parent}|{role}"):
+        if not router.uplink.feed(f"{parent}|{role}", now):
             return False
         changed = False
+        # review B: the first poll that saw the new value (the change began
+        # before it; failed polls may lie between it and this one)
+        since = router.uplink.since
+        first = {"since": since} if since is not None and since < now else {}
         if parent != state.parent:
             if state.parent or state.role:
                 self.index.add(
@@ -886,6 +1169,7 @@ class TimeMachine:
                     router=rid,
                     code="uplink" if parent else "uplink_lost",
                     peers=(state.parent or None, parent or None),
+                    params=first,
                 )
             state.parent = parent
             changed = True
@@ -896,8 +1180,15 @@ class TimeMachine:
                     kind="router_role_changed",
                     router=rid,
                     code="gateway" if role == "g" else "node",
+                    params=first,
                 )
             state.role = role
+            changed = True
+        seg = self.store.seen_current(rid)
+        if seg is not None and (seg.topo_at is None or seg.topo_at == now):
+            # 1.52.0: the first settled uplink and role of the stretch (or a
+            # change at the very poll a new stretch began: it is the base)
+            seg.topo_at, seg.parent, seg.role = now, state.parent, state.role
             changed = True
         return changed
 
@@ -928,20 +1219,7 @@ class TimeMachine:
     def tick(self) -> None:
         """Prune, clock check, heartbeat, daily checkpoint (sync, short)."""
         now = self.clock()
-        mono = self.monotonic()
-        if self._last_wall is not None and self._last_mono is not None:
-            shift = (now - self._last_wall) - (mono - self._last_mono)
-            if abs(shift) > CLOCK_JUMP_S:
-                self.counters["clock_shifts"] += 1
-                self.index.add(
-                    ts=now,
-                    kind="clock_shift",
-                    router=None,
-                    severity="warning",
-                    code="backwards" if shift < 0 else "forwards",
-                    params={"shift_s": round(shift)},
-                )
-        self._last_wall, self._last_mono = now, mono
+        self._check_clock(now, self.monotonic())
         self.index.prune(now)
         self.store.prune_meta(now, RETENTION_S)
         today = dt_util.as_local(dt_util.utc_from_timestamp(now)).date()
@@ -972,6 +1250,20 @@ class TimeMachine:
 
     # -- reading -------------------------------------------------------------------------
 
+    def topology_pending(self) -> dict[str, float]:
+        """Per router the first poll of an uplink / role candidate the
+        debounce has not confirmed yet (review B; read only)."""
+        out: dict[str, float] = {}
+        for router in self.routers.values():
+            rid = router.router_id
+            debounce = router.uplink
+            if rid is None or debounce.candidate is None or debounce.since is None:
+                continue
+            state = RouterState.parse(self.store.state.get(rid))
+            if debounce.candidate != f"{state.parent}|{state.role}":
+                out[rid] = debounce.since
+        return out
+
     def stats(self) -> dict[str, Any]:
         """Counts only (no ids) for diagnostics."""
         return {
@@ -985,20 +1277,23 @@ class TimeMachine:
         }
 
 
-def _ends(index: MarkIndex, mark: Any, now: float) -> bool:
+def _ends(index: MarkIndex, mark: Any, now: float, seq: int | None = None) -> bool:
     """Close an outage-like interval; True when its end is to be booked.
 
     A mark evicted while open (only when its quota held nothing else,
     review S2) still gets its end mark, without a duration: no hanging
-    reference, no invented start.
+    reference, no invented start. Its quota counts as lost up to ``now``
+    (review D, ``MarkIndex.close`` of the gone ``seq``).
     """
     if mark is None:
+        index.close(seq, now)
         return True
     return index.close(mark.seq, now)
 
 
 def _duration(mark: Any, now: float) -> dict[str, int]:
-    return {} if mark is None else {"duration_s": round(now - mark.ts)}
+    # never negative: the wall clock may have gone back meanwhile (review A)
+    return {} if mark is None else {"duration_s": max(0, round(now - mark.ts))}
 
 
 def _band_num(key: str) -> int | float:
@@ -1115,8 +1410,9 @@ async def async_purge_clients(hass: HomeAssistant) -> int:
     await store.async_remove_copies()
     if result.failed:
         return 0
-    dropped = store.index.clear(clients_only=True)
+    dropped = store.index.clear(clients_only=True, now=store.clock())
     if dropped:
+        store.clients_cov = []
         await store.async_flush(result.stop or STOP_DISABLED)
     return dropped
 
@@ -1131,8 +1427,9 @@ async def async_remove_router(hass: HomeAssistant, router_id: str | None) -> int
         engine = async_get_time_machine(hass)
         if engine is not None and engine.loaded and not engine.closed:
             store = engine.store
-            dropped = engine.index.forget_router(router_id)
+            dropped = engine.index.forget_router(router_id, engine.clock())
             store.state.pop(router_id, None)
+            store.seen.pop(router_id, None)
             if dropped:
                 store.schedule(0)
         else:
@@ -1140,8 +1437,9 @@ async def async_remove_router(hass: HomeAssistant, router_id: str | None) -> int
             result = await store.async_load()
             if result.failed:
                 return 0
-            dropped = store.index.forget_router(router_id)
+            dropped = store.index.forget_router(router_id, store.clock())
             had_state = store.state.pop(router_id, None) is not None
+            had_state |= store.seen.pop(router_id, None) is not None
             if dropped or had_state:
                 await store.async_flush(result.stop or STOP_DISABLED)
         # The .bak / .corrupt.* copies stay (review K-b): router ids are no
@@ -1226,19 +1524,43 @@ async def async_clear_history(
     if engine is None or not engine.loaded:
         raise _service_error("time_machine_off")
     now = engine.clock()
+    gap_since: dict[str, float] = {}
+    for router in engine.routers.values():
+        gap = engine.index.get(router.gap_seq)
+        if gap is not None:
+            gap_since[router.entry_id] = min(gap.ts, router.gap_since or gap.ts)
+    # review E: the radios off are read before the clear deletes their marks
+    radios_off = {
+        router.entry_id: [engine.index.get(s) for s in router.radio_down.values()]
+        for router in engine.routers.values()
+    }
     if clients_only:
-        deleted = engine.index.clear(clients_only=True)
+        deleted = engine.index.clear(clients_only=True, now=now)
+        engine.store.clients_cov = [[now, None]] if _recording(engine) else []
     else:
-        deleted = engine.index.clear(clients_only=False)
+        deleted = engine.index.clear(clients_only=False, now=now)
         engine.store.checkpoints.clear()
         engine.store.coverage = [[now, None]]
+        engine.store.seen_restart(
+            now,
+            {
+                rid: (parsed.parent, parsed.role)
+                for rid, raw in engine.store.state.items()
+                for parsed in (RouterState.parse(raw),)
+            },
+        )
+        engine.store.clients_cov = [[now, None]] if _recording(engine) else []
         engine._outage_seq.clear()
         engine._lan_seq = None
         for router in engine.routers.values():
+            engine._note_off(router.router_id, radios_off.get(router.entry_id, ()))
             router.gap_seq = None
             router.radio_down.clear()
     if engine.recorder is not None:
         engine.recorder.reset_open()
+    if not clients_only:
+        # review C: a router down now stays down in the new history
+        engine._after_reset(now, gap_since)
     engine.index.add(
         ts=now,
         kind="tm_cleared",
@@ -1253,6 +1575,10 @@ async def async_clear_history(
     engine.store.schedule(0)
     await engine.store.async_remove_copies()
     return {"deleted": deleted}
+
+
+def _recording(engine: TimeMachine) -> bool:
+    return engine.recorder is not None and engine.recorder.attached
 
 
 @callback
@@ -1311,6 +1637,7 @@ def async_register_time_machine_services(hass: HomeAssistant) -> None:
 __all__ = [
     "DEBOUNCE_POLLS",
     "GAP_MIN_S",
+    "REBASE_S",
     "TICK_S",
     "RouterState",
     "TimeMachine",

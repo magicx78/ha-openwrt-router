@@ -71,6 +71,9 @@ def poll(w: Any, **lists: list[str] | None) -> None:
         listed = None if macs is None else [client(m) for m in macs]
         w.ni.ingest(entry, data(listed), w.t, interval=60.0)
     w.t += 60
+    # wall and monotonic clock together: the engine checks the clock at
+    # every poll (1.52.0, review A), a wall clock alone would be a jump
+    w.clock.mono += w.t - w.clock.t
     w.clock.t = w.t
 
 

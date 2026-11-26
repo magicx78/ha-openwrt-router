@@ -5,7 +5,12 @@
    Narrow layout down to 360 px: the filter bar wraps (never scrolls
    sideways), and below the width a timeline row needs, every mark becomes a
    card (container query, the Network Diagnostics history pattern). The
-   client sessions (1.51.0) follow the same pattern with their own container. */
+   client sessions (1.51.0) follow the same pattern with their own container,
+   and so do the views "Zustand" and "Vergleich" (1.52.0): router cards in a
+   grid, client rows and comparison tables that turn into cards when narrow.
+   Long names without spaces break between letters (.tm overflow-wrap);
+   in rows a router or client name takes at most two lines (full name in the
+   title), in cards it wraps in full. */
 
 .tm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .tm .cfg-badge { white-space: normal; }
@@ -39,7 +44,8 @@
    checked in tmLayout.test.mjs. The other tabs keep theirs. */
 .tm .tm-chip:focus-visible,
 .tm .tm-field select:focus-visible,
-.tm .cfg-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.tm .cfg-btn:focus-visible,
+.tm .tm-client--filter:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 
 /* Sources row */
 .tm-sources-box { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -76,12 +82,15 @@
 .tm-sev--info { color: #93c5fd; }
 .tm-sev--warn { color: var(--amber); }
 .tm-sev--critical { color: var(--red); }
-/* Marks that began before the window: the time column holds date and time
+/* Marks shown with their date (MarkRow start: the block before the window,
+   the intervals of "Zustand"): the time column holds date and time
    (9.5em, 4.5em = 56.25 px more than the list). Their cards start earlier
    (920 px) so that the title column at the last row width is never
-   narrower than the list's: list 861 - 20 - 60 - 500 = 281 px, block
-   921 - 20 - 60 - 556.25 = 284.75 px (12.5 px font; tmLayout.test.mjs). */
-.tm-spans .tm-mark { grid-template-columns: 9.5em 6.5em 8.5em minmax(0, 1fr) 9em 11em; }
+   narrower than the list's: list 861 - 20 - 60 - 500 = 281 px, dated
+   921 - 20 - 60 - 556.25 = 284.75 px (12.5 px font; tmLayout.test.mjs).
+   1.52.0 browser review: the intervals of "Zustand" had the 5em column
+   (the rule was bound to .tm-spans), the year broke in two. */
+.tm-mark.tm-mark--start { grid-template-columns: 9.5em 6.5em 8.5em minmax(0, 1fr) 9em 11em; }
 
 /* Client sessions: start, duration, client, router, band, changes */
 .tm-sessions { display: flex; flex-direction: column; gap: 10px; min-width: 0; container: tmsessions / inline-size; }
@@ -105,20 +114,114 @@
 
 .tm-more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
+/* 1.52.0: long names in rows, two lines at most (full name in the title) */
+.tm-mark__router,
+.tm-session__client .tm-client,
+.tm-client-row__client,
+.tm-client-row__router {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+
+/* Fifth window state "Eigenes Fenster" (only set by a jump) */
+.tm-own { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--text-primary); }
+.tm-own__text { font-weight: 600; }
+.tm-own__close { min-width: 32px; padding: 2px 8px; }
+
+/* Fields of "Zustand" and "Vergleich" */
+.tm-field input {
+  max-width: 100%; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
+  color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
+  color-scheme: dark;
+}
+.tm .tm-field input:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.tm-field__error { flex: 1 1 100%; font-size: 12px; color: var(--amber); }
+.tm-field__note { flex: 1 1 100%; font-size: 12px; }
+
+/* Jumps, client filter, export */
+.tm-jump { align-self: flex-start; margin-top: 2px; font-size: 12px; }
+.tm-client--filter {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
+  text-decoration: underline dotted; text-underline-offset: 2px;
+}
+.tm-export { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.tm-export__ask { flex-direction: column; align-items: flex-start; gap: 8px; }
+.tm-export__buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* "Zustand": the moment, router cards, values */
+.tm-at { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+.tm-at__text { font-weight: 600; color: var(--text-primary); }
+.tm-unknown { gap: 4px; }
+.tm-state { display: flex; flex-direction: column; gap: 8px; min-width: 0; container: tmstate / inline-size; }
+.tm-cards { display: grid; gap: 8px; min-width: 0; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); }
+.tm-card {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.tm-card__title { margin: 0; font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.tm-facts { display: flex; flex-direction: column; gap: 4px; margin: 0; min-width: 0; }
+.tm-fact { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 2px 8px; min-width: 0; }
+.tm-fact dt { color: var(--text-secondary); }
+.tm-fact dd { margin: 0; min-width: 0; color: var(--text-primary); }
+.tm-radios { list-style: none; display: flex; flex-direction: column; gap: 2px; padding: 0; margin: 0; }
+.tm-radios__band { font-weight: 600; }
+.tm-value--unknown, .tm-reason { color: var(--text-secondary); }
+.tm-value--warn { color: var(--amber); font-weight: 600; }
+
+/* Sections below the cards */
+.tm-section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tm-section__title { margin: 0; }
+.tm-items { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; margin: 0; min-width: 0; }
+.tm-item {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 7px 10px; min-width: 0;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12.5px;
+}
+.tm-item__main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.tm-item__title { color: var(--text-primary); font-weight: 600; }
+.tm-item__meta { color: var(--text-secondary); font-size: 12px; }
+.tm-per-router { display: block; }
+/* Clients at the moment: label, router, band, since; cards when narrow */
+.tm-clients { container: tmclients / inline-size; }
+.tm-client-rows .tm-client-row {
+  display: grid; align-items: baseline; gap: 4px 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 6.5em 12em;
+}
+.tm-client-row > * { min-width: 0; }
+.tm-client-row__client { color: var(--text-primary); font-weight: 600; }
+.tm-client-row__band, .tm-client-row__since { color: var(--text-secondary); }
+
+/* "Vergleich": one table per router (Merkmal | Vorher | Nachher) */
+.tm-compare { display: flex; flex-direction: column; gap: 8px; min-width: 0; container: tmcompare / inline-size; }
+.tm-ctable { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tm-crow {
+  display: grid; align-items: baseline; gap: 2px 12px; padding: 5px 8px; min-width: 0;
+  grid-template-columns: 9em minmax(0, 1fr) minmax(0, 1fr) 6.5em; border-radius: var(--radius-xs);
+}
+.tm-crow > * { min-width: 0; }
+.tm-crow--head { color: var(--text-secondary); font-size: 11.5px; }
+.tm-crow--changed { background: rgba(255, 255, 255, 0.05); }
+.tm-crow--same { color: var(--text-secondary); }
+.tm-crow__label { font-weight: 600; }
+.tm-crow__k { display: none; color: var(--text-secondary); font-weight: 500; }
+.tm-sides { flex-direction: column; align-items: flex-start; gap: 4px; }
+.tm-same { align-self: flex-start; }
+.tm-events { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.tm-groups { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 0; min-width: 0; }
+.tm-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
 /* Narrow (below the six columns' width): each mark is a card. Line 1 time,
    severity and group; line 2 title; line 3 parameters; line 4 router and
    source. */
 @container tmlist (max-width: 920px) {
-  .tm-spans .tm-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
-  .tm-spans .tm-mark__main { flex: 1 1 100%; gap: 3px; }
-  .tm-spans .tm-mark__router { flex: 0 1 auto; }
-  .tm-spans .tm-mark__source { flex: 1 1 auto; }
+  .tm-mark.tm-mark--start { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
+  .tm-mark--start .tm-mark__main { flex: 1 1 100%; gap: 3px; }
+  .tm-mark--start .tm-mark__router { flex: 0 1 auto; display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
+  .tm-mark--start .tm-mark__source { flex: 1 1 auto; }
 }
 
 @container tmlist (max-width: 860px) {
   .tm-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; padding: 8px 10px; }
   .tm-mark__main { flex: 1 1 100%; gap: 3px; }
-  .tm-mark__router { flex: 0 1 auto; }
+  .tm-mark__router { flex: 0 1 auto; display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
   .tm-mark__source { flex: 1 1 auto; }
 }
 
@@ -129,12 +232,41 @@
   .tm-session__client { flex: 1 1 100%; }
   /* cards: the router name wraps in full again */
   .tm-session__router { display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
+  .tm-session__client .tm-client { display: inline; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
   .tm-session__band { white-space: normal; }
+}
+
+/* Narrow: each client row is a card (client, then router, band, since); names in full */
+@container tmclients (max-width: 600px) {
+  .tm-client-rows .tm-client-row { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 10px; }
+  .tm-client-row__client { flex: 1 1 100%; }
+  .tm-client-row__client,
+  .tm-client-row__router { display: block; -webkit-line-clamp: unset; line-clamp: none; overflow: visible; }
+}
+
+/* Narrow: a router's facts stack (label above value) */
+@container tmstate (max-width: 300px) {
+  .tm-fact { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Narrow: each comparison row is a card (label, then before, after, badge) */
+@container tmcompare (max-width: 560px) {
+  .tm-crow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 6px 8px; }
+  .tm-crow--head { display: none; }
+  .tm-crow__label { flex: 1 1 100%; }
+  .tm-crow__k { display: inline; }
 }
 
 @media (max-width: 600px) {
   .tm-filter__name { flex-basis: 100%; }
   .tm-chip { min-height: 40px; flex: 1 1 auto; text-align: center; }
+  /* the view switch: two rows of two at 360 px (gap 6 px) */
+  .tm-views .tm-chip { flex: 1 1 calc(50% - 3px); }
   .tm-field select { min-height: 40px; width: 100%; }
+  .tm-field input { min-height: 40px; width: 100%; }
   .tm-more .cfg-btn { flex: 1 1 100%; min-height: 40px; }
+  .tm-export .cfg-btn, .tm-show { flex: 1 1 100%; min-height: 40px; }
+  .tm-jump { min-height: 40px; }
+  /* a client name that filters: a touch target of at least 24 px (browser review) */
+  .tm-client--filter { min-height: 24px; padding-block: 3px; }
 }

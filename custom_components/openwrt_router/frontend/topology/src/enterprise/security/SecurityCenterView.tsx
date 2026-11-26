@@ -10,7 +10,8 @@
  * gets the switch. Unknown values are shown as unknown, never as healthy.
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { clearEnterpriseEntry, peekEnterpriseEntry, type EnterpriseEntry } from '../registry';
 import configCSS from '../config/config.css?inline';
 import securityCSS from './security.css?inline';
 import type { SecurityApi } from './securityTypes';
@@ -72,11 +73,18 @@ function OffState({ admin, api, onEnabled }: { admin: boolean; api: SecurityApi;
 
 // ── Root ─────────────────────────────────────────────────────────────────
 
+/** The incident an entry from another tab names (1.52.0), else null. */
+export function entryIncident(entry: EnterpriseEntry | null): string | null {
+  return entry && entry.objectType === 'incident' && entry.objectId ? entry.objectId : null;
+}
+
 export function SecurityCenterView({ api, isAdmin }: { api: SecurityApi; isAdmin: () => boolean }) {
   const admin = isAdmin();
   const [rev, setRev] = useState(0);
   const [section, setSection] = useState<Section>('overview');
-  const [incidentId, setIncidentId] = useState<string | null>(null);
+  // an entry from another tab (the Time Machine) may name an incident; without one: as always
+  const [incidentId, setIncidentId] = useState<string | null>(() => entryIncident(peekEnterpriseEntry('security')));
+  useEffect(() => clearEnterpriseEntry('security'), []);
   const [filters, setFilters] = useState<TimelineFilters>(DEFAULT_FILTERS);
   const base = useResource(() => api.overview(), true, rev);
   const overview = base.data;

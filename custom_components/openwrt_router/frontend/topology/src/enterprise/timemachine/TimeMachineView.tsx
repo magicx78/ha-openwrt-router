@@ -2,7 +2,7 @@
  * TimeMachineView — Enterprise sub-tab "Zeitreise" (Network Time Machine,
  * read only).
  *
- * Two views, switched in the tab (state kept here, no router or URL change):
+ * Four views, switched in the tab (state kept here, no router or URL change):
  *
  * - "Zeitleiste": one timeline of the marks of every source (audit,
  *   configuration versions, Network Intelligence, Security Center, and since
@@ -10,10 +10,18 @@
  *   histories), newest first, grouped by local calendar day. Intervals that
  *   began before the window and still reach into it stand in a block of their
  *   own at the top ("Läuft seit vor dem Zeitfenster").
+ * - "Zustand" (1.52.0): the reconstructed state at one moment (…/state),
+ *   and "Vergleich": two moments side by side (…/compare); both in
+ *   TimeMachineState.tsx, for every user.
  * - "Client-Sitzungen" (administrators only, 1.51.0): the client sessions of
  *   GET …/sessions, newest start first, grouped by day.
  *
- * Both containers stay mounted once opened (their lists survive a switch) but
+ * Since 1.52.0 the timeline also has a fifth window state "Eigenes Fenster"
+ * (set only by "In der Zeitleiste zeigen" of the other views), a client
+ * filter and the export (administrators), and jump buttons into the tab a
+ * mark belongs to (tmUi.JumpButton).
+ *
+ * Every container stays mounted once opened (its state survives a switch) but
  * only the visible one loads and polls: when opened, on "Aktualisieren", on a
  * filter change, and then at most every 60 s while the page is visible. Older
  * pages are loaded on request and kept; a newer answer never loses to a stale
@@ -26,71 +34,39 @@
  * characters.
  */
 
-import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import configCSS from '../config/config.css?inline';
-import wifiCSS from '../wifi/wifi.css?inline';
-import tmCSS from './timemachine.css?inline';
+import React, { useCallback, useEffect, useId, useReducer, useRef, useState } from 'react';
 import {
-  CLIENTS_OFF_HOW, CLIENTS_OFF_TITLE, CLIENTS_PRIVACY, CUT_TEXT, DEFAULT_FILTERS, DEFAULT_SESSION_FILTERS, EMPTY_TEXT,
-  HIDDEN_ONLY_TEXT, INTRO, LIST_INIT, LOADING_TEXT, NO_SOURCE_TEXT, OFF_HOW, OFF_TITLE, PARTIAL_TEXT, POLL_MIN_MS,
+  CLIENTS_OFF_HOW, CLIENTS_OFF_TITLE, CLIENTS_PRIVACY, CUSTOM_WINDOW, CUT_TEXT, DEFAULT_FILTERS, DEFAULT_SESSION_FILTERS,
+  EMPTY_TEXT, HIDDEN_ONLY_TEXT, LIST_INIT, LOADING_TEXT, NO_SOURCE_TEXT, PARTIAL_TEXT, POLL_MIN_MS,
   RECORDING_OFF, RECORDING_ON, RESTART_TEXT, SPANS_CUT_TEXT, SESSIONS_CUT_TEXT, SESSIONS_EMPTY_TEXT, SESSIONS_LOADING_TEXT,
   SESSIONS_VIEW_TITLE, SESSION_LIST_INIT, SEVERITY_FILTERS, SOURCES_NEWEST, SOURCES_TITLE, SOURCE_IDS, SPANS_TITLE,
-  TAB_TITLE, TIMELINE_VIEW_TITLE, WINDOWS,
-  adminOnlySources, bandText, clientLabel, clientOptions, clientTitle, clientsOff, countText, dayGroups, detailText, errorInfo,
+  TIMELINE_VIEW_TITLE, WINDOWS,
+  adminOnlySources, askedFilters, bandText, clientLabel, clientOptions, clientsOff, countText, customWindowText, dayGroups,
   filterKey, firstQuery, firstSessionQuery, groupText, groupsOf, isoUtc, listReducer, olderQuery, olderSessionQuery,
-  omittedText, rememberClients, rememberRouters, rememberSessionRouters, roamText, routerOptionLabel, routerOptions,
-  routerText, sessionDays, sessionDurationText, sessionFilterKey, sessionReducer, severityView, shouldPoll,
-  shouldPollSessions, sourcePill, sourceText, standText, startText, timeText, titleOf, unavailableText,
+  omittedText, rememberClients, rememberMarkClients, rememberRouters, rememberSessionRouters, roamText,
+  routerText, sessionDays, sessionDurationText, sessionFilterKey, sessionReducer, shouldPoll,
+  shouldPollSessions, sourcePill, sourceText, timeText, unavailableText,
   visibleMarks,
   type ClientNames, type ListState, type RouterNames, type SessionListState,
 } from './tmLogic.ts';
-import type { Filters, Mark, Session, SessionFilters, TmApi } from './tmTypes';
+import {
+  COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE, activeIn, dialogFocus, dialogKey, exportEmptyText,
+  exportOmittedText, focusLost,
+} from './tmState.ts';
+import type { CustomWindow, ExportFile, Filters, Mark, Session, SessionFilters, TimelineQuery, TmApi } from './tmTypes';
+import {
+  Chip, ClientFilterContext, ClientLabel, ErrorBox, Frame, JumpContext, MarkRow, OffBox, RouterSelect, Spinner,
+  pageVisible, saveBlob, type JumpApi,
+} from './tmUi';
+import { CompareContainer, StateContainer } from './TimeMachineState';
+
+export { Frame, MarkRow };
 
 const CHECK_MS = Math.min(15_000, POLL_MIN_MS);
 
-export type TmView = 'timeline' | 'sessions';
-
-function pageVisible(): boolean {
-  return typeof document === 'undefined' || document.visibilityState === 'visible';
-}
+export type TmView = 'timeline' | 'state' | 'compare' | 'sessions';
 
 // ── Pieces ───────────────────────────────────────────────────────────────
-
-function ErrorBox({ error, onRetry, of = 'timeline' }: { error: unknown; onRetry?: () => void; of?: 'timeline' | 'sessions' }) {
-  const info = errorInfo(error, of);
-  return (
-    <div className={`cfg-notice cfg-notice--${info.kind === 'failed' ? 'warn' : 'error'}`} role="alert">
-      <span>{info.message}</span>
-      {onRetry && info.retry && (
-        <button type="button" className="diag-btn cfg-btn" onClick={onRetry}>Erneut versuchen</button>
-      )}
-    </div>
-  );
-}
-
-function Chip({ on, disabled, onClick, children, title }: {
-  on: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode; title?: string;
-}) {
-  return (
-    <button type="button" className={`wifi-nav__btn tm-chip${on ? ' active' : ''}`} aria-pressed={on}
-      disabled={disabled} title={title} onClick={onClick}>
-      {children}
-    </button>
-  );
-}
-
-function Spinner({ text }: { text: string }) {
-  return <div className="cfg-spinner tm-loading" aria-busy="true"><span className="cfg-spinner__dot" />{text}</div>;
-}
-
-function OffBox() {
-  return (
-    <div className="cfg-notice cfg-notice--info tm-off" role="status">
-      <strong>{OFF_TITLE}</strong>
-      <span>{OFF_HOW}</span>
-    </div>
-  );
-}
 
 function RestartNotice({ onDismiss }: { onDismiss: () => void }) {
   return (
@@ -101,35 +77,17 @@ function RestartNotice({ onDismiss }: { onDismiss: () => void }) {
   );
 }
 
-/** "Zeitleiste | Client-Sitzungen" (administrators only). */
-export function ViewSwitch({ view, onView }: { view: TmView; onView: (v: TmView) => void }) {
+/**
+ * "Zeitleiste | Zustand | Vergleich | Client-Sitzungen"; the sessions only
+ * for administrators. Wraps to two rows of two at 360 px (timemachine.css).
+ */
+export function ViewSwitch({ view, onView, isAdmin = true }: { view: TmView; onView: (v: TmView) => void; isAdmin?: boolean }) {
   return (
     <div className="tm-chips tm-views" role="group" aria-label="Ansicht">
       <Chip on={view === 'timeline'} onClick={() => onView('timeline')}>{TIMELINE_VIEW_TITLE}</Chip>
-      <Chip on={view === 'sessions'} onClick={() => onView('sessions')}>{SESSIONS_VIEW_TITLE}</Chip>
-    </div>
-  );
-}
-
-function Frame({ loading, onRefresh, viewSwitch, generatedAt, children }: {
-  loading: boolean; onRefresh: () => void; viewSwitch?: React.ReactNode; generatedAt: number | null | undefined;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="cfg wifi tm">
-      <style>{configCSS}</style>
-      <style>{wifiCSS}</style>
-      <style>{tmCSS}</style>
-      <div className="cfg-header">
-        <span className="view-title">{TAB_TITLE}</span>
-        <button type="button" className="diag-btn cfg-btn cfg-header__refresh" disabled={loading} onClick={onRefresh}>
-          Aktualisieren
-        </button>
-      </div>
-      {viewSwitch}
-      <div className="cfg-hint">{INTRO}</div>
-      {generatedAt !== undefined && generatedAt !== null && <div className="cfg-hint tm-stand">{standText(generatedAt)}</div>}
-      {children}
+      <Chip on={view === 'state'} onClick={() => onView('state')}>{STATE_VIEW_TITLE}</Chip>
+      <Chip on={view === 'compare'} onClick={() => onView('compare')}>{COMPARE_VIEW_TITLE}</Chip>
+      {isAdmin && <Chip on={view === 'sessions'} onClick={() => onView('sessions')}>{SESSIONS_VIEW_TITLE}</Chip>}
     </div>
   );
 }
@@ -156,64 +114,24 @@ function SourceRow({ state }: { state: ListState }) {
   );
 }
 
-function ClientLabel({ client, name }: { client: string | null; name: string | null }) {
-  // the full pseudonym as title: an administrator can copy it for the forget service
-  return <span className="tm-client" title={clientTitle(client) ?? undefined}>{clientLabel(client, name)}</span>;
-}
-
-function MarkRow({ m, nowMs, start = false }: { m: Mark; nowMs: number; start?: boolean }) {
-  const sev = severityView(m.severity);
-  const detail = detailText(m, nowMs, { client: false, inBlock: start });
-  const hasClient = !!(m.client || m.clientName);
-  const iso = isoUtc(m.ts);
-  return (
-    <li className="tm-mark" data-source={m.source}>
-      <time className="tm-mark__time" dateTime={iso} title={iso}>{start ? startText(m.ts) : timeText(m.ts)}</time>
-      <span className={`tm-mark__sev tm-sev tm-sev--${sev.tone}`}>
-        <span className="tm-sev__dot" aria-hidden="true" />{sev.label}
-      </span>
-      <span className="tm-mark__group">
-        <span className="cfg-badge cfg-badge--muted">{groupText(m.group)}</span>
-        {m.derived && <span className="cfg-badge cfg-badge--info">abgeleitet</span>}
-      </span>
-      <span className="tm-mark__main">
-        <span className="tm-mark__title">{titleOf(m)}</span>
-        {(detail || hasClient) && (
-          <span className="tm-mark__params">
-            {hasClient && <ClientLabel client={m.client} name={m.clientName} />}
-            {hasClient && detail && ' · '}
-            {detail}
-          </span>
-        )}
-      </span>
-      <span className="tm-mark__router">{routerText(m)}</span>
-      <span className="tm-mark__source">{sourceText(m.source)}</span>
-    </li>
-  );
-}
-
-function WindowChips({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+function WindowChips({ value, custom, onChange, onClearCustom }: {
+  value: string; custom?: CustomWindow | null; onChange: (id: string) => void; onClearCustom?: () => void;
+}) {
+  const own = value === CUSTOM_WINDOW && custom;
   return (
     <div className="tm-filter">
       <span className="tm-filter__name">Zeitfenster</span>
       <div className="tm-chips">
         {WINDOWS.map(w => <Chip key={w.id} on={value === w.id} onClick={() => onChange(w.id)}>{w.label}</Chip>)}
+        {own && (
+          <span className="tm-own" role="status">
+            <span className="tm-own__text">{customWindowText(custom)}</span>
+            <button type="button" className="diag-btn cfg-btn tm-own__close" aria-label="Eigenes Fenster schließen, zurück zu 24 Stunden"
+              title="Zurück zu 24 Stunden" onClick={onClearCustom}>×</button>
+          </span>
+        )}
       </div>
     </div>
-  );
-}
-
-function RouterSelect({ value, routers, onChange }: { value: string | null; routers: RouterNames; onChange: (id: string | null) => void }) {
-  const options = routerOptions(routers);
-  if (value && !options.some(o => o.value === value)) options.push({ value, label: routerOptionLabel(value, null) });
-  return (
-    <label className="tm-filter tm-field">
-      <span className="tm-filter__name">Router</span>
-      <select value={value ?? ''} onChange={e => onChange(e.target.value || null)}>
-        <option value="">Alle Router</option>
-        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </label>
   );
 }
 
@@ -227,16 +145,19 @@ export interface FilterBarProps {
   total: number;
   onFilters: (f: Filters) => void;
   onToggleGroup: (group: string) => void;
+  /** Administrators: the clients of the loaded marks (the "Client" select). */
+  clients?: ClientNames | null;
 }
 
-export function FilterBar({ filters, adminOnly, routers, groups, hidden, shown, total, onFilters, onToggleGroup }: FilterBarProps) {
+export function FilterBar({ filters, adminOnly, routers, groups, hidden, shown, total, onFilters, onToggleGroup, clients = null }: FilterBarProps) {
   const toggleSource = (id: string) => {
     const off = filters.sourcesOff.includes(id) ? filters.sourcesOff.filter(s => s !== id) : [...filters.sourcesOff, id];
     onFilters({ ...filters, sourcesOff: off });
   };
   return (
     <div className="tm-filters" role="group" aria-label="Filter der Zeitleiste">
-      <WindowChips value={filters.window} onChange={window => onFilters({ ...filters, window })} />
+      <WindowChips value={filters.window} custom={filters.custom} onChange={window => onFilters({ ...filters, window, custom: null })}
+        onClearCustom={() => onFilters({ ...filters, window: DEFAULT_FILTERS.window, custom: null })} />
       <div className="tm-filter">
         <span className="tm-filter__name">Quelle</span>
         <div className="tm-chips">
@@ -259,6 +180,7 @@ export function FilterBar({ filters, adminOnly, routers, groups, hidden, shown, 
         </div>
       </div>
       <RouterSelect value={filters.routerId} routers={routers} onChange={routerId => onFilters({ ...filters, routerId })} />
+      {clients && <ClientSelect value={filters.client} clients={clients} onChange={client => onFilters({ ...filters, client })} />}
       {groups.length > 0 && (
         <div className="tm-filter">
           <span className="tm-filter__name">Art</span>
@@ -269,6 +191,145 @@ export function FilterBar({ filters, adminOnly, routers, groups, hidden, shown, 
           </div>
           <span className="tm-count" aria-live="polite">{countText(shown, total)}</span>
         </div>
+      )}
+    </div>
+  );
+}
+
+function ClientSelect({ value, clients, onChange }: { value: string | null; clients: ClientNames; onChange: (c: string | null) => void }) {
+  const options = clientOptions(clients);
+  if (value && !options.some(o => o.value === value)) options.push({ value, label: clientLabel(value, null) });
+  return (
+    <label className="tm-filter tm-field">
+      <span className="tm-filter__name">Client</span>
+      <select value={value ?? ''} onChange={e => onChange(e.target.value || null)}>
+        <option value="">Alle Clients</option>
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+    </label>
+  );
+}
+
+// ── Export (administrators only) ─────────────────────────────────────────
+
+export interface ExportState {
+  /** The confirmation is open (in the tab, never window.confirm). */
+  confirm: boolean;
+  busy: boolean;
+  error: unknown;
+  /** Pages saved so far (1-based number of the last one), null before the first. */
+  saved: number | null;
+  /** A cut export goes on here (the query of its first page and the cursor). */
+  next: { query: TimelineQuery; cursor: string } | null;
+  /** Client marks of the window not in the file (omitted_client_marks of the last page), null before the first. */
+  omitted?: number | null;
+  /** The last answer had no mark: no file was saved, this says why (tmState.exportEmptyText); null otherwise. */
+  empty?: string | null;
+}
+
+export const EXPORT_INIT: ExportState = { confirm: false, busy: false, error: null, saved: null, next: null, omitted: null, empty: null };
+
+/**
+ * What one export answer does (pure; browser check before the merge): with a
+ * mark or an interval in it the file is saved under `save` (page 2 on as
+ * "…-2.json") as before; without one nothing is saved (`save` null) and the
+ * state carries the message why. The pages saved before stay counted.
+ */
+export function exportStep(file: Pick<ExportFile, 'status' | 'reason' | 'marks' | 'spanning' | 'truncated' | 'nextCursor' | 'omittedClientMarks'>,
+  page: number, query: TimelineQuery, prev: ExportState): { save: string | null; state: ExportState } {
+  const empty = exportEmptyText(file, page);
+  if (empty !== null) {
+    return { save: null, state: { ...EXPORT_INIT, saved: page > 1 ? prev.saved : null, empty } };
+  }
+  return {
+    save: page === 1 ? EXPORT_FILENAME : EXPORT_FILENAME.replace(/\.json$/, `-${page}.json`),
+    state: {
+      confirm: false, busy: false, error: null, saved: page, empty: null,
+      next: file.truncated && file.nextCursor ? { query, cursor: file.nextCursor } : null,
+      omitted: file.omittedClientMarks,
+    },
+  };
+}
+
+export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
+  state: ExportState; onAsk: () => void; onConfirm: () => void; onCancel: () => void; onNext: () => void;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const wasOpen = useRef(state.confirm);
+  const cancelNow = useRef(onCancel);
+  cancelNow.current = onCancel;
+  const textId = useId();
+  // open: focus on "Abbrechen"; closed (cancelled or confirmed): back to the button that opened it
+  useEffect(() => {
+    const target = dialogFocus(wasOpen.current, state.confirm);
+    wasOpen.current = state.confirm;
+    if (target === 'cancel') cancel.current?.focus();
+    else if (target === 'trigger') trigger.current?.focus();
+  }, [state.confirm]);
+  // Escape, Tab and Shift+Tab by the dialog's rule (dialogKey); `active` is the focused element
+  const onDialogKey = (e: { key: string; shiftKey: boolean; preventDefault: () => void }, active: Element | null) => {
+    const buttons = Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? []);
+    const step = dialogKey(e.key, e.shiftKey, buttons.indexOf(active as HTMLButtonElement), buttons.length);
+    if (!step) return;
+    e.preventDefault();
+    if (step.action === 'cancel') cancelNow.current();
+    else buttons[step.index]?.focus();
+  };
+  const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => onDialogKey(e, activeIn(dialog.current));
+  // Browser check: a tap outside the buttons can put the focus on <body>, where
+  // the dialog hears no key. While it is open, such keys go by the same rule
+  // (a key in the dialog or with a real focus elsewhere is left alone).
+  const onDialogKeyNow = useRef(onDialogKey);
+  onDialogKeyNow.current = onDialogKey;
+  useEffect(() => {
+    if (!state.confirm) return undefined;
+    const doc = dialog.current?.ownerDocument;
+    if (!doc) return undefined;
+    const onDocKey = (e: KeyboardEvent) => {
+      const box = dialog.current;
+      if (!box || e.defaultPrevented || e.composedPath().includes(box)) return;
+      if (!focusLost(activeIn(box, doc), doc.activeElement, doc.body)) return;
+      onDialogKeyNow.current(e, null);
+    };
+    doc.addEventListener('keydown', onDocKey);
+    return () => doc.removeEventListener('keydown', onDocKey);
+  }, [state.confirm]);
+  const omitted = state.error === null && !state.busy ? exportOmittedText(state.omitted ?? null) : null;
+  return (
+    <div className="tm-export">
+      {!state.confirm && (
+        // aria-disabled, not disabled, while busy: the focus comes back to it after the confirmation
+        <button type="button" className="diag-btn cfg-btn" ref={trigger} aria-disabled={state.busy || undefined}
+          onClick={() => { if (!state.busy) onAsk(); }}>Exportieren</button>
+      )}
+      {state.confirm && (
+        // tabIndex -1 (browser check): a tap on its text focuses the dialog itself, so its keys stay here; not in the Tab order
+        <div className="cfg-notice cfg-notice--info tm-export__ask" role="alertdialog" aria-label="Export bestätigen"
+          aria-modal="true" aria-describedby={textId} tabIndex={-1} ref={dialog} onKeyDown={onKey}>
+          <span id={textId}>{EXPORT_CONFIRM_TEXT}</span>
+          <span className="tm-export__buttons">
+            <button type="button" className="diag-btn cfg-btn" disabled={state.busy} onClick={onConfirm}>Exportieren</button>
+            <button type="button" className="diag-btn cfg-btn" ref={cancel} onClick={onCancel}>Abbrechen</button>
+          </span>
+        </div>
+      )}
+      {state.busy && <span className="cfg-spinner"><span className="cfg-spinner__dot" />Export läuft …</span>}
+      {state.error !== null && <ErrorBox of="export" error={state.error} />}
+      {state.empty && state.error === null && !state.busy && (
+        <span className="cfg-hint tm-export__empty" role="status">{state.empty}</span>
+      )}
+      {state.saved !== null && !state.empty && state.error === null && !state.busy && (
+        <span className="cfg-hint tm-export__done" role="status">
+          {state.next
+            ? `Seite ${state.saved} gespeichert. Der Export ist gekürzt; die nächste Seite folgt mit „Weitere Seite exportieren“.`
+            : `Export gespeichert${state.saved > 1 ? ` (Seite ${state.saved})` : ''}.`}
+          {omitted && ` ${omitted}`}
+        </span>
+      )}
+      {state.next && !state.busy && (
+        <button type="button" className="diag-btn cfg-btn" onClick={onNext}>Weitere Seite exportieren</button>
       )}
     </div>
   );
@@ -288,9 +349,17 @@ export interface ScreenProps {
   onRefresh: () => void;
   onMore: () => void;
   onDismiss?: () => void;
+  /** Administrators (1.52.0): the client filter and the export. */
+  isAdmin?: boolean;
+  clients?: ClientNames;
+  exportState?: ExportState;
+  onExport?: { ask: () => void; confirm: () => void; cancel: () => void; next: () => void };
 }
 
-export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, viewSwitch, onFilters, onToggleGroup, onRefresh, onMore, onDismiss }: ScreenProps) {
+export function TimeMachineScreen({
+  state, filters, hidden, routers, nowMs, viewSwitch, onFilters, onToggleGroup, onRefresh, onMore, onDismiss,
+  isAdmin = false, clients, exportState, onExport,
+}: ScreenProps) {
   const head = state.head;
   const off = head?.status === 'off';
   const adminOnly = adminOnlySources(head);
@@ -321,7 +390,12 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, view
     return (
       <>
         <FilterBar filters={filters} adminOnly={adminOnly} routers={routers} groups={groups} hidden={hidden}
-          shown={shown.length + shownSpans.length} total={all.length} onFilters={onFilters} onToggleGroup={onToggleGroup} />
+          shown={shown.length + shownSpans.length} total={all.length} onFilters={onFilters} onToggleGroup={onToggleGroup}
+          clients={isAdmin ? clients ?? rememberMarkClients({}, all) : null} />
+        {isAdmin && onExport && !noSource && (
+          <ExportBox state={exportState ?? EXPORT_INIT} onAsk={onExport.ask} onConfirm={onExport.confirm}
+            onCancel={onExport.cancel} onNext={onExport.next} />
+        )}
         {state.error !== null && <ErrorBox error={state.error} onRetry={onRefresh} />}
         {state.restarted && <RestartNotice onDismiss={onDismiss ?? (() => {})} />}
         {head.status === 'partial' && <div className="cfg-notice cfg-notice--warn" role="note">{PARTIAL_TEXT}</div>}
@@ -352,10 +426,13 @@ export function TimeMachineScreen({ state, filters, hidden, routers, nowMs, view
     );
   })();
 
+  const filterBy = useCallback((client: string) => onFilters({ ...filters, client }), [filters, onFilters]);
   return (
-    <Frame loading={state.loading} onRefresh={onRefresh} viewSwitch={viewSwitch} generatedAt={head?.generatedAt}>
-      {body}
-    </Frame>
+    <ClientFilterContext.Provider value={isAdmin ? filterBy : null}>
+      <Frame loading={state.loading} onRefresh={onRefresh} viewSwitch={viewSwitch} generatedAt={head?.generatedAt}>
+        {body}
+      </Frame>
+    </ClientFilterContext.Provider>
   );
 }
 
@@ -517,11 +594,27 @@ export function SessionsScreen({ state, filters, routers, clients, nowMs, viewSw
 
 // ── Containers (state, fetching, polling) ────────────────────────────────
 
-/** The timeline: loads and polls only while `active` (its view is shown). */
-export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; active: boolean; viewSwitch?: React.ReactNode }) {
+/** A request of another view: show this window in the timeline (`n` counts the requests). */
+export interface WindowRequest {
+  window: CustomWindow;
+  n: number;
+}
+
+/**
+ * The timeline: loads and polls only while `active` (its view is shown).
+ * Never while its window is a custom one (a fixed window of the past). A
+ * client filter is only ever sent by administrators.
+ */
+export function TimelineContainer({ api, active, viewSwitch, isAdmin = false, request = null }: {
+  api: TmApi; active: boolean; viewSwitch?: React.ReactNode; isAdmin?: boolean; request?: WindowRequest | null;
+}) {
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [hidden, setHidden] = useState<string[]>([]);
   const [routers, setRouters] = useState<RouterNames>({});
+  const [clients, setClients] = useState<ClientNames>({});
+  const [exp, setExp] = useState<ExportState>(EXPORT_INIT);
+  const expRef = useRef(exp);
+  expRef.current = exp;
   const [state, dispatch] = useReducer(listReducer, LIST_INIT);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -532,9 +625,21 @@ export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; act
   const seq = useRef(0);
   const lastMs = useRef<number | null>(null);
 
+  const adminRef = useRef(isAdmin);
+  adminRef.current = isAdmin;
+  const asked = useCallback((): Filters => askedFilters(filtersRef.current, adminRef.current), []);
+
+  // "In der Zeitleiste zeigen" of another view: the custom window, the rest of the filters kept
+  const lastRequest = useRef(0);
+  useEffect(() => {
+    if (!request || request.n === lastRequest.current) return;
+    lastRequest.current = request.n;
+    setFilters(f => ({ ...f, window: CUSTOM_WINDOW, custom: request.window }));
+  }, [request]);
+
   const loadFirst = useCallback(() => {
     const s = stateRef.current;
-    const q = firstQuery(filtersRef.current, Date.now(), adminOnlySources(s.head));
+    const q = firstQuery(asked(), Date.now(), adminOnlySources(s.head));
     if (q === null) return;
     const n = ++seq.current;
     const gen = s.gen;
@@ -544,7 +649,7 @@ export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; act
       answer => dispatch({ type: 'first', gen, seq: n, answer, query: q }),
       error => dispatch({ type: 'fail', gen, seq: n, more: false, error }),
     );
-  }, [api]);
+  }, [api, asked]);
 
   const loadMore = useCallback(() => {
     const s = stateRef.current;
@@ -581,7 +686,7 @@ export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; act
   // At most every 60 s while visible, shown and on (shouldPoll); nothing while off.
   useEffect(() => {
     const check = () => {
-      if (!activeRef.current) return;
+      if (!activeRef.current || filtersRef.current.window === CUSTOM_WINDOW) return;
       if (shouldPoll({ visible: pageVisible(), lastMs: lastMs.current, nowMs: Date.now(), off: stateRef.current.head?.status === 'off' })) {
         loadFirst();
       }
@@ -597,17 +702,56 @@ export function TimelineContainer({ api, active, viewSwitch }: { api: TmApi; act
 
   useEffect(() => {
     setRouters(prev => rememberRouters(prev, state.marks));
-  }, [state.marks]);
+    if (adminRef.current) {
+      setClients(prev => rememberMarkClients(rememberMarkClients(prev, state.marks), state.head?.spanning ?? []));
+    }
+  }, [state.marks, state.head]);
 
   const toggleGroup = useCallback((g: string) => {
     setHidden(h => (h.includes(g) ? h.filter(x => x !== g) : [...h, g]));
   }, []);
   const dismiss = useCallback(() => dispatch({ type: 'dismiss' }), []);
 
+  // Export (administrators): the window and filters of the list on screen, page by page
+  const exportSeq = useRef(0);
+  const runExport = useCallback((query: TimelineQuery, cursor: string | null, page: number) => {
+    if (!adminRef.current || !api.exportFile) return;
+    const n = ++exportSeq.current;
+    setExp(e => ({ ...e, confirm: false, busy: true, error: null }));
+    api.exportFile({ ...query, cursor }).then(
+      file => {
+        if (n !== exportSeq.current) return;
+        // an answer without a mark saves no file, it says why (exportStep)
+        const step = exportStep(file, page, query, expRef.current);
+        if (step.save !== null) saveBlob(file.blob, step.save);
+        setExp(step.state);
+      },
+      error => {
+        if (n !== exportSeq.current) return;
+        setExp(e => ({ ...e, busy: false, error }));
+      },
+    );
+  }, [api]);
+  const onExport = {
+    ask: () => setExp(e => ({ ...e, confirm: true, error: null })),
+    cancel: () => setExp(e => ({ ...e, confirm: false })),
+    confirm: () => {
+      const q = firstQuery(asked(), Date.now(), adminOnlySources(stateRef.current.head));
+      if (q) runExport(q, null, 1);
+    },
+    next: () => {
+      const next = exp.next;
+      if (next) runExport(next.query, next.cursor, (exp.saved ?? 0) + 1);
+    },
+  };
+  // a new filter (window, source, router …) is a new export: the "next page" of the old one goes
+  useEffect(() => { setExp(e => (e.next || e.saved !== null || e.empty ? { ...EXPORT_INIT } : e)); }, [key]);
+
   if (!active) return null;
   return (
     <TimeMachineScreen state={state} filters={filters} hidden={hidden} routers={routers} nowMs={Date.now()} viewSwitch={viewSwitch}
-      onFilters={setFilters} onToggleGroup={toggleGroup} onRefresh={loadFirst} onMore={loadMore} onDismiss={dismiss} />
+      onFilters={setFilters} onToggleGroup={toggleGroup} onRefresh={loadFirst} onMore={loadMore} onDismiss={dismiss}
+      isAdmin={isAdmin} clients={clients} exportState={exp} onExport={api.exportFile ? onExport : undefined} />
   );
 }
 
@@ -699,23 +843,32 @@ export function SessionsContainer({ api, active, viewSwitch }: { api: TmApi; act
 }
 
 /**
- * The tab. The view switch is offered to administrators only (the panel's
- * hass user); the sessions route answers 403 to everyone else anyway. The
- * sessions container is mounted the first time its view is chosen.
+ * The tab. Every user gets "Zeitleiste", "Zustand" and "Vergleich"; only
+ * administrators (the panel's hass user) get "Client-Sitzungen" (the route
+ * answers 403 to everyone else anyway). A container is mounted the first time
+ * its view is chosen and keeps its state when another one is shown. `jump`
+ * opens another Enterprise tab (register.ts binds it to the registry).
  */
-export function TimeMachineView({ api, isAdmin = false }: { api: TmApi; isAdmin?: boolean }) {
+export function TimeMachineView({ api, isAdmin = false, jump = null }: { api: TmApi; isAdmin?: boolean; jump?: JumpApi | null }) {
   const [view, setView] = useState<TmView>('timeline');
-  const [sessionsOpened, setSessionsOpened] = useState(false);
+  const [opened, setOpened] = useState<Record<TmView, boolean>>({ timeline: true, state: false, compare: false, sessions: false });
+  const [request, setRequest] = useState<WindowRequest | null>(null);
   const choose = useCallback((v: TmView) => {
-    if (v === 'sessions') setSessionsOpened(true);
+    setOpened(o => (o[v] ? o : { ...o, [v]: true }));
     setView(v);
   }, []);
-  const shown: TmView = isAdmin ? view : 'timeline';
-  const viewSwitch = isAdmin ? <ViewSwitch view={shown} onView={choose} /> : undefined;
+  const showWindow = useCallback((window: CustomWindow) => {
+    setRequest(r => ({ window, n: (r?.n ?? 0) + 1 }));
+    setView('timeline');
+  }, []);
+  const shown: TmView = view === 'sessions' && !isAdmin ? 'timeline' : view;
+  const viewSwitch = <ViewSwitch view={shown} onView={choose} isAdmin={isAdmin} />;
   return (
-    <>
-      <TimelineContainer api={api} active={shown === 'timeline'} viewSwitch={viewSwitch} />
-      {isAdmin && sessionsOpened && <SessionsContainer api={api} active={shown === 'sessions'} viewSwitch={viewSwitch} />}
-    </>
+    <JumpContext.Provider value={jump}>
+      <TimelineContainer api={api} active={shown === 'timeline'} viewSwitch={viewSwitch} isAdmin={isAdmin} request={request} />
+      {opened.state && <StateContainer api={api} active={shown === 'state'} viewSwitch={viewSwitch} isAdmin={isAdmin} onShowWindow={showWindow} />}
+      {opened.compare && <CompareContainer api={api} active={shown === 'compare'} viewSwitch={viewSwitch} isAdmin={isAdmin} onShowWindow={showWindow} />}
+      {isAdmin && opened.sessions && <SessionsContainer api={api} active={shown === 'sessions'} viewSwitch={viewSwitch} />}
+    </JumpContext.Provider>
   );
 }

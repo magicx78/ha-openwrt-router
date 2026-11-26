@@ -92,6 +92,8 @@ class ClientRecorder:
             return
         self._remove = cs.add_transition_listener(self)
         self.attached_to = cs
+        # 1.52.0: clients are recorded from here on (``clients_cov``)
+        self.engine.store.clients_from(self.engine.clock())
         self._resume_online(cs)
 
     def detach(self) -> None:
@@ -99,6 +101,7 @@ class ClientRecorder:
         if self._remove is not None:
             with contextlib.suppress(Exception):  # a closed engine removes its own
                 self._remove()
+            self.engine.store.clients_until(self.engine.clock())
         self._remove = None
         self.attached_to = None
         self._macs.clear()
@@ -247,6 +250,9 @@ class ClientRecorder:
         router = self.engine.router_id(tr.ap)
         open_seq = self._open.get(client)
         if index.get(open_seq) is None or not index.get(open_seq).is_open:
+            if open_seq is not None and index.get(open_seq) is None:
+                # evicted while open: lost up to this transition (review D)
+                index.close(open_seq, ts)
             self._open.pop(client, None)
             open_seq = None
         if tr.kind == TR_START:

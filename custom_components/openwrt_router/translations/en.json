@@ -561,7 +561,7 @@
     },
     "time_machine_forget_client": {
       "name": "Time Machine: forget a client",
-      "description": "Deletes every Time Machine mark of one client (administrators only). Give the MAC address or the pseudonym, exactly one of both. A client that is connected right now is recorded again from its next connect or move. Other modules keep their own client data; the answer lists them.",
+      "description": "Deletes every Time Machine mark of one client (administrators only). Give the MAC address or the pseudonym, exactly one of both. A client that is connected right now is recorded again from its next connect or move. Other modules keep their own client data; the answer lists them. The client counts of the past (state at a moment, comparison) drop by this client, and nothing marks those moments as changed.",
       "fields": {
         "mac": {
           "name": "MAC address",

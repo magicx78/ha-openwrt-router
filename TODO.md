@@ -1,12 +1,12 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-21 · Version: v1.50.0
+Stand: 2026-11-26 · Version: v1.52.0
 
 ---
 
 ## Backlog
 
-### Network Time Machine (Plan `docs/plans/2026-11-21-network-time-machine.md`, 1.50.0 / 1.51.0)
+### Network Time Machine (Plan `docs/plans/2026-11-21-network-time-machine.md`, 1.50.0 bis 1.52.0)
 
 Entwicklerdoku: `docs/time-machine.md`.
 
@@ -16,11 +16,26 @@ Entwicklerdoku: `docs/time-machine.md`.
       Fingerabdruck, Verweis-Marken für Störungen und Konfiguration, Kontrollpunkte (1.51.0).
 - [x] **Phase C** Client-Sitzungen über 24 h hinaus, mit eigenem Schalter, Rechten und
       „Client vergessen“; Panel-Ansicht „Client-Sitzungen“ (1.51.0).
-- [ ] **Phase D** „Zustand zum Zeitpunkt T“ und Vergleich zweier Zeitpunkte.
-- [ ] **Phase E** Client-Marken der Module demselben Client zuordnen (nie über `cli_`-Werte);
-      Export.
-- [ ] **Phase F** Sprünge in die Fach-Tabs (`ref` verlinken), Link aus der Topologie,
-      Browser-Prüfung 360/768/1280 px hell/dunkel.
+- [x] **Phase D** „Zustand zum Zeitpunkt T“ und Vergleich zweier Zeitpunkte, Routen und
+      Panel-Ansichten „Zustand“ / „Vergleich“ (1.52.0).
+- [x] **Phase E** Client-Marken der Module demselben Client zuordnen (nie über `cli_`-Werte);
+      Export für Administratoren (1.52.0).
+- [x] **Phase F** Sprünge in die Fach-Tabs (`ref` → Tab, Security Center wählt den Vorfall,
+      Konfiguration den Router) (1.52.0).
+- [ ] **Reste aus Phase F:** Link aus der Topologie in die Zeitreise (die Topologie kennt keine
+      `rtr_…`-Kennungen; braucht eine Zuordnung im Backend); in WiFi Intelligence,
+      Netzwerkdiagnose und Traffic Analytics ein Objekt auswählen statt nur den Tab zu öffnen;
+      im Configuration Manager die Version auswählen (bisher der Router).
+- [ ] **Bekannte Grenzen von 1.52.0:** Zustand erst ab dem Update auf 1.52.0 bekannt; kein
+      WAN-Zustand zum Zeitpunkt; Versionen sind die neuesten behaltenen; Export ohne
+      Client-Verläufe und ohne Client-Filter; nach einem Rücksprung der Uhr keine Aufzeichnung,
+      bis die Uhr die alte Zeit überholt hat.
+- [ ] **Offene Befunde des erweiterten Orakels (zweites Review 1.52.0)**, nur bei Startwerten
+      außerhalb der festen, zum großen Teil schon vor dem Review vorhanden:
+      - nach einem unsauberen Stopp fehlt ein Uplink-/Rollenwechsel, der vor dem letzten
+        Schreiben zuerst gesehen und erst danach bestätigt wurde (seine Marke geht verloren);
+      - zwei Funks auf demselben Band: ein Kanaltausch wird dem falschen Funk zugeordnet;
+      - `gap_s` einer unsauberen `ha_gap` kann nach einem Uhrsprung negativ sein.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben
@@ -32,8 +47,8 @@ Entwicklerdoku: `docs/time-machine.md`.
       offene Intervalle werden nicht nach 14 Tagen gekürzt; mehr ins Fenster reichende
       Intervalle als `limit` werden abgeschnitten; „Client vergessen“ nur im eigenen Verlauf;
       im Tab keine Bedienung für „Client vergessen“ / „Verlauf löschen“.
-- [ ] **Im Browser und in einer echten Instanz prüfen** (Tab „Zeitreise“ mit beiden Ansichten
-      bei 360/768/1280 px, hell/dunkel; Rechte als Nicht-Admin; Ausschalten löscht die
+- [ ] **Im Browser und in einer echten Instanz prüfen** (Tab „Zeitreise“ mit allen vier Ansichten,
+      Export und Sprüngen bei 360/768/1280 px, hell/dunkel; Rechte als Nicht-Admin; Ausschalten löscht die
       Client-Verläufe in der echten Datei). Bisher nur Tests mit Mocks und Render-Tests.
 
 ### Bekannte Grenzen aus 1.49.4

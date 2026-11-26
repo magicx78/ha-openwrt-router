@@ -10,6 +10,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import configCSS from './config.css?inline';
+import { clearEnterpriseEntry, peekEnterpriseEntry, type EnterpriseEntry } from '../registry';
 import type { Approval, ConfigApi, DriftState, Overview, RouterDetail, RouterSummary, Version } from './configTypes';
 import {
   APPROVAL_ACTION_LABEL,
@@ -367,12 +368,19 @@ function Fact({ name, value }: { name: string; value: string }) {
 
 // ── Tab root ─────────────────────────────────────────────────────────────
 
+/** The router an entry from another tab names (1.52.0), else null. */
+export function entryRouter(entry: EnterpriseEntry | null): string | null {
+  return entry && entry.routerId ? entry.routerId : null;
+}
+
 export function ConfigManagerView({ api }: { api: ConfigApi }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<string | null>(null);
+  // an entry from another tab (the Time Machine) opens the router of a version; without one: as always
+  const [selected, setSelected] = useState<string | null>(() => entryRouter(peekEnterpriseEntry('config')));
   const [now, setNow] = useState(() => Date.now());
+  useEffect(() => clearEnterpriseEntry('config'), []);
 
   const load = useCallback(async () => {
     try {

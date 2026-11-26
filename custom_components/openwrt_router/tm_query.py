@@ -84,6 +84,7 @@ from .tm_sources import (
     SEVERITY_RANK,
     SOURCE_CORE_AUDIT,
     SOURCE_NI_EVENTS,
+    SOURCE_TM_CLIENTS,
     SOURCE_TM_INDEX,
     SOURCE_TM_REFS,
     STATE_EMPTY,
@@ -127,6 +128,8 @@ QUERY_KEYS: Final = frozenset(
         # additive (1.51.0, review S3/S4)
         "cursor",
         "spans",
+        # additive (1.52.0, Phase E): marks of one client (administrators)
+        "client",
     }
 )
 # Intervals reaching into the window, at most this many (``spanning``).
@@ -139,6 +142,7 @@ _INT = re.compile(r"[0-9]{1,4}")
 # ``<ms>:<mark id>`` (that millisecond after the id, then everything older).
 _CURSOR = re.compile(r"([0-9]{1,13})(?::(tmm_[0-9a-f]{16}))?")
 _ROUTER_ID = re.compile(r"rtr_[0-9a-f]{32}")
+_CLIENT = re.compile(r"tmc_[0-9a-f]{16}")
 
 
 class QueryError(Exception):
@@ -166,6 +170,12 @@ class Query:
     cursor: tuple[int, str | None] | None = None
     # additive (1.51.0): also answer the intervals reaching into the window
     spans: bool = False
+    # additive (1.52.0): only marks of this client (``tmc_…``, admins only;
+    # the route refuses it for everyone else whatever the value)
+    client: str | None = None
+    # internal (1.52.0 review I, the export; no query key): no client marks
+    # at all, ``tm_clients`` is not read
+    no_clients: bool = False
 
 
 @dataclass(slots=True)
@@ -294,6 +304,9 @@ def parse_query(query: Mapping[str, str], now: float) -> Query:
     cursor = _cursor(query.get("cursor"))
     if cursor is not None and not since * 1000 <= cursor[0] <= until * 1000:
         raise QueryError("cursor", "out_of_range")
+    client = query.get("client")
+    if client is not None and not _CLIENT.fullmatch(client):
+        raise QueryError("client")
     return Query(
         since,
         until,
@@ -304,6 +317,7 @@ def parse_query(query: Mapping[str, str], now: float) -> Query:
         limit,
         cursor,
         _spans(query),
+        client,
     )
 
 
@@ -329,14 +343,25 @@ def off_body(now: float) -> dict[str, Any]:
 
 
 def _allowed(mark: Mapping[str, Any], admin: bool) -> bool:
-    """May this user see the mark at all (rights only, no query filter)?"""
-    return admin or mark["group"] in NON_ADMIN_GROUPS
+    """May this user see the mark at all (rights only, no query filter)?
+
+    A mark that names a client (``client``: own client marks, and since
+    1.52.0 module entries attributed to a client) is for administrators
+    only, whatever its group.
+    """
+    if admin:
+        return True
+    return mark["group"] in NON_ADMIN_GROUPS and mark.get("client") is None
 
 
 def _visible(mark: Mapping[str, Any], query: Query, admin: bool) -> bool:
     if not _allowed(mark, admin):
         return False
     if query.router_id is not None and mark["router_id"] != query.router_id:
+        return False
+    if query.client is not None and mark.get("client") != query.client:
+        return False
+    if query.no_clients and mark.get("client") is not None:
         return False
     if query.kind is not None and mark["kind"] != query.kind:
         return False
@@ -453,8 +478,19 @@ class _OwnSpans:
         return down is not None and self._near(self._ends.get((down, router)), ts)
 
 
-def drop_duplicates(results: list[SourceResult]) -> None:
-    """Drop doubles between sources (see the module doc); counts them."""
+def drop_duplicates(
+    results: list[SourceResult],
+    query: Query | None = None,
+    *,
+    admin: bool = True,
+) -> None:
+    """Drop doubles between sources (see the module doc); counts them.
+
+    With ``query`` (1.52.0, leftover of 1.51.0): an own mark makes an NI
+    event a double only when the user sees it under the query's rights and
+    filters; a filter that hides the own mark (``min_severity``, ``client``)
+    keeps the NI event, so one event is never removed twice.
+    """
     by_source = {r.source: r for r in results}
     audit = by_source.get(SOURCE_CORE_AUDIT)
     refs = by_source.get(SOURCE_TM_REFS)
@@ -466,7 +502,11 @@ def drop_duplicates(results: list[SourceResult]) -> None:
     index = by_source.get(SOURCE_TM_INDEX)
     ni = by_source.get(SOURCE_NI_EVENTS)
     if index is not None and ni is not None and index.state in _READ:
-        own = _OwnSpans((*index.marks, *index.spanning, *index.lookahead))
+        own = _OwnSpans(
+            m
+            for m in (*index.marks, *index.spanning, *index.lookahead)
+            if query is None or _visible(m, query, admin)
+        )
         keep = [m for m in ni.marks if not own.holds(m)]
         ni.duplicates += len(ni.marks) - len(keep)
         ni.marks = keep
@@ -477,7 +517,7 @@ def merge(
 ) -> dict[str, Any]:
     """One answer of the read sources (doubles, filters, rights, order, paging)."""
     results = list(results)
-    drop_duplicates(results)
+    drop_duplicates(results, query, admin=admin)
     # A cut source is complete only above its edge: the page keeps what lies
     # after the edge's millisecond, the next page starts with it (K4). Only
     # when that millisecond ends the window, the page keeps it (no progress
@@ -489,6 +529,16 @@ def merge(
             after = ms_next(edge)
             bounds.append(after if after < query.until else edge)
     cutoff = max(bounds) if bounds else None
+    excluded = (
+        sum(
+            1
+            for r in results
+            for m in r.marks
+            if m.get("client") is not None and _after(m["ts"], m["id"], query.cursor)
+        )
+        if query.no_clients
+        else 0
+    )
     marks = [
         m
         for r in results
@@ -554,7 +604,7 @@ def merge(
                 "duplicates": r.duplicates,
             }
         )
-    return {
+    body = {
         "v": API_VERSION,
         "status": STATUS_PARTIAL
         if any(r.state == STATE_UNREADABLE for r in results)
@@ -577,6 +627,10 @@ def merge(
         "spanning": spanning[:SPANNING_MAX],
         "spanning_truncated": len(spanning) > SPANNING_MAX,
     }
+    if query.no_clients:
+        # internal (the export): entries left out for naming a client
+        body["excluded_client_marks"] = excluded
+    return body
 
 
 async def async_timeline(
@@ -599,6 +653,8 @@ async def async_timeline(
     req = ReadRequest(query.since, until, admin, now)
     results: list[SourceResult] = []
     for source in query.sources:
+        if query.no_clients and source == SOURCE_TM_CLIENTS:
+            continue  # review I: never read just to be thrown away
         if source == SOURCE_TM_INDEX and until < query.until:
             # A later page (review K-a): an own mark up to NI_MATCH_S after
             # the cursor (shown on the page before) still makes an NI event
@@ -635,7 +691,6 @@ STATUS_UNAVAILABLE: Final = "unavailable"
 SESSION_QUERY_KEYS: Final = frozenset(
     {"from", "until", "client", "router_id", "limit", "cursor"}
 )
-_CLIENT = re.compile(r"tmc_[0-9a-f]{16}")
 
 
 @dataclass(frozen=True, slots=True)
