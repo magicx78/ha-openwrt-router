@@ -587,9 +587,14 @@ class TimeMachineStore:
             seg.end = max(seg.start, end)
 
     def seen_close_all(self, end: float) -> None:
-        """No router is followed from ``end`` on (stop, restart)."""
-        for rid in list(self.seen):
-            self.seen_close(rid, end)
+        """No router is followed from ``end`` on (stop, restart, a jump back
+        of the clock). Every open stretch ends, not only the last: a file
+        written across a jump back may hold an open one that sorts before a
+        later-started one (review A)."""
+        for segs in self.seen.values():
+            for seg in segs:
+                if seg.end is None:
+                    seg.end = max(seg.start, end)
 
     def seen_split(
         self, rid: str, now: float, *, parent: str = "", role: str = ""

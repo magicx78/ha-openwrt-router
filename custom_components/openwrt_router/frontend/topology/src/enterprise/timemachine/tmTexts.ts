@@ -412,6 +412,8 @@ export const PARAM_TEXT: Record<string, string> = {
   'duration_s': 'Dauer {D}',
   'off_s': 'vorher {D} aus',
   'shift_s': 'um {D}',
+  // 1.52.0 (review A): the jump lay within this time before the mark
+  'lead_s': 'erkannt nach {D}',
   'clean': 'sauber beendet',
   'deleted': '{n} gelöscht',
   'timed': 'per Zeitablauf erkannt',
@@ -421,6 +423,8 @@ export const PARAM_TEXT: Record<string, string> = {
   'blips': '{n} kurze Aussetzer',
   'suppressed': '{n} zusammengefasst',
   'cap': 'Grenze {n} je Tag',
+  // 1.52.0 (review G): the last folded change was a disconnect
+  'gone': 'zuletzt getrennt',
   // 1.52.0: epoch of the first sighting of a new uplink or role ({t} its time)
   'since': 'zuerst gesehen {t}',
 };

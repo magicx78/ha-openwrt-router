@@ -145,7 +145,7 @@ async def test_a_clock_jump_back_at_a_tick_leaves_the_doubled_time_unknown(
         for _ in range(80):  # past the old wall time
             poll_all(w, radios)
         [shift] = w.marks("clock_shift")
-        assert shift.params == {"shift_s": -3660}
+        assert shift.params == {"shift_s": -3660, "lead_s": 60}
         s = await snap(w)
         # the wall time between the jump and the old wall clock: occupied
         # twice (channel 36 before, channel 44 after) -> never a value
@@ -156,9 +156,9 @@ async def test_a_clock_jump_back_at_a_tick_leaves_the_doubled_time_unknown(
             w.hass, tm_state.StateQuery(jumped + 1800), admin=True, now=w.clock.t
         )
         assert (state["known"], state["unknown_reason"]) == (False, "clock_shift")
-        # the time before the jump: its marks may be the second occupant's
-        # neighbours -> unknown as a loss (``lost`` up to the old wall time)
-        assert s.global_reason(jumped - 600) is not None
+        # the time before the jump: here before the index ran (second
+        # review, A: a time lived once stays known, see test_tm_review_k_v1520)
+        assert s.global_reason(jumped - 600) == "not_recorded"
         # later than the doubled window: the truth (channel 44)
         late = w.clock.t - 30
         assert s.global_reason(late) is None
@@ -186,7 +186,7 @@ async def test_a_clock_jump_back_across_a_restart(disks) -> None:
         # from the new wall clock up to the old one: occupied twice
         for ts in (started + 1, saved - 1):
             assert s.global_reason(ts) == "clock_shift", ts
-        assert s.global_reason(started - 60) is not None
+        assert s.global_reason(started - 60) == "not_recorded"  # before T0
         assert s.global_reason(saved + 60) is None
         late = w.clock.t - 30
         assert channels(s, R1, late) == {"5g0": (44, "up")}

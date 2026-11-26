@@ -50,6 +50,7 @@ See ``docs/time-machine.md`` §20-§23 for the exact format.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import math
 import re
@@ -345,12 +346,16 @@ class Snapshot:
         self.lost_routers = dict(lost_routers or {})
         self.pending = dict(pending or {})
         self.shifts: list[tuple[float, float]] = []  # review A
-        self.session_starts: dict[str, list[float]] = {}  # review G
+        # review G: per client the moments its list entry is
+        # known again after a capped mark (session start, disconnect, the
+        # next day's flapping mark), sorted
+        self.client_known: dict[str, list[float]] = {}
         self.down: dict[str, list[Mark]] = {}
         self.gaps: dict[str, list[Mark]] = {}
         self.radio: dict[str, list[Mark]] = {}
         self.topo: dict[str, list[Mark]] = {}
         self.lan: list[Mark] = []
+        self._lan_all: dict[int, float] = {}  # review K
         self.ha_gaps: list[Mark] = []
         self.fleet_gaps: list[Mark] = []
         self.flapping: list[Mark] = []
@@ -368,8 +373,8 @@ class Snapshot:
         for table in (self.radio, self.topo):
             for items in table.values():
                 items.sort(key=lambda m: (m.ts, m.seq))
-        for starts in self.session_starts.values():
-            starts.sort()
+        for known in self.client_known.values():
+            known.sort()
 
     def _take(self, mark: Mark) -> None:
         kind, rid = mark.kind, mark.router
@@ -377,9 +382,10 @@ class Snapshot:
             self.client_marks.append(mark)
             if kind == "client_session":
                 self.sessions.append(mark)
-                self.session_starts.setdefault(mark.client, []).append(mark.ts)
             elif kind == "client_flapping":
                 self.flapping.append(mark)
+            if kind in ("client_session", "client_disconnect", "client_flapping"):
+                self.client_known.setdefault(mark.client, []).append(mark.ts)
             return
         self.own.append(mark)
         if kind == "clock_shift":
@@ -457,7 +463,7 @@ class Snapshot:
         for mark in self.down.get(rid, ()):
             if _covers(mark, at):
                 return _value(False, derived=mark.derived)
-        if any(_covers(m, at) for m in self.lan):
+        if any(self._lan_holds(m, rid, at) for m in self.lan):
             return {
                 "value": False,
                 "derived": True,
@@ -469,6 +475,37 @@ class Snapshot:
         if self.segment(rid, at) is None:
             return _unknown(R_NOT_OBSERVED)
         return _value(True, derived=True)
+
+    def _lan_holds(self, lan: Mark, rid: str, at: float) -> bool:
+        """A LAN outage covers ``rid`` at ``at`` (review K): never before the
+        router's own first failed poll. A router with an own gap at ``at``
+        is down since that gap began; any other only once all routers were
+        down, which is the latest start of the routers' own outages and gaps
+        during the LAN outage (1.51.0 dated the LAN outage back to the
+        first single outage; such a mark covers the others only from then)."""
+        if not _covers(lan, at):
+            return False
+        if any(_covers(m, at) for m in self.gaps.get(rid, ())):
+            return True
+        return at >= self._lan_from(lan)
+
+    def _lan_from(self, lan: Mark) -> float:
+        since = self._lan_all.get(lan.seq)
+        if since is None:
+            end = math.inf if lan.is_open or lan.end is None else lan.end
+            since = max(
+                (
+                    m.ts
+                    for table in (self.down, self.gaps)
+                    for marks in table.values()
+                    for m in marks
+                    if m.ts < end
+                    and (m.is_open or (m.end is not None and m.end > lan.ts))
+                ),
+                default=lan.ts,
+            )
+            since = self._lan_all[lan.seq] = max(since, lan.ts)
+        return since
 
     def _blocked(self, reach: Mapping[str, Any]) -> str | None:
         if reach["value"] is False:
@@ -603,10 +640,18 @@ class Snapshot:
                 continue
             # review G: a capped session start may leave the client
             # connected without a session, also past midnight: until the
-            # client's next recorded session after its last capped mark
+            # client is seen again after its last capped mark (a session
+            # start, a disconnect, the next day's flapping mark, which
+            # takes over) or, when that mark was a disconnect (``gone``),
+            # up to the mark's end only
             last = flap.end if flap.end is not None else flap.ts
-            starts = self.session_starts.get(flap.client or "", ())
-            if not any(last < ts <= at for ts in starts):
+            if at <= last:
+                return PART_PARTIAL, R_FLAPPING
+            if flap.params.get("gone"):
+                continue
+            known = self.client_known.get(flap.client or "", [])
+            i = bisect.bisect_right(known, last)
+            if i == len(known) or known[i] > at:
                 return PART_PARTIAL, R_FLAPPING
         return PART_OK, None
 
@@ -618,18 +663,27 @@ class Snapshot:
 def _shift_window(mark: Mark) -> tuple[float, float] | None:
     """The wall time a ``clock_shift`` mark back makes unknown (review A).
 
-    The clock was found ``|shift_s|`` behind where it had been (at a tick,
-    or at a restart against the last write): from ``ts - |shift_s|`` to
-    ``ts + |shift_s|`` the wall time may be occupied twice (the jump lies
-    before ``ts``). The engine also raises ``lost`` up to the old wall time,
-    so everything before stays unknown even without this mark. A jump ahead
-    occupies no time twice: the skipped wall time had no real time in it,
-    nothing to reconstruct there differs from the last poll before it.
+    The clock was found ``|shift_s|`` behind where it had been (at a poll or
+    a tick, or at a restart against the last write). The jump lies within
+    ``lead_s`` before ``ts`` (the time since the check before; 0 at a
+    restart: the new run has nothing before ``ts``), so the wall time from
+    ``ts - lead_s`` up to the old wall clock ``ts + |shift_s|`` may be
+    occupied twice. Only that is unknown: before it the wall time was lived
+    once, and the engine follows no stretch up to the old wall clock, so no
+    mark of the first occupant enters a later stretch. A mark without
+    ``lead_s`` (written before 1.52.0) keeps ``ts - |shift_s|`` as the start.
+    A jump ahead occupies no time twice: the skipped wall time had no real
+    time in it, nothing to reconstruct there differs from the last poll
+    before it.
     """
     shift = float(mark.params.get("shift_s", 0) or 0)
     if shift >= 0:
         return None
-    return mark.ts + shift, mark.ts - shift
+    lead = mark.params.get("lead_s")
+    # both are whole seconds: one more on each side covers the rounding
+    if isinstance(lead, int | float) and lead >= 0:
+        return mark.ts - lead - 1, mark.ts - shift + 1
+    return mark.ts + shift - 1, mark.ts - shift + 1
 
 
 def _first_seen(mark: Mark) -> float:

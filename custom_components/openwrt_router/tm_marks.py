@@ -41,9 +41,9 @@ quota's ``lost`` open (``lost_open``) until its owner books the end
 (:meth:`MarkIndex.close` of the gone seq, or a restart / clear): until then
 :meth:`MarkIndex.effective_lost` says "lost up to now" (D). Infrastructure
 marks of other routers deleted with a removed router raise only those
-routers' watermark (``lost_router``, J). A clock jump back raises the
-infrastructure and client watermarks to the wall time before it
-(:meth:`MarkIndex.note_until`, A).
+routers' watermark (``lost_router``, J). A clock jump back raises no
+watermark (second review, A): only the doubled wall time is unknown, and
+the engine follows no stretch until the wall clock is past it.
 """
 
 from __future__ import annotations
@@ -602,7 +602,7 @@ class MarkIndex:
             day = int(start // DAY_S)
             used = self._day.get((client, day), 0)
             if used >= self.client_day_cap:
-                self._flapping(client, day, start)
+                self._flapping(client, day, start, gone=kind == "client_disconnect")
                 return None
             self._day[(client, day)] = used + 1
         if ref is not None and ref in self._refs:
@@ -629,11 +629,21 @@ class MarkIndex:
         self.changed = True
         return mark
 
-    def _flapping(self, client: str, day: int, ts: float) -> None:
+    def _flapping(self, client: str, day: int, ts: float, *, gone: bool) -> None:
+        """Fold a capped mark into the day's ``client_flapping`` mark.
+
+        ``gone`` (1.52.0, review G): the latest folded mark is a disconnect,
+        the client is not connected after the mark's end (param ``gone``).
+        """
         self.counters["client_day_capped"] += 1
         flap = self.get(self._flap.get((client, day)))
         if flap is not None:
             flap.params["suppressed"] = int(flap.params.get("suppressed", 0)) + 1
+            if ts >= (flap.end or flap.ts):
+                if gone:
+                    flap.params["gone"] = 1
+                else:
+                    flap.params.pop("gone", None)
             flap.end = max(flap.end or flap.ts, ts)
             self.touched.add(flap.seq)
             self.changed = True
@@ -647,7 +657,11 @@ class MarkIndex:
             end=ts,
             end_state=END_CLOSED,
             client=client,
-            params={"suppressed": 1, "cap": self.client_day_cap},
+            params={
+                "suppressed": 1,
+                "cap": self.client_day_cap,
+                **({"gone": 1} if gone else {}),
+            },
         )
         if mark is not None:
             self._flap[(client, day)] = mark.seq
