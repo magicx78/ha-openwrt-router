@@ -87,6 +87,19 @@ export function dialogKey(key: string, shift: boolean, index: number, count: num
 }
 
 /**
+ * The element that has the focus where `node` lives (browser review: the
+ * panel is in a Shadow DOM, where `document.activeElement` is only the shadow
+ * host, so Tab never found the focused button). The node's root is a
+ * ShadowRoot or the Document; both have `activeElement`. No node: the document's.
+ */
+export function activeIn(node: { getRootNode?: () => unknown } | null | undefined,
+  doc: { activeElement: Element | null } | null = typeof document === 'undefined' ? null : document): Element | null {
+  const root = node?.getRootNode?.() as { activeElement?: Element | null } | undefined;
+  if (root && 'activeElement' in root) return root.activeElement ?? null;
+  return doc?.activeElement ?? null;
+}
+
+/**
  * Where the focus goes when the confirmation opens or closes: on open to
  * "Abbrechen" (nothing is exported by a stray Enter), on close back to the
  * button that opened it; else nowhere.

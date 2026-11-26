@@ -24,7 +24,7 @@ import {
 } from './tmTexts.ts';
 import {
   LOCAL_GAP_TEXT, LOCAL_TWICE_TEXT, OTHER_UNKNOWN_MANY, OTHER_UNKNOWN_NONE, OTHER_UNKNOWN_ONE, PART_UNREADABLE_TEXT,
-  RADIOS_NOT_OBSERVED_TEXT, dialogFocus, dialogKey, exportOmittedText, otherSourcesText, otherUnknownText, parseLocalInput,
+  RADIOS_NOT_OBSERVED_TEXT, activeIn, dialogFocus, dialogKey, exportOmittedText, otherSourcesText, otherUnknownText, parseLocalInput,
   partStateText, radiosView, stateLoadAt,
 } from './tmState.ts';
 import { clientTitle, paramsText, timeText } from './tmLogic.ts';
@@ -542,4 +542,30 @@ test('client title: the full name and the pseudonym, else the pseudonym alone', 
   assert.equal(clientTitle(id), id);
   assert.equal(clientTitle(null, 'tablet-kueche'), 'tablet-kueche');
   assert.equal(clientTitle('aa:bb:cc:dd:ee:ff', null), null);
+});
+
+test('export confirmation in a Shadow DOM: the focused button is found in the shadow root, not the document', () => {
+  const a = { name: 'Abbrechen' };
+  const b = { name: 'Exportieren' };
+  const host = { name: 'shadow host' };
+  const shadow = { activeElement: b };
+  const doc = { activeElement: host };
+  const inShadow = { getRootNode: () => shadow };
+  // document.activeElement is the shadow host: the old way found no button
+  assert.equal([a, b].indexOf(doc.activeElement), -1);
+  assert.equal(activeIn(inShadow, doc), b);
+  assert.deepEqual(dialogKey('Tab', false, [a, b].indexOf(activeIn(inShadow, doc)), 2), { action: 'focus', index: 0 });
+  assert.deepEqual(dialogKey('Tab', true, [a, b].indexOf(activeIn(inShadow, doc)), 2), { action: 'focus', index: 0 });
+  shadow.activeElement = a;
+  assert.deepEqual(dialogKey('Tab', false, [a, b].indexOf(activeIn(inShadow, doc)), 2), { action: 'focus', index: 1 });
+  // nothing focused inside the shadow root
+  shadow.activeElement = null;
+  assert.equal(activeIn(inShadow, doc), null);
+  // outside a Shadow DOM the root is the document itself
+  const inDoc = { getRootNode: () => doc };
+  assert.equal(activeIn(inDoc, doc), host);
+  // no dialog yet, or a root without activeElement: the document's
+  assert.equal(activeIn(null, doc), host);
+  assert.equal(activeIn({ getRootNode: () => ({}) }, doc), host);
+  assert.equal(activeIn(undefined, null), null);
 });

@@ -50,7 +50,7 @@ import {
   type ClientNames, type ListState, type RouterNames, type SessionListState,
 } from './tmLogic.ts';
 import {
-  COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE, dialogFocus, dialogKey, exportOmittedText,
+  COMPARE_VIEW_TITLE, EXPORT_CONFIRM_TEXT, EXPORT_FILENAME, STATE_VIEW_TITLE, activeIn, dialogFocus, dialogKey, exportOmittedText,
 } from './tmState.ts';
 import type { CustomWindow, Filters, Mark, Session, SessionFilters, TimelineQuery, TmApi } from './tmTypes';
 import {
@@ -243,7 +243,7 @@ export function ExportBox({ state, onAsk, onConfirm, onCancel, onNext }: {
   }, [state.confirm]);
   const onKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const buttons = Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? []);
-    const step = dialogKey(e.key, e.shiftKey, buttons.indexOf(document.activeElement as HTMLButtonElement), buttons.length);
+    const step = dialogKey(e.key, e.shiftKey, buttons.indexOf(activeIn(dialog.current) as HTMLButtonElement), buttons.length);
     if (!step) return;
     e.preventDefault();
     if (step.action === 'cancel') onCancel();
