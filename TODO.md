@@ -1,6 +1,6 @@
 # TODO — ha-openwrt-router
 
-Stand: 2026-11-26 · Version: v1.52.0
+Stand: 2026-11-26 · Version: v1.52.1
 
 ---
 
@@ -28,16 +28,39 @@ Entwicklerdoku: `docs/time-machine.md`.
       im Configuration Manager die Version auswählen (bisher der Router).
 - [ ] **Bekannte Grenzen von 1.52.0:** Zustand erst ab dem Update auf 1.52.0 bekannt; kein
       WAN-Zustand zum Zeitpunkt; Versionen sind die neuesten behaltenen; Export ohne
-      Client-Verläufe und ohne Client-Filter; nach einem Rücksprung der Uhr keine Aufzeichnung,
-      bis die Uhr die alte Zeit überholt hat, seit 1.52.1 höchstens einen Tag (danach wird
-      alles nach jetzt Datierte gelöscht; ein erst nach über einem Tag korrigierter falscher
-      Rücksprung kostet den echten Verlauf danach).
+      Client-Verläufe und ohne Client-Filter.
+- [ ] **Bekannte Grenzen von 1.52.1 (Uhrsprung, `docs/time-machine.md` 20.3 und 24):**
+      - Rücksprung ohne erklärenden Sprung vor (Start ohne RTC und ohne NTP): nichts wird
+        gelöscht, aber keine Aufzeichnung, bis die Uhr die alte Zeit erreicht oder NTP sie
+        stellt, auch länger als einen Tag (schlimmster Fall: so lange, wie die Uhr zurück
+        stand). Unbekannt bleibt dazu der Rest des Abschnitts, in den die Zeit zurück fiel
+        (meist bis zu einem Tag; im letzten Abschnitt vor dem Stopp bis zum Stopp). Besser
+        ginge es nur mit der Zuordnung von Marken zu Abschnitten (Speicherformat).
+      - Uhr vor, dann zurückgestellt (erklärt): ein Tag ohne Aufzeichnung, dann sind die
+        Werte der Zeit, in der die Uhr vor ging, gelöscht (nur in `.bak`). Ging die Uhr schon
+        beim Start vor (kein gesehener Sprung vor): nicht erklärt, nichts gelöscht, Werte
+        unbekannt, Warten bis zur alten Uhrzeit.
+      - Ein Sprung vor mit einer Marke älter als 14 Tage schützt die doppelte Zeit nicht mehr
+        vor dem Kürzen.
+      - Einträge anderer Module (Audit-Protokoll, Konfigurations-Backups) aus einer Linie vor
+        stehen weiter in der Liste der Zeitleiste.
+      - Uhr mehr als 14 Tage vor: die Aufbewahrung löscht beim nächsten Takt den echten
+        Verlauf davor (schon vor 1.52.1).
+      - P2-2 aus dem Review von PR #72 (nicht behoben, nur hier vermerkt): Client-Marken des
+        zweiten Durchlaufs, die Client Stability bis `tm_clients.TS_SKEW_MAX_S` vor datiert.
+        `_unseen_jump` behandelt sie nicht gesondert: Sie lösen nichts aus, gehen aber seit
+        P2-1 (behoben: das Ende der doppelten Zeit kommt aus den Marken aller Quoten, Auslöser
+        bleibt die Infrastruktur) in das Ende der doppelten Zeit ein.
 - [ ] **Offene Befunde des erweiterten Orakels (zweites Review 1.52.0)**, nur bei Startwerten
       außerhalb der festen, zum großen Teil schon vor dem Review vorhanden:
       - nach einem unsauberen Stopp fehlt ein Uplink-/Rollenwechsel, der vor dem letzten
         Schreiben zuerst gesehen und erst danach bestätigt wurde (seine Marke geht verloren);
       - zwei Funks auf demselben Band: ein Kanaltausch wird dem falschen Funk zugeordnet;
-      - `gap_s` einer unsauberen `ha_gap` kann nach einem Uhrsprung negativ sein.
+      - `gap_s` einer unsauberen `ha_gap` kann nach einem Uhrsprung negativ sein;
+      - `radiooff+restartany+jumpback+jumpfwd+eval`, Startwert 41: Erreichbarkeit, Rolle,
+        Uplink und Funk gelten an einzelnen Zeitpunkten als bekannt, ohne dass sie beobachtet
+        wurden (`*_known_without_observation`); ebenso mit dem Code von 1.52.0 und vor dem
+        Review von PR #72, also nicht durch 1.52.1 entstanden. Offen.
 - [ ] **Bekannte Grenzen von Phase A:** liest nur, was die Module behalten (Ausfälle und
       Kanalwechsel vor einem HA-Neustart fehlen bis Phase B); keine Client-Marken;
       Konfigurationsänderungen nur als Anzahl und Referenz; mehr Marken mit demselben
