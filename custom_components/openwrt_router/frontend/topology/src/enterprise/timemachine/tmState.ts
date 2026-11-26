@@ -561,6 +561,38 @@ export function stateLoadAt(live: boolean, input: string, nowS: number): { at: n
   return { at, input: toLocalInput(at) };
 }
 
+// ── Loading when a view opens (1.52.1) ───────────────────────────────────
+
+/** The pause after a change of a field (typing) before "Zustand" or "Vergleich" loads. */
+export const TM_DEBOUNCE_MS = 400;
+
+/**
+ * When a view loads after its fields or its visibility changed: at once when
+ * it has just been opened (its prefilled fields need no typing pause; browser
+ * review 1.52.0: until the pause ended the view said "wählen"), after
+ * TM_DEBOUNCE_MS for a change while it is shown, and not now on a hidden page
+ * (null: the load is due and runs when the page is shown again).
+ */
+export function loadDelay(opening: boolean, visible: boolean): number | null {
+  if (!visible) return null;
+  return opening ? 0 : TM_DEBOUNCE_MS;
+}
+
+/**
+ * What a view shows before its first answer (no answer, no error): "lädt"
+ * while a load runs or while every field holds a moment (the load is due);
+ * the hint "wählen" only when a field is really empty (cleared, or no
+ * complete date); nothing when a field holds a time the clock skips (the
+ * field shows that error itself).
+ */
+export function waitingBody(values: readonly string[], loading: boolean): 'loading' | 'pick' | 'none' {
+  if (loading) return 'loading';
+  const parsed = values.map(parseLocalInput);
+  if (parsed.some(p => p.ts === null && p.error === null)) return 'pick';
+  if (parsed.some(p => p.error !== null)) return 'none';
+  return 'loading';
+}
+
 // ── Loaded state of "Zustand" ────────────────────────────────────────────
 
 export interface StateView {

@@ -28,6 +28,8 @@ import {
   partStateText, radiosView, stateLoadAt,
 } from './tmState.ts';
 import { clientTitle, paramsText, timeText } from './tmLogic.ts';
+// 1.52.1: a namespace import, so a missing export fails its own test only
+import * as TS from './tmState.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const F = JSON.parse(readFileSync(join(here, 'tmFixtureState.json'), 'utf8'));
@@ -639,4 +641,38 @@ test('export confirmation: a focus fallen to <body> (a tap on the text) is lost;
   assert.deepEqual(dialogKey('Tab', false, -1, 2), { action: 'focus', index: 0 });
   assert.deepEqual(dialogKey('Tab', true, -1, 2), { action: 'focus', index: 1 });
   assert.deepEqual(dialogKey('Escape', false, -1, 2), { action: 'cancel' });
+});
+
+// ── 1.52.1: the views load when they open, the hint only for an empty field ──
+
+test('opening a view loads at once; typing waits a short pause; a hidden page loads when it is shown', () => {
+  // the first load of an opened view does not wait for a typing pause (browser review 1.52.0:
+  // until then the view showed "Einen Zeitpunkt wählen." under prefilled fields)
+  assert.equal(TS.loadDelay(true, true), 0);
+  assert.equal(TS.loadDelay(false, true), TS.TM_DEBOUNCE_MS);
+  assert.equal(TS.TM_DEBOUNCE_MS, 400);
+  // a hidden page loads nothing now; the load is due and runs when the page is shown
+  assert.equal(TS.loadDelay(true, false), null);
+  assert.equal(TS.loadDelay(false, false), null);
+});
+
+test('before the first answer: the hint only for a really empty field, else "lädt" or the field error', () => {
+  const now = toLocalInput(F.state.body.at);
+  // prefilled fields (now; the last 24 hours): a load is due, never the hint
+  assert.equal(TS.waitingBody([now], false), 'loading');
+  assert.equal(TS.waitingBody([toLocalInput(F.state.body.at - 86_400), now], false), 'loading');
+  assert.equal(TS.waitingBody([now], true), 'loading');
+  // a field the browser reports empty (cleared, or not a complete date): the hint
+  assert.equal(TS.waitingBody([''], false), 'pick');
+  assert.equal(TS.waitingBody(['  '], false), 'pick');
+  assert.equal(TS.waitingBody(['', now], false), 'pick');
+  assert.equal(TS.waitingBody([now, ''], false), 'pick');
+  assert.equal(TS.waitingBody(['2027-02-30T10:00'], false), 'pick');
+  // a time the clock skips: the field shows its own error, the body nothing more
+  assert.equal(TS.waitingBody(['2027-03-28T02:30'], false), 'none');
+  assert.equal(TS.waitingBody([now, '2027-03-28T02:30'], false), 'none');
+  // an empty field wins over a skipped time in the other one: something is still to be chosen
+  assert.equal(TS.waitingBody(['', '2027-03-28T02:30'], false), 'pick');
+  // a load already running shows "lädt" even with a field just cleared (its answer still comes)
+  assert.equal(TS.waitingBody([''], true), 'loading');
 });

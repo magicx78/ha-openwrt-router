@@ -29,7 +29,7 @@ import {
   clientRowText, compareReducer, compareRows, compareSummary, configTitle, deltaText, fromLocalInput, globalReasonText,
   hourText, incidentTitle, moreClientsQuery, otherSourcesText, parseLocalInput, partStateText, radioBandText, radioView,
   radiosView, reachableView, roleView, routerName, sinceText, stateLoadAt, stateReasonText, stateReducer, toLocalInput, uplinkView,
-  utilizationText, wanText,
+  loadDelay, utilizationText, waitingBody, wanText,
   type CompareRow, type CompareView, type StateView, type ValueView,
 } from './tmState.ts';
 import type {
@@ -40,7 +40,6 @@ import {
 } from './tmUi';
 import { errorInfo } from './tmLogic.ts';
 
-const DEBOUNCE_MS = 400;
 const CHECK_MS = Math.min(15_000, POLL_MIN_MS);
 
 // ── Pieces ───────────────────────────────────────────────────────────────
@@ -223,7 +222,10 @@ export function StateScreen({
     if (a === null) {
       if (state.error !== null && !atError) return <ErrorBox of="state" error={state.error} onRetry={onRefresh} />;
       if (atError) return null;
-      return state.loading ? <Spinner text={STATE_LOADING_TEXT} /> : <div className="cfg-hint">{STATE_PICK_TEXT}</div>;
+      // 1.52.1: the hint only for an empty field; the prefilled one loads (it opened the view)
+      const wait = waitingBody(live ? [] : [input], state.loading);
+      if (wait === 'none') return null;
+      return wait === 'loading' ? <Spinner text={STATE_LOADING_TEXT} /> : <div className="cfg-hint">{STATE_PICK_TEXT}</div>;
     }
     const error = state.error !== null && !atError && <ErrorBox of="state" error={state.error} onRetry={onRefresh} />;
     if (a.status === 'off') return <>{error}<OffBox /></>;
@@ -462,7 +464,10 @@ export function CompareScreen({
     if (a === null) {
       if (state.error !== null && !fieldErr) return <ErrorBox of="compare" error={state.error} onRetry={onRefresh} />;
       if (fieldErr) return null;
-      return state.loading ? <Spinner text={COMPARE_LOADING_TEXT} /> : <div className="cfg-hint">{COMPARE_PICK_TEXT}</div>;
+      // 1.52.1: the hint only for an empty field; the prefilled ones load (they opened the view)
+      const wait = waitingBody([from, until], state.loading);
+      if (wait === 'none') return null;
+      return wait === 'loading' ? <Spinner text={COMPARE_LOADING_TEXT} /> : <div className="cfg-hint">{COMPARE_PICK_TEXT}</div>;
     }
     const error = state.error !== null && !fieldErr && <ErrorBox of="compare" error={state.error} onRetry={onRefresh} />;
     if (a.status === 'off') return <>{error}<OffBox /></>;
@@ -582,6 +587,43 @@ function routersOf(answers: (StateAnswer | null | undefined)[], prev: RouterName
   return next;
 }
 
+type Flag = { current: boolean };
+
+/**
+ * The load of an effect of "Zustand" or "Vergleich" (1.52.1): at once when
+ * the view has just been opened, after a short pause for a changed field, on
+ * a hidden page not now but when it is shown (`due`). Returns the cleanup.
+ */
+function openOrChange(active: boolean, opened: Flag, due: Flag, load: () => void): (() => void) | undefined {
+  if (!active) {
+    opened.current = false;
+    due.current = false;
+    return undefined;
+  }
+  const delay = loadDelay(!opened.current, pageVisible());
+  opened.current = true;
+  if (delay === null) {
+    due.current = true;
+    return undefined;
+  }
+  if (delay === 0) {
+    load();
+    return undefined;
+  }
+  const id = setTimeout(load, delay);
+  return () => clearTimeout(id);
+}
+
+/** A load that was due on a hidden page runs when the page is shown again. */
+function loadWhenShown(active: boolean, due: Flag, load: () => void): (() => void) | undefined {
+  if (!active || typeof document === 'undefined') return undefined;
+  const onShow = () => {
+    if (due.current && pageVisible()) load();
+  };
+  document.addEventListener('visibilitychange', onShow);
+  return () => document.removeEventListener('visibilitychange', onShow);
+}
+
 /** "Zustand": loads only while `active`; reloads every 60 s only while "Jetzt" is chosen. */
 export function StateContainer({ api, active, viewSwitch, isAdmin = false, onShowWindow }: {
   api: TmApi; active: boolean; viewSwitch?: React.ReactNode; isAdmin?: boolean; onShowWindow: (w: CustomWindow) => void;
@@ -593,10 +635,13 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
   const [state, dispatch] = useReducer(stateReducer, STATE_INIT);
   const seq = useRef(0);
   const lastMs = useRef<number | null>(null);
+  const opened = useRef(false);
+  const due = useRef(false);
   const ref = useRef({ input, live, routerId, active, state, isAdmin });
   ref.current = { input, live, routerId, active, state, isAdmin };
 
   const load = useCallback(() => {
+    due.current = false;
     if (!api.state) return;
     const r = ref.current;
     // "Jetzt" asks for the server's now (no future moment by a clock difference),
@@ -629,14 +674,12 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
     );
   }, [api]);
 
-  // a change loads after a short pause (typing in the field); only while shown.
-  // Under "Jetzt" the field follows the load, so its value is no reason to load.
+  // Opening the view loads at once (1.52.1), a change after a short pause
+  // (typing in the field); only while shown. Under "Jetzt" the field follows
+  // the load, so its value is no reason to load.
   const typed = live ? null : input;
-  useEffect(() => {
-    if (!active || !pageVisible()) return;
-    const id = setTimeout(load, DEBOUNCE_MS);
-    return () => clearTimeout(id);
-  }, [typed, live, routerId, active, load]);
+  useEffect(() => openOrChange(active, opened, due, load), [typed, live, routerId, active, load]);
+  useEffect(() => loadWhenShown(active, due, load), [active, load]);
 
   // "Jetzt": like the timeline, at most every 60 s while visible
   useEffect(() => {
@@ -684,10 +727,13 @@ export function CompareContainer({ api, active, viewSwitch, isAdmin = false, onS
   const [showSame, setShowSame] = useState<Record<string, boolean>>({});
   const [state, dispatch] = useReducer(compareReducer, COMPARE_INIT);
   const seq = useRef(0);
+  const opened = useRef(false);
+  const due = useRef(false);
   const ref = useRef({ from, until, routerId });
   ref.current = { from, until, routerId };
 
   const load = useCallback(() => {
+    due.current = false;
     if (!api.compare) return;
     const t1 = fromLocalInput(ref.current.from);
     const t2 = fromLocalInput(ref.current.until);
@@ -700,11 +746,9 @@ export function CompareContainer({ api, active, viewSwitch, isAdmin = false, onS
     );
   }, [api]);
 
-  useEffect(() => {
-    if (!active || !pageVisible()) return;
-    const id = setTimeout(load, DEBOUNCE_MS);
-    return () => clearTimeout(id);
-  }, [from, until, routerId, active, load]);
+  // opening the view loads at once (1.52.1), a change after a short pause
+  useEffect(() => openOrChange(active, opened, due, load), [from, until, routerId, active, load]);
+  useEffect(() => loadWhenShown(active, due, load), [active, load]);
 
   useEffect(() => {
     setRouters(prev => routersOf([state.answer?.before, state.answer?.after], prev));

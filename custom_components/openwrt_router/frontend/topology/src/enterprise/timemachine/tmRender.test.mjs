@@ -1195,6 +1195,42 @@ test('the containers of the new views render their first state without touching 
   // the tab mounts only the timeline at first: the other views are not even rendered
   const tab = renderToStaticMarkup(h(M.TimeMachineView, { api, isAdmin: true }));
   assert.ok(!tab.includes('datetime-local'));
+  // 1.52.1: the first state of an opened view with its prefilled fields says "lädt", not "wählen"
+  assert.ok(text(st).includes(M.TS.STATE_LOADING_TEXT));
+  assert.ok(!text(st).includes(M.TS.STATE_PICK_TEXT));
+  assert.ok(text(cmp).includes(M.TS.COMPARE_LOADING_TEXT));
+  assert.ok(!text(cmp).includes(M.TS.COMPARE_PICK_TEXT));
+});
+
+test('1.52.1: before the first answer the hint shows only for an empty field (browser review 1.52.0)', () => {
+  const idle = M.TS.STATE_INIT;
+  const filled = text(stateHtml(idle));
+  assert.ok(filled.includes(M.TS.STATE_LOADING_TEXT));
+  assert.ok(!filled.includes(M.TS.STATE_PICK_TEXT));
+  const empty = text(stateHtml(idle, { input: '' }));
+  assert.ok(empty.includes(M.TS.STATE_PICK_TEXT));
+  assert.ok(!empty.includes(M.TS.STATE_LOADING_TEXT));
+  // a skipped time: only the field's own error, no hint, no spinner
+  const gap = stateHtml(idle, { input: '2027-03-28T02:30' });
+  assert.ok(text(gap).includes(M.TS.LOCAL_GAP_TEXT));
+  assert.ok(!text(gap).includes(M.TS.STATE_PICK_TEXT));
+  assert.ok(!text(gap).includes(M.TS.STATE_LOADING_TEXT));
+
+  const cIdle = M.TS.COMPARE_INIT;
+  const both = text(compareHtml(cIdle));
+  assert.ok(both.includes(M.TS.COMPARE_LOADING_TEXT));
+  assert.ok(!both.includes(M.TS.COMPARE_PICK_TEXT));
+  for (const extra of [{ from: '' }, { until: '' }, { from: '', until: '' }]) {
+    const t = text(compareHtml(cIdle, extra));
+    assert.ok(t.includes(M.TS.COMPARE_PICK_TEXT), JSON.stringify(extra));
+    assert.ok(!t.includes(M.TS.COMPARE_LOADING_TEXT), JSON.stringify(extra));
+  }
+  const cGap = text(compareHtml(cIdle, { until: '2027-03-28T02:30' }));
+  assert.ok(cGap.includes(M.TS.LOCAL_GAP_TEXT));
+  assert.ok(!cGap.includes(M.TS.COMPARE_PICK_TEXT));
+  assert.ok(!cGap.includes(M.TS.COMPARE_LOADING_TEXT));
+  // an answer stays shown after a field is cleared (the hint replaces no result)
+  assert.ok(!text(stateHtml(stView('state'), { input: '' })).includes(M.TS.STATE_PICK_TEXT));
 });
 
 // ── foreign tabs: an entry selects, without one they start as before ────
