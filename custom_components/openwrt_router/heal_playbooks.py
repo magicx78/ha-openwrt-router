@@ -190,6 +190,10 @@ ROLES: Final = hp.ROLES
 SEVERITIES: Final = hp.SEVERITIES
 
 _COUNT_MAX: Final = 1_000_000
+_TS_MAX: Final = 1e11
+# Restarts in 24 h from which a running service without an observed loop is
+# "unclear" rather than healthy (never a fault on their own).
+RESTARTS_UNCLEAR: Final = 2
 _ITER_MAX: Final = 64
 
 
@@ -231,6 +235,12 @@ def _fraction(value: Any) -> float | None:
         and math.isfinite(value)
         and 0.0 <= float(value) <= 1.0
     ):
+        return float(value)
+    return None
+
+
+def _timestamp(value: Any) -> float | None:
+    if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= _TS_MAX:
         return float(value)
     return None
 
@@ -280,9 +290,12 @@ class IncidentInput:
 
     Every value is checked against a closed set; anything else becomes
     None ("unknown"), never an error and never a guess. ``service``: the
-    service a ``system_service_restart`` names (its subject). ``temporal_only``
-    is set to True when it was not given and the only source family is the
-    link to a root (``correlation``).
+    service a ``system_service_restart`` names (its subject).
+    ``temporal_only`` is True whenever no family other than the link to a
+    root (``correlation``) is observed, whatever value was given (review of
+    PR #79: a time-only link never becomes evidence by a ``False``).
+    ``started_at``: when the incident started (seconds; compared with a
+    configuration change time, never with a clock).
     """
 
     incident_type: Any = None
@@ -300,6 +313,7 @@ class IncidentInput:
     affected_clients: Any = None
     occurrences: Any = None
     reopen_count: Any = None
+    started_at: Any = None
 
     def __post_init__(self) -> None:
         """Normalise (never raises)."""
@@ -318,13 +332,10 @@ class IncidentInput:
         put(self, "is_root", _bool(self.is_root))
         put(self, "evidence_fresh", _bool(self.evidence_fresh))
         temporal = _bool(self.temporal_only)
-        if (
-            temporal is None
-            and self.source_families
-            and (self.source_families <= LINK_FAMILIES)
-        ):
-            temporal = True
+        if not self.source_families - LINK_FAMILIES:
+            temporal = True  # nothing but the link (or nothing) observed
         put(self, "temporal_only", temporal)
+        put(self, "started_at", _timestamp(self.started_at))
         put(self, "affected_clients", _count(self.affected_clients))
         put(self, "occurrences", _count(self.occurrences))
         put(self, "reopen_count", _count(self.reopen_count))
@@ -354,16 +365,19 @@ class ServiceFact:
 
     @property
     def faulty(self) -> bool | None:
-        """Enabled and down or unstable (None: not known)."""
+        """Enabled and down or in an observed restart loop (None: unclear).
+
+        A restart count alone is not a fault fact (review of PR #79): a
+        running service with :data:`RESTARTS_UNCLEAR` or more restarts in 24 h
+        and no observed loop is unclear (None), fewer restarts are healthy.
+        """
         if self.enabled is not True:
             return None if self.enabled is None else False
-        if (
-            self.running is False
-            or self.crash_loop is True
-            or (self.restarts_24h is not None and self.restarts_24h >= 2)
-        ):
+        if self.running is False or self.crash_loop is True:
             return True
         if self.running is True and self.crash_loop is False:
+            if self.restarts_24h is not None and self.restarts_24h >= RESTARTS_UNCLEAR:
+                return None
             return False
         return None
 
@@ -479,10 +493,12 @@ class ConfigFact:
     change_risk: Any = None  # CHANGE_RISKS
     restore_check: Any = None  # RESTORE_CHECKS (dry run)
     backup_present: Any = None
+    changed_at: Any = None  # when the change was seen (seconds; None: unknown)
 
     def __post_init__(self) -> None:
         """Normalise."""
         put = object.__setattr__
+        put(self, "changed_at", _timestamp(self.changed_at))
         put(self, "version_known", _bool(self.version_known))
         spec = hc.CATALOG["config.restore"].params[0]
         put(
@@ -1433,7 +1449,25 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "wan_link_down": "Die WAN-Leitung ist physisch unten (Kabel, Modem, Anschluss).",
         "wan_no_address": "WAN ist verbunden, hat aber keine Adresse vom Anbieter.",
         "dns_only": "Das Internet ist erreichbar, nur DNS schlägt fehl.",
-        "local_wan_fault": "Die WAN-Schnittstelle des Routers ist gestört.",
+        "wan_interface_down": (
+            "Die Leitung ist da, die WAN-Schnittstelle aber unten; ob der Router oder "
+            "der Anbieter (Anmeldung, Adressvergabe) die Ursache ist, ist unbekannt."
+        ),
+        "pool_usage_unknown": (
+            "Die Belegung des Adressbereichs ist unbekannt; ein voller Bereich ist "
+            "nicht ausgeschlossen."
+        ),
+        "drift_hint": (
+            "Eine Konfigurationsänderung im betroffenen Bereich ist belegt; ihr "
+            "Zeitpunkt bindet sie aber nicht sicher an den Vorfall. Nur ein Hinweis."
+        ),
+        "drift_hint_outside_measured": (
+            "Eine Konfigurationsänderung ist belegt, die Messung legt die Ursache "
+            "aber außerhalb des Routers; das ursprüngliche Playbook bleibt."
+        ),
+        "services_capability_unknown": (
+            "Nicht bestätigt, dass dieser Router seine Dienste meldet."
+        ),
         "drift_in_area": "Eine belegte Konfigurationsänderung betrifft den gestörten Bereich.",
         "weak_signal": "Das Signal des Clients ist schwach.",
         "roaming_flapping": "Der Client wechselt ständig den Access Point.",
@@ -1468,16 +1502,35 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
             "Empfohlen: Netz und Adresseinstellung des Clients prüfen."
         ),
         "rec_radio_restart_manual_with_approval": (
-            "Empfohlen: den Funk von Hand und mit Blick auf die Clients neu starten; "
-            "die Aktion ist im Katalog gesperrt."
+            "Empfohlen: den Funk nach Freigabe von Hand und mit Blick auf die "
+            "Clients neu starten."
+        ),
+        "rec_radio_carries_mgmt_path": (
+            "Kein Neustart von Hand empfohlen: über diesen Funk läuft der Weg von "
+            "Home Assistant zum Router; erst einen anderen Weg sichern."
+        ),
+        "rec_radio_mgmt_path_unknown": (
+            "Kein Neustart von Hand empfohlen: unbekannt, ob der Weg von Home "
+            "Assistant zum Router über diesen Funk läuft; das zuerst klären."
+        ),
+        "rec_identify_radio": (
+            "Empfohlen: zuerst feststellen, welcher Funk betroffen ist."
+        ),
+        "rec_check_upstream_path": (
+            "Empfohlen: den Weg nach oben prüfen (Uplink, vorgelagerter Router); ein "
+            "Neustart auf diesem Router würde nichts beheben."
+        ),
+        "rec_review_diff": (
+            "Hinweis: eine Konfigurationsänderung im betroffenen Bereich ist belegt; "
+            "den Vergleich prüfen."
         ),
         "rec_check_channel_and_interference": (
             "Empfohlen: Kanalwahl und Störquellen prüfen (WiFi RF)."
         ),
         "rec_observe_radio": "Empfohlen: den Funk weiter beobachten.",
         "rec_check_uplink_by_hand": (
-            "Empfohlen: den Uplink von Hand prüfen; ein Eingriff würde abhängige "
-            "Router mitreißen."
+            "Empfohlen: von Hand prüfen, ob hier ein Uplink liegt oder andere Router "
+            "daran hängen, bevor jemand eingreift."
         ),
         "rec_check_cable_and_peer": (
             "Empfohlen: Kabel, Stecker und Gegenstelle des Ports prüfen."
@@ -1544,8 +1597,29 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
             "wäre danach nicht mehr erreichbar."
         ),
         "wont_restart_radio_with_dependants": (
-            "Kein Funk-Neustart: abhängige Router oder der Weg von Home Assistant "
-            "hängen daran."
+            "Kein Funk-Neustart: andere Router hängen an diesem Funk."
+        ),
+        "wont_restart_uplink_unknown": (
+            "Kein Funk-Neustart: unbekannt, ob dieser Funk einen WLAN-Uplink trägt."
+        ),
+        "wont_restart_radio_dependants_unknown": (
+            "Kein Funk-Neustart: unbekannt, ob andere Router an diesem Funk hängen."
+        ),
+        "wont_restart_radio_on_mgmt_path": (
+            "Kein Funk-Neustart: über diesen Funk läuft der Weg von Home Assistant "
+            "zum Router."
+        ),
+        "wont_restart_radio_mgmt_unknown": (
+            "Kein Funk-Neustart: unbekannt, ob der Weg von Home Assistant zum Router "
+            "über diesen Funk läuft."
+        ),
+        "wont_restart_capability_unknown": (
+            "Kein Neustart vorgeschlagen: nicht bestätigt, dass dieser Router seine "
+            "Dienste meldet (Fähigkeit unbekannt)."
+        ),
+        "wont_restart_pool_unknown": (
+            "Kein Neustart vorgeschlagen: die Belegung des Adressbereichs ist "
+            "unbekannt, ein voller Bereich ist nicht ausgeschlossen."
         ),
         "wont_restart_radio_disabled": (
             "Kein Funk-Neustart: die Aktion ist im Katalog gesperrt (auf der Flotte "
@@ -1556,8 +1630,13 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
             "Keine Schnittstelle wird ab- und angeschaltet; nur eine Empfehlung."
         ),
         "wont_cycle_uplink_or_mgmt": (
-            "Kein Ab- und Anschalten: Uplink oder Management-Weg; der Router wäre "
-            "danach vielleicht nicht mehr erreichbar."
+            "Kein Ab- und Anschalten: Uplink-, WAN- oder Management-Schnittstelle, "
+            "oder andere Router hängen daran; der Router wäre danach vielleicht "
+            "nicht mehr erreichbar."
+        ),
+        "wont_cycle_role_unknown": (
+            "Kein Ab- und Anschalten: unbekannt, ob die Schnittstelle Uplink, WAN "
+            "oder Management-Weg ist oder andere Router daran hängen."
         ),
         "wont_reboot": "Kein Router-Neustart als Standardlösung.",
         "wont_restore_automatically": (
@@ -1595,8 +1674,8 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "never_restart_wpad": "Nie ein Neustart von wpad.",
         "never_cycle_uplink_or_mgmt": (
-            "Nie eine Uplink- oder Management-Schnittstelle automatisch ab- und "
-            "anschalten."
+            "Nie eine Uplink-, WAN- oder Management-Schnittstelle automatisch ab- "
+            "und anschalten."
         ),
         "never_automatic_interface_change": (
             "Nie eine Schnittstelle automatisch ändern; nur Empfehlung."
@@ -1747,13 +1826,22 @@ class MatchStatus(StrEnum):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Match:
-    """At most one playbook for an incident, with the reason as a code."""
+    """At most one playbook for an incident, with the reason as a code.
+
+    ``drift_overlay``: Playbook F replaces ``original_playbook_id`` (a
+    diff-proven change in the incident's area, made before the incident
+    started); :func:`assess` still lets the original playbook keep the case
+    when it measures the cause as outside. ``drift_hint``: such a change is
+    proven, but its time does not tie it to the incident; it is a hint only.
+    """
 
     status: MatchStatus
     playbook_id: str | None
     reason: str
     missing: tuple[str, ...] = ()  # capabilities this router lacks
     drift_overlay: bool = False
+    drift_hint: bool = False
+    original_playbook_id: str | None = None
 
 
 def _no(reason: str) -> Match:
@@ -1776,6 +1864,30 @@ def _drift_in_area(inc: IncidentInput, ev: Evidence) -> bool:
     )
 
 
+def _drift_before_incident(inc: IncidentInput, ev: Evidence) -> bool:
+    """The proven change is known to predate the incident's start."""
+    changed, started = ev.config.changed_at, inc.started_at
+    return changed is not None and started is not None and changed < started
+
+
+def _support(pb: Playbook, evidence: Evidence) -> tuple[str | None, tuple[str, ...]]:
+    """Why ``pb`` does not fit this router (None: it fits), and what is missing."""
+    if (
+        evidence.role in ROLES
+        and evidence.role != "unknown"
+        and (evidence.role not in pb.roles)
+    ):
+        return "role_not_supported", ()
+    missing = tuple(
+        cap
+        for cap in pb.required_capabilities
+        if evidence.capabilities.get(cap) is False
+    )
+    if missing:
+        return "capability_missing", missing
+    return None, ()
+
+
 def match(incident: IncidentInput, evidence: Evidence) -> Match:
     """At most one playbook for ``incident`` on the router of ``evidence``.
 
@@ -1784,16 +1896,20 @@ def match(incident: IncidentInput, evidence: Evidence) -> Match:
     1. not an :class:`IncidentInput` / :class:`Evidence`: ``PlaybookError``;
     2. an unknown incident type: no playbook;
     3. not a root (``is_root`` False), or root unknown (None): no playbook;
-    4. a link by time only (``temporal_only`` True): no playbook;
+    4. a link by time only (``temporal_only`` True, always so when nothing
+       but the link is observed): no playbook;
     5. a fleet-wide incident: no playbook (one router only);
     6. the type has no playbook (load, events, coverage, security): its
        reason; ``system_service_restart`` goes by its service (dnsmasq A,
        odhcpd B, hostapd/wpad C, else none);
-    7. a diff-proven configuration change in an area the incident touches:
-       Playbook F instead (the drift overlay);
-    8. the playbook does not fit the router's known role, or the router
+    7. the playbook does not fit the router's known role, or the router
        lacks a required capability (False; unknown is not missing):
-       UNSUPPORTED with the reason.
+       UNSUPPORTED with the reason;
+    8. a diff-proven configuration change in an area the incident touches,
+       seen before the incident started, on a router Playbook F fits:
+       Playbook F instead (the drift overlay; :func:`assess` hands the case
+       back when the original playbook measures the cause outside). A proven
+       change with an unknown or later time is a hint only.
     """
     if type(incident) is not IncidentInput or type(evidence) is not Evidence:
         raise PlaybookError("invalid input")
@@ -1816,40 +1932,32 @@ def match(incident: IncidentInput, evidence: Evidence) -> Match:
         found = _TYPE_PLAYBOOK.get(inc.incident_type)
     if found is None:
         return _no("service_not_covered")
-    overlay = _drift_in_area(inc, evidence)
-    if overlay:
-        found = "drift_recovery"
-    pb = PLAYBOOKS[found]
-    reason = "drift_overlay" if overlay else "matched"
+    reason, missing = _support(PLAYBOOKS[found], evidence)
+    if reason is not None:
+        return Match(
+            status=MatchStatus.UNSUPPORTED,
+            playbook_id=found,
+            reason=reason,
+            missing=missing,
+        )
+    drift = _drift_in_area(inc, evidence)
     if (
-        evidence.role in ROLES
-        and evidence.role != "unknown"
-        and (evidence.role not in pb.roles)
+        drift
+        and _drift_before_incident(inc, evidence)
+        and _support(PLAYBOOKS["drift_recovery"], evidence)[0] is None
     ):
         return Match(
-            status=MatchStatus.UNSUPPORTED,
-            playbook_id=found,
-            reason="role_not_supported",
-            drift_overlay=overlay,
-        )
-    missing = tuple(
-        cap
-        for cap in pb.required_capabilities
-        if evidence.capabilities.get(cap) is False
-    )
-    if missing:
-        return Match(
-            status=MatchStatus.UNSUPPORTED,
-            playbook_id=found,
-            reason="capability_missing",
-            missing=missing,
-            drift_overlay=overlay,
+            status=MatchStatus.MATCHED,
+            playbook_id="drift_recovery",
+            reason="drift_overlay",
+            drift_overlay=True,
+            original_playbook_id=found,
         )
     return Match(
         status=MatchStatus.MATCHED,
         playbook_id=found,
-        reason=reason,
-        drift_overlay=overlay,
+        reason="matched",
+        drift_hint=drift,
     )
 
 
@@ -2187,10 +2295,100 @@ def _service_steps(run: _Run, step_id: str, svc: ServiceFact) -> None:
         run.step(step_id, False)
 
 
+# --- Where the cause lies ----------------------------------------------------
+
+# Causes under which a playbook may call the fault "on this router" (False).
+# No cause at all is always allowed; any other cause Network Intelligence
+# names (a root's cause inherited, a client-side cause, a configuration
+# cause) never yields False: it gives True when it is clearly outside, else
+# None (review of PR #79). Network Intelligence's own hypotheses for the
+# incidents of B are ``dhcp_server``, ``pool_exhausted``, ``vlan``,
+# ``static_ip`` and ``wrong_network``; ``system_service_restart`` carries no
+# cause of its own.
+INSIDE_CAUSES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "dns_recovery": frozenset(),
+        "dhcp_recovery": frozenset({"dhcp_server"}),
+        "radio_recovery": frozenset({"radio_restart"}),
+        "interface_recovery": frozenset(),
+        "wan_recovery": frozenset(),
+        "drift_recovery": frozenset(
+            {"dhcp_server", "radio_restart", "vlan", "uplink_config"}
+        ),
+        "client_recovery": frozenset(),
+    }
+)
+# A root on the far side: the router's upstream is gone.
+UPSTREAM_CAUSES: Final = frozenset(
+    {"uplink_down", "lan_unreachable", "router_unreachable"}
+)
+CLIENT_SIDE_CAUSES: Final = frozenset(
+    {
+        "client_side",
+        "client_driver",
+        "client_power_save",
+        "psk_wrong",
+        "sae_mismatch",
+        "wrong_network",
+        "static_ip",
+        "mac_filter",
+    }
+)
+RF_OUTSIDE_CAUSES: Final = frozenset({"interference", "power_supply"})
+# Causes that put the fault outside this router, per playbook (True).
+OUTSIDE_CAUSES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "dns_recovery": UPSTREAM_CAUSES | {"wan_down"},
+        "dhcp_recovery": UPSTREAM_CAUSES | CLIENT_SIDE_CAUSES | {"ip_conflict"},
+        "radio_recovery": RF_OUTSIDE_CAUSES,
+        "interface_recovery": frozenset(),
+        "wan_recovery": frozenset(),
+        "drift_recovery": frozenset(),
+        "client_recovery": CLIENT_SIDE_CAUSES,
+    }
+)
+
+
+def _settle(playbook_id: str, inc: IncidentInput, raw: bool | None) -> bool | None:
+    """The derived location checked against the cause Network Intelligence
+    names: an outside cause gives True; False only with no cause or one of
+    the playbook's :data:`INSIDE_CAUSES`; otherwise unknown (None)."""
+    cause = inc.cause
+    if cause is not None and cause in OUTSIDE_CAUSES[playbook_id]:
+        return True
+    if raw is False and cause is not None and cause not in INSIDE_CAUSES[playbook_id]:
+        return None
+    return raw
+
+
+def _may_restart(run: _Run, svc: ServiceFact, outside: bool | None) -> bool:
+    """Every fact a service-restart proposal needs is known and favourable.
+
+    Enabled and down or in an observed loop; the cause on this router; not a
+    link by time only and at least one observed family; and the router's
+    ``data.services`` capability explicitly True (unknown: recommendation
+    only, decided by the master on PR #79).
+    """
+    inc = run.inc
+    if (
+        svc.faulty is not True
+        or outside is not False
+        or inc.temporal_only is not False
+        or inc.observed_families < 1
+    ):
+        return False
+    if run.ev.capabilities.get("data.services") is not True:
+        run.why("services_capability_unknown")
+        run.wont("wont_restart_capability_unknown")
+        return False
+    return True
+
+
 # --- A: DNS -----------------------------------------------------------------
 
 
 _OUTSIDE_CHAIN_STAGES: Final = ("gateway", "wan", "internet")
+_NOT_HEALTHY: Final = ("failed", "degraded")
 
 
 def dns_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
@@ -2200,11 +2398,14 @@ def dns_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     Outside signals: the WAN of this router is down; a gateway, WAN or
     internet stage of the diagnostics chain failed; the local resolver
     answers while the upstream one does not; Network Intelligence names
-    ``wan_down`` as the cause. Inside signals: dnsmasq is enabled and down or
-    unstable; the local resolver fails while upstream answers. True needs an
-    outside signal and no inside signal. False needs an inside signal, no
-    outside signal AND the outside measured healthy (WAN up, or the upstream
-    resolver or the internet stage answering). Everything else is None.
+    ``wan_down`` or a lost upstream as the cause. Inside signals: dnsmasq is
+    enabled and down or in a loop; the local resolver fails while upstream
+    answers. True needs an outside signal and no inside signal. False needs
+    an inside signal, no outside signal, no cause other than those in
+    :data:`INSIDE_CAUSES`, AND the outside measured healthy: the upstream
+    resolver or the internet stage answering, no gateway/WAN/internet stage
+    failed or degraded, the WAN not down (WAN up alone is not a measurement).
+    Everything else is None.
     """
     svc = ev.service("dnsmasq")
     dns = ev.dns
@@ -2212,17 +2413,19 @@ def dns_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
         ev.wan_up is False
         or any(ev.stage(s) is False for s in _OUTSIDE_CHAIN_STAGES)
         or (dns.local_ok is True and dns.upstream_ok is False)
-        or inc.cause == "wan_down"
     )
     inside = svc.faulty is True or (dns.local_ok is False and dns.upstream_ok is True)
     outside_healthy = (
-        ev.wan_up is True or dns.upstream_ok is True or ev.stage("internet") is True
+        (dns.upstream_ok is True or ev.stage("internet") is True)
+        and not any(ev.chain.get(s) in _NOT_HEALTHY for s in _OUTSIDE_CHAIN_STAGES)
+        and ev.wan_up is not False
     )
+    raw: bool | None = None
     if outside and not inside:
-        return True
-    if inside and not outside and outside_healthy:
-        return False
-    return None
+        raw = True
+    elif inside and not outside and outside_healthy:
+        raw = False
+    return _settle("dns_recovery", inc, raw)
 
 
 def _analyze_dns(run: _Run) -> PlaybookFinding:
@@ -2236,7 +2439,7 @@ def _analyze_dns(run: _Run) -> PlaybookFinding:
         dns.local_ok is not None,
         None if dns.local_ok is None else ("answers" if dns.local_ok else "fails"),
     )
-    upstream = dns.upstream_ok if dns.upstream_ok is not None else ev.wan_up
+    upstream = dns.upstream_ok if dns.upstream_ok is not None else ev.stage("internet")
     run.step(
         "upstream_resolver",
         upstream is not None,
@@ -2275,7 +2478,7 @@ def _analyze_dns(run: _Run) -> PlaybookFinding:
             target_fact=target,
             outside=True,
         )
-    if svc.faulty is True and outside is False and inc.temporal_only is False:
+    if _may_restart(run, svc, outside):
         proposal = run.propose("service.restart", "dnsmasq")
         run.rec("rec_restart_dnsmasq_with_approval")
         return run.finding(
@@ -2306,24 +2509,23 @@ def _analyze_dns(run: _Run) -> PlaybookFinding:
 
 # --- B: DHCP ----------------------------------------------------------------
 
-_CLIENT_SIDE_DHCP_CAUSES: Final = frozenset(
-    {"static_ip", "wrong_network", "client_side"}
-)
+POOL_FULL_PCT: Final = 90
+# Types that can mean an exhausted pool: without a pool reading, no restart.
+_POOL_SENSITIVE_TYPES: Final = frozenset({"wifi_no_ip", "wifi_dhcp_after_connect"})
 
 
 def dhcp_cause_outside(
     inc: IncidentInput, ev: Evidence, daemon: str | None
 ) -> bool | None:
-    """True: a client-side cause or an address conflict (another device);
-    False: the serving daemon is enabled and down or unstable and no
-    client-side cause is named; else None."""
-    if inc.cause in _CLIENT_SIDE_DHCP_CAUSES or inc.incident_type == "dhcp_conflict":
-        return True
-    if inc.cause == "ip_conflict":
-        return True
-    if daemon is not None and ev.service(daemon).faulty is True:
-        return False
-    return None
+    """True: an address conflict, a client-side cause or a lost upstream
+    (:data:`OUTSIDE_CAUSES`); False: the serving daemon is enabled and down or
+    in a loop and no cause outside :data:`INSIDE_CAUSES` is named; else None."""
+    raw: bool | None = None
+    if inc.incident_type == "dhcp_conflict":
+        raw = True
+    elif daemon is not None and ev.service(daemon).faulty is True:
+        raw = False
+    return _settle("dhcp_recovery", inc, raw)
 
 
 def _dhcp_daemon(inc: IncidentInput, ev: Evidence) -> tuple[str | None, str | None]:
@@ -2341,13 +2543,27 @@ def _dhcp_daemon(inc: IncidentInput, ev: Evidence) -> tuple[str | None, str | No
     return next(iter(daemons)), None
 
 
+def _dhcp_off_here(inc: IncidentInput, ev: Evidence) -> bool:
+    """DHCP is switched off on purpose on this router (the smallest AP).
+
+    A service-restart incident: its service is known disabled. Any other
+    type: every daemon that could serve here is known disabled (the listed
+    daemons, or both when the list is empty or unknown).
+    """
+    if inc.incident_type == "system_service_restart":
+        return ev.service(inc.service or "").enabled is False
+    daemons = ev.dhcp.daemons
+    candidates = tuple(daemons) if daemons else hc.SERVICE_NAMES
+    return all(ev.service(d).enabled is False for d in candidates)
+
+
 def _analyze_dhcp(run: _Run) -> PlaybookFinding:
     ev, inc = run.ev, run.inc
     pool = ev.dhcp.pool_usage_pct
     run.step(
         "pool_utilisation",
         pool is not None,
-        None if pool is None else ("full" if pool >= 90 else "room"),
+        None if pool is None else ("full" if pool >= POOL_FULL_PCT else "room"),
     )
     run.step(
         "dhcp_logs",
@@ -2370,7 +2586,21 @@ def _analyze_dhcp(run: _Run) -> PlaybookFinding:
     outside = dhcp_cause_outside(inc, ev, daemon)
     run.why("never_delete_leases")
     run.wont("wont_delete_leases")
-    if inc.incident_type == "dhcp_pool_full" or (pool is not None and pool >= 90):
+    if _dhcp_off_here(inc, ev):
+        run.why("never_restart_disabled_service")
+        run.wont("wont_restart_disabled_service")
+        run.rec("rec_nothing_to_do")
+        return run.finding(
+            status=FindingStatus.NOTHING_TO_REPAIR,
+            cause_class="service_disabled_on_purpose",
+            target_fact=hp.TargetFact.NONE,
+            outside=outside,
+        )
+    if (
+        inc.incident_type == "dhcp_pool_full"
+        or inc.cause == "pool_exhausted"
+        or (pool is not None and pool >= POOL_FULL_PCT)
+    ):
         run.why("never_restart_for_pool_exhaustion")
         run.wont("wont_restart_for_pool")
         run.rec("rec_enlarge_pool_or_shorten_lease")
@@ -2388,11 +2618,18 @@ def _analyze_dhcp(run: _Run) -> PlaybookFinding:
             target_fact=_target_fact(svc, None),
             outside=True,
         )
-    if inc.cause in _CLIENT_SIDE_DHCP_CAUSES:
-        run.rec("rec_check_client_network")
+    if outside is True:
+        run.why("never_restart_cause_outside")
+        run.wont("wont_restart_cause_outside")
+        if inc.cause in CLIENT_SIDE_CAUSES:
+            run.rec("rec_check_client_network")
+            cause = "client_side_dhcp"
+        else:
+            run.rec("rec_check_upstream_path")
+            cause = "cause_outside_router"
         return run.finding(
             status=FindingStatus.RECOMMENDATION_ONLY,
-            cause_class="client_side_dhcp",
+            cause_class=cause,
             target_fact=_target_fact(svc, None),
             outside=True,
         )
@@ -2416,7 +2653,17 @@ def _analyze_dhcp(run: _Run) -> PlaybookFinding:
             target_fact=hp.TargetFact.NONE,
             outside=outside,
         )
-    if svc.faulty is True and outside is False and inc.temporal_only is False:
+    if pool is None and inc.incident_type in _POOL_SENSITIVE_TYPES:
+        run.why("never_restart_for_pool_exhaustion")
+        run.wont("wont_restart_pool_unknown")
+        run.rec("rec_refresh_and_diagnose")
+        return run.finding(
+            status=FindingStatus.RECOMMENDATION_ONLY,
+            cause_class="pool_usage_unknown",
+            target_fact=_target_fact(svc, None),
+            outside=outside,
+        )
+    if _may_restart(run, svc, outside):
         proposal = run.propose("service.restart", daemon)
         run.rec("rec_restart_dhcp_daemon_with_approval")
         return run.finding(
@@ -2438,20 +2685,20 @@ def _analyze_dhcp(run: _Run) -> PlaybookFinding:
 
 # --- C: radio ---------------------------------------------------------------
 
-_RF_OUTSIDE_CAUSES: Final = frozenset({"interference", "power_supply"})
-
 
 def radio_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     """True: interference or power supply named or measured; False: a radio
-    or hostapd restart is the named cause; else None."""
-    if ev.radio.interference is True or inc.cause in _RF_OUTSIDE_CAUSES:
-        return True
-    if inc.cause == "radio_restart" or (
+    or hostapd restart is the named cause (or the hostapd/wpad incident's
+    service is down or in a loop) and no other cause is named; else None."""
+    raw: bool | None = None
+    if ev.radio.interference is True:
+        raw = True
+    elif inc.cause == "radio_restart" or (
         inc.incident_type == "system_service_restart"
         and ev.service(inc.service or "").faulty is True
     ):
-        return False
-    return None
+        raw = False
+    return _settle("radio_recovery", inc, raw)
 
 
 def _analyze_radio(run: _Run) -> PlaybookFinding:
@@ -2520,17 +2767,31 @@ def _analyze_radio(run: _Run) -> PlaybookFinding:
             outside=True,
         )
     # never-rules first: they hold even the day the catalog enables the action
+    # (each fact on its own; unknown is stated as unknown, never as fact)
     blocked = False
     if radio.wireless_uplink is not False:
         run.why("never_restart_wireless_uplink")
-        run.wont("wont_restart_wireless_uplink")
+        run.wont(
+            "wont_restart_wireless_uplink"
+            if radio.wireless_uplink is True
+            else "wont_restart_uplink_unknown"
+        )
         blocked = True
-    if radio.carries_dependants is not False or radio.on_mgmt_path is not False:
-        if radio.carries_dependants is not False:
-            run.why("never_restart_radio_carrying_dependants")
-        if radio.on_mgmt_path is not False:
-            run.why("never_restart_radio_on_mgmt_path")
-        run.wont("wont_restart_radio_with_dependants")
+    if radio.carries_dependants is not False:
+        run.why("never_restart_radio_carrying_dependants")
+        run.wont(
+            "wont_restart_radio_with_dependants"
+            if radio.carries_dependants is True
+            else "wont_restart_radio_dependants_unknown"
+        )
+        blocked = True
+    if radio.on_mgmt_path is not False:
+        run.why("never_restart_radio_on_mgmt_path")
+        run.wont(
+            "wont_restart_radio_on_mgmt_path"
+            if radio.on_mgmt_path is True
+            else "wont_restart_radio_mgmt_unknown"
+        )
         blocked = True
     if radio.name is None:
         blocked = True
@@ -2543,10 +2804,16 @@ def _analyze_radio(run: _Run) -> PlaybookFinding:
             outside=outside,
         )
     if blocked:
+        # never advise a manual restart of a radio that is (or may be) on
+        # the management path, carries others or is not even identified
         if radio.wireless_uplink is not False or radio.carries_dependants is not False:
             run.rec("rec_check_uplink_by_hand")
-        else:
-            run.rec("rec_radio_restart_manual_with_approval")
+        if radio.on_mgmt_path is True:
+            run.rec("rec_radio_carries_mgmt_path")
+        elif radio.on_mgmt_path is None:
+            run.rec("rec_radio_mgmt_path_unknown")
+        if radio.name is None:
+            run.rec("rec_identify_radio")
         cause = (
             "radio_unknown"
             if radio.name is None
@@ -2578,13 +2845,15 @@ def _analyze_radio(run: _Run) -> PlaybookFinding:
 
 # --- D: interface -----------------------------------------------------------
 
+_EDGE_ROLES: Final = ("lan", "other")
+_CRITICAL_ROLES: Final = ("uplink", "management", "wan")
+
 
 def interface_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     """True only when the upstream router is known down; nothing on a port
     tells a cable from a peer, so False is never claimed."""
-    if ev.interface.upstream_router_down is True:
-        return True
-    return None
+    raw = True if ev.interface.upstream_router_down is True else None
+    return _settle("interface_recovery", inc, raw)
 
 
 def _analyze_interface(run: _Run) -> PlaybookFinding:
@@ -2616,10 +2885,17 @@ def _analyze_interface(run: _Run) -> PlaybookFinding:
             else "unchanged"
         ),
     )
+    # only a known LAN-side port may count as an edge: WAN, uplink,
+    # management and unknown roles are critical, as is an unknown path
     critical = (
-        itf.role in ("uplink", "management")
+        itf.role not in _EDGE_ROLES
         or itf.on_mgmt_path is not False
         or itf.carries_dependants is not False
+    )
+    known_critical = (
+        itf.role in _CRITICAL_ROLES
+        or itf.on_mgmt_path is True
+        or itf.carries_dependants is True
     )
     run.step(
         "uplink_dependencies",
@@ -2631,7 +2907,9 @@ def _analyze_interface(run: _Run) -> PlaybookFinding:
     run.wont("wont_cycle_interface")
     if critical:
         run.why("never_cycle_uplink_or_mgmt")
-        run.wont("wont_cycle_uplink_or_mgmt")
+        run.wont(
+            "wont_cycle_uplink_or_mgmt" if known_critical else "wont_cycle_role_unknown"
+        )
     run.withheld.append(
         Withheld(action_type="interface.cycle", reason="recommendation_only")
     )
@@ -2665,19 +2943,19 @@ def _analyze_interface(run: _Run) -> PlaybookFinding:
 
 def wan_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     """ISP outage (True): the WAN is up with an address but the gateway or
-    the internet stage failed. Local (False): the carrier is up but the WAN
-    interface is down. A cable, modem or missing address is None: from the
-    router it cannot be told apart from the provider's side."""
+    the internet stage failed. Never False (review of PR #79): a carrier up
+    with the WAN interface down and no address is what a provider-side
+    PPPoE/DHCP failure looks like too, and a cable, modem or missing address
+    cannot be told apart from the provider's side either: None."""
     wan = ev.wan
+    raw: bool | None = None
     if (
         wan.interface_up is True
         and wan.has_address is True
         and (ev.stage("gateway") is False or ev.stage("internet") is False)
     ):
-        return True
-    if wan.link_up is True and wan.interface_up is False:
-        return False
-    return None
+        raw = True
+    return _settle("wan_recovery", inc, raw)
 
 
 def _analyze_wan(run: _Run) -> PlaybookFinding:
@@ -2717,15 +2995,15 @@ def _analyze_wan(run: _Run) -> PlaybookFinding:
             target_fact=hp.TargetFact.NONE,
             outside=True,
         )
-    if outside is False:
-        run.rec("rec_check_wan_settings")
-        cause = "local_wan_fault"
-    elif wan.link_up is False:
+    if wan.link_up is False:
         run.rec("rec_check_modem_and_cable")
         cause = "wan_link_down"
     elif wan.interface_up is True and wan.has_address is False:
         run.rec("rec_check_wan_settings")
         cause = "wan_no_address"
+    elif wan.link_up is True and wan.interface_up is False:
+        run.rec("rec_check_wan_settings")
+        cause = "wan_interface_down"
     elif ev.stage("internet") is True and ev.stage("dns") is False:
         run.rec("rec_follow_dns_playbook")
         cause = "dns_only"
@@ -2746,7 +3024,8 @@ def _analyze_wan(run: _Run) -> PlaybookFinding:
 def drift_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     """False when a diff proves a change on this router in the area the
     incident touches (the cause is on the router); otherwise None."""
-    return False if _drift_in_area(inc, ev) else None
+    raw = False if _drift_in_area(inc, ev) else None
+    return _settle("drift_recovery", inc, raw)
 
 
 def _analyze_drift(run: _Run) -> PlaybookFinding:
@@ -2809,28 +3088,13 @@ def _analyze_drift(run: _Run) -> PlaybookFinding:
 
 # --- G: client --------------------------------------------------------------
 
-_CLIENT_SIDE_CAUSES: Final = frozenset(
-    {
-        "client_side",
-        "client_driver",
-        "client_power_save",
-        "psk_wrong",
-        "sae_mismatch",
-        "wrong_network",
-        "static_ip",
-        "mac_filter",
-    }
-)
-
 
 def client_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
-    """True: a client-side cause; False: the client's AP was not available;
-    weak signal, roaming or steering can be either: None."""
-    if inc.cause in _CLIENT_SIDE_CAUSES:
-        return True
-    if ev.client.ap_available is False or inc.cause == "ap_full":
-        return False
-    return None
+    """True: a client-side cause; False: the client's AP was not available
+    and no cause is named; a full AP, weak signal, roaming or steering can be
+    either: None."""
+    raw = False if ev.client.ap_available is False else None
+    return _settle("client_recovery", inc, raw)
 
 
 def _analyze_client(run: _Run) -> PlaybookFinding:
@@ -2932,9 +3196,31 @@ def assess(incident: IncidentInput, evidence: Evidence) -> Assessment:
     run = _Run(pb=PLAYBOOKS[m.playbook_id], inc=incident, ev=evidence)
     if m.status is MatchStatus.UNSUPPORTED:
         return Assessment(match=m, finding=_unsupported(run, m))
-    if m.drift_overlay:
-        run.why("drift_overlay")
-    finding = _ANALYZERS[m.playbook_id](run)
+    if m.drift_overlay and m.original_playbook_id is not None:
+        # the original playbook looks first: if it measures the cause outside
+        # the router, the drift is only a hint and its value stays (decided
+        # by the master on PR #79)
+        orig = _Run(pb=PLAYBOOKS[m.original_playbook_id], inc=incident, ev=evidence)
+        orig.why("drift_hint_outside_measured")
+        orig.rec("rec_review_diff")
+        orig_finding = _ANALYZERS[m.original_playbook_id](orig)
+        if orig_finding.incident_facts.cause_outside_router is True:
+            run = orig
+            finding = orig_finding
+            m = Match(
+                status=MatchStatus.MATCHED,
+                playbook_id=m.original_playbook_id,
+                reason="drift_hint_outside_measured",
+                drift_hint=True,
+            )
+        else:
+            run.why("drift_overlay")
+            finding = _ANALYZERS[m.playbook_id](run)
+    else:
+        if m.drift_hint:
+            run.why("drift_hint")
+            run.rec("rec_review_diff")
+        finding = _ANALYZERS[m.playbook_id](run)
     if finding.proposal is not None:
         # a proposal is always a catalog action this playbook may propose,
         # with its closed parameters (checked again, independently)

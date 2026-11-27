@@ -316,6 +316,36 @@ nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Absch
 - Tests: 130 neue (Auftragstests 10–14 und 34, jede Nie-Regel, Flotte, feindliche Texte,
   3000 Zufallsfälle durch die Richtlinie). Mutationsprüfung: 38 Änderungen, jede lässt
   mindestens einen Test scheitern.
+- **Review PR #79 (vor dem Merge, strengere Regeln):**
+  - „Ursache auf dem Router“ (False) nur noch ohne genannte Ursache oder mit einer aus einer
+    festen Liste je Playbook (`INSIDE_CAUSES`); jede andere von Network Intelligence genannte
+    Ursache (von der Wurzel geerbt, am Client, in der Konfiguration) ergibt „außerhalb“ oder
+    „unbekannt“. Ein verlorener Upstream (`uplink_down`, `lan_unreachable`,
+    `router_unreachable`) zählt bei A und B als außerhalb.
+  - A: „außen gesund“ verlangt einen gemessenen Upstream (vorgelagerter Resolver oder
+    Internet-Stufe); ein WAN, das nur oben ist, genügt nicht; eine Stufe „degraded“ ist nicht
+    gesund.
+  - B: kein Neustart, wenn Network Intelligence den Adressbereich als voll nennt
+    (`pool_exhausted`), gleich welche Belegung gemessen ist; bei „keine Adresse“ mit
+    unbekannter Belegung nur Empfehlung. Der kleinste AP mit absichtlich abgeschalteten
+    Diensten ergibt genau „nichts zu reparieren“, auch bei leerer oder unbekannter
+    Dienstliste.
+  - Ein Vorfall, bei dem außer der Verbindung zur Wurzel nichts beobachtet ist, gilt als
+    reine Zeitnähe, gleich welcher Wert übergeben wird: kein Vorschlag.
+  - Neustart-Zähler allein sind kein Fehler mehr (nur mit beobachteter Schleife oder
+    stehendem Dienst); ein Vorschlag braucht die Fähigkeit `data.services` ausdrücklich.
+  - Drift (F) ersetzt ein Playbook nur, wenn die Zeit der Änderung bekannt ist und vor dem
+    Vorfall liegt und das ursprüngliche Playbook die Ursache nicht außerhalb gemessen hat;
+    sonst bleibt es beim ursprünglichen Playbook, die Änderung ist ein Hinweis.
+  - C: keine Empfehlung „Funk von Hand neu starten“, wenn der Management-Weg darüber läuft
+    oder das unbekannt ist oder der Funk nicht benannt ist; Texte sagen Unbekanntes als
+    unbekannt. D: WAN-Schnittstellen und unbekannte Rollen gelten als kritisch. E sagt nie
+    „auf dem Router“ (Leitung oben, Schnittstelle unten kann auch der Anbieter sein).
+  - Tests: 199 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
+    Generator nahe am Vorschlag mit den feindlichen Werten des Reviews erweitert).
+    Mutationsprüfung auf grünem Stand: 58 Änderungen, 56 lassen einen Test scheitern; zwei
+    (zweite Prüfung beim Bauen des Vorschlags, Gegenprüfung in `assess`) sind Absicherung in
+    der Tiefe, die kein Test erreicht.
 
 ## [1.52.3] - 2026-11-27
 

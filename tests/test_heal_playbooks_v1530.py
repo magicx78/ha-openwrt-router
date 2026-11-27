@@ -45,6 +45,10 @@ HOSTILE = (
 )
 
 
+T_START = 1_790_000_000.0  # incident start (seconds)
+T_BEFORE = T_START - 3600.0  # a configuration change an hour earlier
+
+
 class _Str(str):
     """A str subclass that claims to be a catalog value."""
 
@@ -59,7 +63,7 @@ def incident(**over: Any) -> pb.IncidentInput:
         "incident_type": "system_service_restart",
         "scope": "router",
         "service": "dnsmasq",
-        "cause": "dns_resolution",
+        "cause": None,  # system_service_restart carries no cause of its own
         "cause_status": "confirmed",
         "cause_level": "confirmed",
         "confidence": 0.9,
@@ -70,6 +74,7 @@ def incident(**over: Any) -> pb.IncidentInput:
         "evidence_fresh": True,
         "affected_clients": 12,
         "occurrences": 3,
+        "started_at": T_START,
     }
     base.update(over)
     return pb.IncidentInput(**base)
@@ -619,7 +624,8 @@ def test_service_fact_disabled_is_never_faulty() -> None:
     assert pb.ServiceFact(running=False, enabled=False, crash_loop=True).faulty is False
     assert pb.ServiceFact(running=False, enabled=None).faulty is None
     assert pb.ServiceFact(running=False, enabled=True).faulty is True
-    assert pb.ServiceFact(running=True, enabled=True, restarts_24h=2).faulty is True
+    # review of PR #79, P2-9: restarts alone are unclear, never a fault
+    assert pb.ServiceFact(running=True, enabled=True, restarts_24h=2).faulty is None
     assert pb.ServiceFact(running=True, enabled=True, crash_loop=False).faulty is False
     assert pb.ServiceFact(running=True, enabled=True).faulty is None
 
@@ -725,12 +731,16 @@ def test_order_12_radio_recovery_is_recommendation_with_reason() -> None:
 
 
 def test_never_radio_restart_on_a_wireless_uplink() -> None:
-    for uplink in (True, None):
+    for uplink, wont in (
+        (True, "wont_restart_wireless_uplink"),
+        (None, "wont_restart_uplink_unknown"),  # unknown is said as unknown
+    ):
         f = finding_of(radio_inc(), radio_ev(wireless_uplink=uplink))
         assert f.proposal is None
         assert "never_restart_wireless_uplink" in f.reasons
-        assert "wont_restart_wireless_uplink" in f.will_not
+        assert wont in f.will_not
         assert "rec_check_uplink_by_hand" in f.recommendations
+        assert "rec_radio_restart_manual_with_approval" not in f.recommendations
         assert not f.withheld  # not even considered
 
 
@@ -804,43 +814,69 @@ def port_inc(**over: Any) -> pb.IncidentInput:
 
 
 @pytest.mark.parametrize(
-    "itf",
+    ("itf", "wont"),
     [
-        {"role": "uplink"},
-        {"role": "management"},
-        {"role": "lan", "on_mgmt_path": True},
-        {"role": "lan", "carries_dependants": True},
-        {"role": "lan"},  # dependants and mgmt path unknown
+        ({"role": "uplink"}, "wont_cycle_uplink_or_mgmt"),
+        ({"role": "management"}, "wont_cycle_uplink_or_mgmt"),
+        ({"role": "lan", "on_mgmt_path": True}, "wont_cycle_uplink_or_mgmt"),
+        ({"role": "lan", "carries_dependants": True}, "wont_cycle_uplink_or_mgmt"),
+        ({"role": "lan"}, "wont_cycle_role_unknown"),  # path and dependants unknown
     ],
 )
-def test_never_cycle_uplink_or_management_interface(itf: dict[str, Any]) -> None:
+def test_never_cycle_uplink_or_management_interface(
+    itf: dict[str, Any], wont: str
+) -> None:
     f = finding_of(
         port_inc(), evidence(interface=pb.InterfaceFact(link_up=False, **itf))
     )
     assert f.proposal is None
     assert f.status is FS.RECOMMENDATION_ONLY
     assert "never_cycle_uplink_or_mgmt" in f.reasons
-    assert "wont_cycle_uplink_or_mgmt" in f.will_not
+    assert wont in f.will_not
     assert "rec_check_uplink_by_hand" in f.recommendations
 
 
 @pytest.mark.parametrize(
-    "itf",
+    ("itf", "wont"),
     [
-        {"role": "uplink", "on_mgmt_path": False, "carries_dependants": False},
-        {"role": "management", "on_mgmt_path": False, "carries_dependants": False},
-        {"role": "lan", "on_mgmt_path": False, "carries_dependants": None},
-        {"role": "lan", "on_mgmt_path": None, "carries_dependants": False},
+        (
+            {"role": "uplink", "on_mgmt_path": False, "carries_dependants": False},
+            "wont_cycle_uplink_or_mgmt",
+        ),
+        (
+            {"role": "management", "on_mgmt_path": False, "carries_dependants": False},
+            "wont_cycle_uplink_or_mgmt",
+        ),
+        # review of PR #79, P2-8: a WAN or an unknown role is critical too
+        (
+            {"role": "wan", "on_mgmt_path": False, "carries_dependants": False},
+            "wont_cycle_uplink_or_mgmt",
+        ),
+        (
+            {"role": None, "on_mgmt_path": False, "carries_dependants": False},
+            "wont_cycle_role_unknown",
+        ),
+        (
+            {"role": "lan", "on_mgmt_path": False, "carries_dependants": None},
+            "wont_cycle_role_unknown",
+        ),
+        (
+            {"role": "lan", "on_mgmt_path": None, "carries_dependants": False},
+            "wont_cycle_role_unknown",
+        ),
     ],
 )
-def test_never_cycle_by_role_or_unknown_dependants_alone(itf: dict[str, Any]) -> None:
+def test_never_cycle_by_role_or_unknown_dependants_alone(
+    itf: dict[str, Any], wont: str
+) -> None:
     """Each condition on its own makes the interface critical."""
     f = finding_of(
         port_inc(), evidence(interface=pb.InterfaceFact(link_up=False, **itf))
     )
     assert f.proposal is None
     assert "never_cycle_uplink_or_mgmt" in f.reasons
-    assert "wont_cycle_uplink_or_mgmt" in f.will_not
+    assert wont in f.will_not
+    assert pb.TEXT_DE[wont]
     assert step(f, "uplink_dependencies").conclusion == "uplink_or_mgmt"
 
 
@@ -910,7 +946,7 @@ def test_order_13_isp_outage_means_nothing_to_repair_on_the_router() -> None:
         (
             {"link_up": True, "interface_up": False},
             {},
-            "local_wan_fault",
+            "wan_interface_down",
             "rec_check_wan_settings",
         ),
         (
@@ -966,6 +1002,7 @@ def drift_ev(**cfg: Any) -> pb.Evidence:
         "change_risk": "medium",
         "restore_check": "compatible",
         "backup_present": True,
+        "changed_at": T_BEFORE,
     }
     base.update(cfg)
     return dhcp_ev(config=pb.ConfigFact(**base))
@@ -1015,7 +1052,10 @@ def test_never_automatic_rollback_of_critical_configuration() -> None:
     ev = evidence(
         interface=pb.InterfaceFact(role="lan", link_up=True),
         config=pb.ConfigFact(
-            diff_proven=True, changed_areas=("vlan",), change_risk="critical"
+            diff_proven=True,
+            changed_areas=("vlan",),
+            change_risk="critical",
+            changed_at=T_BEFORE,
         ),
     )
     f = finding_of(inc, ev)
@@ -1040,9 +1080,13 @@ def test_drift_needs_config_capabilities() -> None:
     ev = dataclasses.replace(
         drift_ev(), capabilities={"config.capture": False, "data.services": True}
     )
+    # F does not fit this router: the original playbook keeps the case and
+    # the proven change is a hint only
     a = assess(incident(service="odhcpd"), ev)
-    assert a.match.status is MS.UNSUPPORTED
-    assert a.match.missing == ("config.capture",)
+    assert a.match.status is MS.MATCHED
+    assert a.match.playbook_id == "dhcp_recovery"
+    assert a.match.drift_overlay is False and a.match.drift_hint is True
+    assert a.finding is not None and "drift_hint" in a.finding.reasons
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1246,10 @@ def test_fleet_smallest_ap_services_off_on_purpose_is_no_fault() -> None:
     for inc in (incident(), incident(service="odhcpd")):
         f = finding_of(inc, smallest_ap())
         assert f.proposal is None
-        assert f.status in (FS.NOTHING_TO_REPAIR, FS.RECOMMENDATION_ONLY)
+        # review of PR #79, P2-6: exactly one status, also for odhcpd with an
+        # empty daemon list
+        assert f.status is FS.NOTHING_TO_REPAIR
+        assert f.cause_class == "service_disabled_on_purpose"
         assert "rec_restart_dnsmasq_with_approval" not in f.recommendations
         assert gate(f) is None
     f = finding_of(incident(), smallest_ap())
@@ -1406,6 +1453,609 @@ def test_proposal_on_an_unknown_router_context_is_not_approvable() -> None:
     assert v.executable_now is False
 
 
+# ---------------------------------------------------------------------------
+# Review of PR #79: regression tests (each failed on b32a393)
+# ---------------------------------------------------------------------------
+
+# The causes under which a playbook may say "on this router" (False); no
+# cause at all is always allowed. Pinned here, used by the random tests.
+INSIDE_OK: dict[str, frozenset[str]] = {
+    "dns_recovery": frozenset(),
+    "dhcp_recovery": frozenset({"dhcp_server"}),
+    "radio_recovery": frozenset({"radio_restart"}),
+    "interface_recovery": frozenset(),
+    "wan_recovery": frozenset(),
+    "drift_recovery": frozenset(
+        {"dhcp_server", "radio_restart", "vlan", "uplink_config"}
+    ),
+    "client_recovery": frozenset(),
+}
+
+
+def test_inside_causes_are_an_explicit_allow_list() -> None:
+    """P1-2: False only for no cause or one of these; pinned."""
+    assert {k: frozenset(v) for k, v in pb.INSIDE_CAUSES.items()} == INSIDE_OK
+    assert set(pb.INSIDE_CAUSES) == set(pb.PLAYBOOK_IDS)
+    for pid, causes in pb.INSIDE_CAUSES.items():
+        assert causes <= pb.KNOWN_CAUSES
+        assert not causes & pb.OUTSIDE_CAUSES[pid]
+
+
+def _down_svc_ev(**over: Any) -> pb.Evidence:
+    return evidence(services={"dnsmasq": healthy_svc(), "hostapd": svc()}, **over)
+
+
+def _false_case(pid: str, cause: str | None) -> tuple[pb.IncidentInput, pb.Evidence]:
+    """A case whose playbook says False when no cause is named."""
+    if pid == "dns_recovery":
+        return incident(cause=cause), evidence()
+    if pid == "dhcp_recovery":
+        return (
+            incident(incident_type="wifi_no_ip", service=None, cause=cause),
+            dhcp_ev(),
+        )
+    if pid == "radio_recovery":
+        return incident(service="hostapd", cause=cause), _down_svc_ev(
+            radio=radio_ev().radio
+        )
+    if pid == "interface_recovery":
+        return port_inc(cause=cause), evidence(
+            interface=pb.InterfaceFact(
+                role="lan", link_up=False, on_mgmt_path=False, carries_dependants=False
+            )
+        )
+    if pid == "wan_recovery":
+        return wan_inc(cause=cause), evidence(
+            wan=pb.WanFact(link_up=True, interface_up=False, has_address=False)
+        )
+    if pid == "drift_recovery":
+        return incident(service="odhcpd", cause=cause), drift_ev()
+    return client_inc(cause=cause), evidence(client=pb.ClientFact(ap_available=False))
+
+
+@pytest.mark.parametrize("pid", pb.PLAYBOOK_IDS)
+def test_no_cause_named_outside_the_allow_list_ever_gives_false(pid: str) -> None:
+    """P1-2: every root-inherited, client-side or configuration cause gives
+    True or None, never False, and never a proposal."""
+    inc, ev = _false_case(pid, None)
+    f = finding_of(inc, ev)
+    assert f.playbook_id == pid
+    if pid in ("interface_recovery", "wan_recovery"):
+        assert f.incident_facts.cause_outside_router is None  # never False
+    else:
+        assert f.incident_facts.cause_outside_router is False  # the control
+    for cause in sorted(pb.KNOWN_CAUSES):
+        inc, ev = _false_case(pid, cause)
+        a = assess(inc, ev)
+        assert a.finding is not None, (pid, cause, a.match)
+        f = a.finding
+        if cause in INSIDE_OK[f.playbook_id]:
+            continue
+        assert f.incident_facts.cause_outside_router is not False, (pid, cause)
+        assert f.proposal is None, (pid, cause)
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "uplink_down",
+        "lan_unreachable",
+        "vlan",
+        "uplink_config",
+        "psk_wrong",
+        "mac_filter",
+        "client_driver",
+        "auth",
+        "band_steering",
+        "ap_full",
+        "dns_resolution",
+    ],
+)
+def test_reviewer_causes_never_give_false_on_a_and_b(cause: str) -> None:
+    """P1-2 (probe3): an AP whose NI cause is the root's, dnsmasq restarted."""
+    restarted = pb.ServiceFact(enabled=True, running=False, crash_loop=True)
+    for inc, ev in (
+        (incident(cause=cause), evidence(services={"dnsmasq": restarted})),
+        (
+            incident(incident_type="wifi_no_ip", service=None, cause=cause),
+            evidence(
+                role="access_point",
+                services={"dnsmasq": restarted},
+                dhcp=pb.DhcpFact(daemons=("dnsmasq",), pool_usage_pct=30),
+            ),
+        ),
+    ):
+        f = finding_of(inc, ev)
+        assert f.incident_facts.cause_outside_router is not False
+        assert f.proposal is None
+
+
+@pytest.mark.parametrize(
+    "cause", ["uplink_down", "lan_unreachable", "router_unreachable"]
+)
+def test_lost_upstream_is_outside_for_dns_and_dhcp(cause: str) -> None:
+    f = finding_of(incident(cause=cause), evidence())
+    assert f.incident_facts.cause_outside_router is True
+    f = finding_of(
+        incident(incident_type="wifi_no_ip", service=None, cause=cause), dhcp_ev()
+    )
+    assert f.incident_facts.cause_outside_router is True
+    assert f.cause_class == "cause_outside_router"
+    assert "rec_check_upstream_path" in f.recommendations
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        {"router": "healthy", "gateway": "degraded", "wan": "healthy"},
+        {"router": "healthy", "gateway": "healthy", "wan": "degraded"},
+        {"gateway": "degraded", "wan": "degraded", "internet": "degraded"},
+    ],
+)
+def test_a_degraded_chain_stage_is_not_healthy(chain: dict[str, str]) -> None:
+    """P1-2: "degraded" is not healthy; the outside is not measured fine."""
+    for dns in (pb.DnsFact(local_ok=False, upstream_ok=True), pb.DnsFact()):
+        f = finding_of(incident(), evidence(chain=chain, dns=dns))
+        assert f.incident_facts.cause_outside_router is None
+        assert f.proposal is None
+
+
+def test_wan_up_alone_does_not_measure_the_outside() -> None:
+    """P1-2: a WAN interface up is no upstream measurement."""
+    ev = evidence(wan_up=True, dns=pb.DnsFact(), chain={})
+    f = finding_of(incident(), ev)
+    assert f.incident_facts.cause_outside_router is None
+    assert f.proposal is None
+    # a measured upstream: the internet stage, or the upstream resolver
+    for over in (
+        {"chain": {"internet": "healthy"}},
+        {"dns": pb.DnsFact(upstream_ok=True)},
+    ):
+        f = finding_of(
+            incident(),
+            evidence(wan_up=True, **{"dns": pb.DnsFact(), "chain": {}, **over}),
+        )
+        assert f.incident_facts.cause_outside_router is False
+        assert f.proposal is not None
+
+
+@pytest.mark.parametrize(
+    ("itype", "pool"),
+    [
+        ("wifi_dhcp_after_connect", None),
+        ("wifi_no_ip", 89.9),
+        ("wifi_no_ip", 30),
+        ("dhcp_pool_full", 10),
+    ],
+)
+def test_named_pool_exhaustion_never_restarts(itype: str, pool: float | None) -> None:
+    """P1-1: Network Intelligence names the pool full; whatever the reading."""
+    for daemon_state in (svc(), pb.ServiceFact(enabled=True, crash_loop=True)):
+        ev = evidence(
+            services={"dnsmasq": daemon_state, "odhcpd": healthy_svc()},
+            dhcp=pb.DhcpFact(daemons=("dnsmasq",), pool_usage_pct=pool),
+        )
+        inc = incident(
+            incident_type=itype,
+            service=None,
+            cause="pool_exhausted",
+            cause_status="hypothesis",
+            cause_level="likely",
+        )
+        f = finding_of(inc, ev)
+        assert f.playbook_id == "dhcp_recovery"
+        assert f.proposal is None
+        assert f.cause_class == "pool_exhausted"
+        assert "wont_restart_for_pool" in f.will_not
+
+
+@pytest.mark.parametrize("itype", ["wifi_no_ip", "wifi_dhcp_after_connect"])
+@pytest.mark.parametrize("cause", [None, "dhcp_server"])
+def test_pool_unknown_on_no_address_types_is_recommendation_only(
+    itype: str, cause: str | None
+) -> None:
+    """P1-1: without a pool reading these types may mean a full pool."""
+    inc = incident(incident_type=itype, service=None, cause=cause)
+    f = finding_of(inc, dhcp_ev(dhcp=pb.DhcpFact(daemons=("odhcpd",))))
+    assert f.status is FS.RECOMMENDATION_ONLY
+    assert f.proposal is None
+    assert f.cause_class == "pool_usage_unknown"
+    assert "wont_restart_pool_unknown" in f.will_not
+    # the control: a known pool with room
+    f = finding_of(inc, dhcp_ev())
+    assert f.status is FS.PROPOSAL
+
+
+def test_pool_full_threshold_is_ninety_percent() -> None:
+    """M09: exactly 90 % is full, 89.9 % is not."""
+    assert pb.POOL_FULL_PCT == 90
+    inc = incident(incident_type="wifi_no_ip", service=None, cause="dhcp_server")
+    for pool, full in ((90, True), (90.0, True), (89.9, False), (90.1, True)):
+        f = finding_of(
+            inc, dhcp_ev(dhcp=pb.DhcpFact(daemons=("odhcpd",), pool_usage_pct=pool))
+        )
+        assert (f.cause_class == "pool_exhausted") is full, pool
+        assert (f.proposal is None) is full, pool
+        assert step(f, "pool_utilisation").conclusion == ("full" if full else "room")
+
+
+def test_drift_never_hides_a_measured_outside_cause() -> None:
+    """P1-3 (probe): a proven change in the area does not turn a WAN or ISP
+    outage into "on the router"."""
+    cfg = pb.ConfigFact(diff_proven=True, changed_areas=("dhcp",), changed_at=T_BEFORE)
+    restarted = pb.ServiceFact(
+        enabled=True, running=True, crash_loop=False, restarts_24h=2
+    )
+    a = assess(
+        incident(),
+        evidence(
+            wan_up=False,
+            services={"dnsmasq": restarted},
+            dns=pb.DnsFact(),
+            chain={},
+            config=cfg,
+        ),
+    )
+    assert a.match.playbook_id == "dns_recovery"
+    assert a.match.drift_overlay is False and a.match.drift_hint is True
+    assert a.finding is not None
+    assert a.finding.incident_facts.cause_outside_router is True
+    assert "drift_hint_outside_measured" in a.finding.reasons
+    assert "rec_review_diff" in a.finding.recommendations
+    cfg = pb.ConfigFact(
+        diff_proven=True, changed_areas=("interface",), changed_at=T_BEFORE
+    )
+    a = assess(
+        wan_inc(cause=None),
+        evidence(
+            wan=pb.WanFact(link_up=True, interface_up=True, has_address=True),
+            chain={"gateway": "failed", "internet": "failed"},
+            config=cfg,
+        ),
+    )
+    assert a.match.playbook_id == "wan_recovery"
+    assert a.finding is not None
+    assert a.finding.incident_facts.cause_outside_router is True
+    assert a.finding.cause_class == "isp_outage"
+
+
+@pytest.mark.parametrize(
+    ("started", "changed", "overlay"),
+    [
+        (T_START, T_BEFORE, True),
+        (T_START, None, False),
+        (None, T_BEFORE, False),
+        (T_START, T_START, False),
+        (T_START, T_START + 60.0, False),
+        (T_START, float("nan"), False),
+    ],
+)
+def test_drift_overlay_needs_a_known_change_time_before_the_incident(
+    started: float | None, changed: float | None, overlay: bool
+) -> None:
+    """P1-3 (DECIDED by the coordinator): unknown or later time, hint only."""
+    a = assess(
+        incident(service="odhcpd", started_at=started), drift_ev(changed_at=changed)
+    )
+    assert a.finding is not None
+    assert a.match.drift_overlay is overlay
+    if overlay:
+        assert a.match.playbook_id == "drift_recovery"
+        assert a.match.original_playbook_id == "dhcp_recovery"
+        assert "drift_overlay" in a.finding.reasons
+    else:
+        assert a.match.playbook_id == "dhcp_recovery"
+        assert a.match.drift_hint is True
+        assert "drift_hint" in a.finding.reasons
+        assert "rec_review_diff" in a.finding.recommendations
+        # the original playbook's own value stays
+        assert a.finding.incident_facts.cause_outside_router is False
+
+
+def test_wan_carrier_up_interface_down_is_unknown_not_on_the_router() -> None:
+    """P1-4: link up, interface down, no address looks like a provider-side
+    PPPoE/DHCP failure too."""
+    f = finding_of(
+        wan_inc(cause=None),
+        evidence(wan=pb.WanFact(link_up=True, interface_up=False, has_address=False)),
+    )
+    assert f.cause_class == "wan_interface_down"
+    assert f.incident_facts.cause_outside_router is None
+    assert f.proposal is None
+
+
+def test_wan_location_is_never_false() -> None:
+    """P1-4: no WAN state at all says "on this router"."""
+    tri = (True, False, None)
+    for link in tri:
+        for up in tri:
+            for addr in tri:
+                for gw in ("healthy", "failed", "degraded", None):
+                    chain = {} if gw is None else {"gateway": gw, "internet": gw}
+                    ev = evidence(
+                        wan=pb.WanFact(link_up=link, interface_up=up, has_address=addr),
+                        chain=chain,
+                    )
+                    for cause in (None, "wan_down"):
+                        out = pb.wan_cause_outside(wan_inc(cause=cause), ev)
+                        assert out is not False
+
+
+def test_isp_outage_needs_an_address() -> None:
+    """M31: a failed gateway without an address is not an ISP outage."""
+    chain = {"gateway": "failed", "internet": "failed"}
+    inc = wan_inc(cause=None)
+    for addr in (False, None):
+        ev = evidence(
+            wan=pb.WanFact(link_up=True, interface_up=True, has_address=addr),
+            chain=chain,
+        )
+        assert pb.wan_cause_outside(inc, ev) is None
+        assert finding_of(inc, ev).cause_class != "isp_outage"
+    ev = evidence(
+        wan=pb.WanFact(link_up=True, interface_up=True, has_address=True), chain=chain
+    )
+    assert pb.wan_cause_outside(inc, ev) is True
+    ev = evidence(
+        wan=pb.WanFact(link_up=True, interface_up=None, has_address=True), chain=chain
+    )
+    assert pb.wan_cause_outside(inc, ev) is None
+
+
+@pytest.mark.parametrize("families", [(), ("correlation",)])
+@pytest.mark.parametrize("given", [False, None, True])
+def test_nothing_but_the_link_is_time_only_whatever_the_given_value(
+    families: tuple[str, ...], given: bool | None
+) -> None:
+    """P1-5: no observed family other than the link: never a proposal."""
+    inc = incident(source_families=families, temporal_only=given)
+    assert inc.temporal_only is True
+    assert inc.observed_families == 0
+    a = assess(inc, evidence())
+    assert a.finding is None
+    assert a.match.reason == "temporal_correlation_only"
+    # the control: one observed family besides the link
+    inc = incident(source_families=("correlation", "log"), temporal_only=False)
+    assert inc.temporal_only is False
+    assert finding_of(inc, evidence()).proposal is not None
+
+
+def test_proposal_needs_an_observed_family_even_with_a_forged_flag() -> None:
+    """P1-5, second layer: the restart gate itself asks for an observed
+    family; an input whose normalised flag was forged after the fact (no
+    caller can do this through the constructor) still gets no proposal."""
+    for families in ((), ("correlation",)):
+        inc = incident(source_families=families)
+        object.__setattr__(inc, "temporal_only", False)  # forged on purpose
+        assert inc.observed_families == 0
+        f = finding_of(inc, evidence())
+        assert f.proposal is None
+        assert f.status is FS.RECOMMENDATION_ONLY
+
+
+@pytest.mark.parametrize("daemons", [(), None, ("odhcpd",)])
+def test_smallest_ap_with_dhcp_off_is_nothing_to_repair(daemons: Any) -> None:
+    """P2-6: odhcpd/dnsmasq known off: one status, whatever the list says."""
+    off = pb.ServiceFact(running=False, enabled=False)
+    ev = evidence(
+        role="access_point",
+        services={"odhcpd": off, "dnsmasq": off},
+        dhcp=pb.DhcpFact(daemons=daemons),
+    )
+    for inc in (
+        incident(service="odhcpd"),
+        incident(incident_type="wifi_no_ip", service=None),
+        incident(incident_type="wifi_dhcp_after_connect", service=None),
+    ):
+        f = finding_of(inc, ev)
+        assert f.status is FS.NOTHING_TO_REPAIR, (inc.incident_type, daemons)
+        assert f.cause_class == "service_disabled_on_purpose"
+        assert f.proposal is None
+    # one daemon of two not known off: not "nothing to repair"
+    ev = evidence(
+        role="access_point",
+        services={"odhcpd": off, "dnsmasq": pb.ServiceFact()},
+        dhcp=pb.DhcpFact(daemons=()),
+    )
+    f = finding_of(incident(incident_type="wifi_no_ip", service=None), ev)
+    assert f.status is not FS.NOTHING_TO_REPAIR
+
+
+@pytest.mark.parametrize(
+    ("radio", "rec", "wont"),
+    [
+        (
+            {"on_mgmt_path": True},
+            "rec_radio_carries_mgmt_path",
+            "wont_restart_radio_on_mgmt_path",
+        ),
+        (
+            {"on_mgmt_path": None},
+            "rec_radio_mgmt_path_unknown",
+            "wont_restart_radio_mgmt_unknown",
+        ),
+        ({"name": None}, "rec_identify_radio", None),
+    ],
+)
+def test_no_manual_radio_restart_advice_on_the_mgmt_path_or_unknown_radio(
+    radio: dict[str, Any], rec: str, wont: str | None
+) -> None:
+    """P2-7: the radio carries, or may carry, the management path."""
+    f = finding_of(radio_inc(), radio_ev(**radio))
+    assert f.proposal is None
+    assert "rec_radio_restart_manual_with_approval" not in f.recommendations
+    assert rec in f.recommendations
+    if wont is not None:
+        assert wont in f.will_not
+        assert "never_restart_radio_on_mgmt_path" in f.reasons
+    assert not f.withheld
+
+
+@pytest.mark.parametrize(
+    ("radio", "reason", "wont"),
+    [
+        (
+            {"carries_dependants": None},
+            "never_restart_radio_carrying_dependants",
+            "wont_restart_radio_dependants_unknown",
+        ),
+        (
+            {"carries_dependants": True},
+            "never_restart_radio_carrying_dependants",
+            "wont_restart_radio_with_dependants",
+        ),
+        (
+            {"on_mgmt_path": None},
+            "never_restart_radio_on_mgmt_path",
+            "wont_restart_radio_mgmt_unknown",
+        ),
+        (
+            {"wireless_uplink": None},
+            "never_restart_wireless_uplink",
+            "wont_restart_uplink_unknown",
+        ),
+    ],
+)
+def test_each_radio_fact_blocks_on_its_own(
+    radio: dict[str, Any], reason: str, wont: str
+) -> None:
+    """M15: dependants and the mgmt path, each unknown on its own, block."""
+    f = finding_of(radio_inc(), radio_ev(**radio))
+    assert reason in f.reasons
+    assert wont in f.will_not
+    assert "rec_radio_restart_manual_with_approval" not in f.recommendations
+    assert not f.withheld
+    others = {
+        "never_restart_wireless_uplink",
+        "never_restart_radio_carrying_dependants",
+        "never_restart_radio_on_mgmt_path",
+    } - {reason}
+    assert not others & set(f.reasons)
+
+
+def test_restart_count_alone_is_no_fault() -> None:
+    """P2-9 (DECIDED by the coordinator), M34: a running service with
+    restarts and no observed loop is unclear, never a proposal."""
+    assert pb.RESTARTS_UNCLEAR == 2
+    assert (
+        pb.ServiceFact(
+            running=True, enabled=True, crash_loop=False, restarts_24h=1
+        ).faulty
+        is False
+    )
+    assert (
+        pb.ServiceFact(
+            running=True, enabled=True, crash_loop=False, restarts_24h=2
+        ).faulty
+        is None
+    )
+    assert (
+        pb.ServiceFact(
+            running=True, enabled=True, crash_loop=False, restarts_24h=0
+        ).faulty
+        is False
+    )
+    restarted = pb.ServiceFact(
+        running=True, enabled=True, crash_loop=False, restarts_24h=2
+    )
+    for inc, ev in (
+        (incident(), evidence(services={"dnsmasq": restarted})),
+        (incident(service="odhcpd"), dhcp_ev(services={"odhcpd": restarted})),
+        (
+            incident(incident_type="wifi_no_ip", service=None, cause="dhcp_server"),
+            dhcp_ev(services={"odhcpd": restarted}),
+        ),
+    ):
+        f = finding_of(inc, ev)
+        assert f.proposal is None
+        assert f.status is FS.RECOMMENDATION_ONLY
+    # an observed loop or a service not running is a fault
+    for fact in (
+        pb.ServiceFact(running=True, enabled=True, crash_loop=True, restarts_24h=5),
+        pb.ServiceFact(running=False, enabled=True, restarts_24h=0),
+    ):
+        assert fact.faulty is True
+        assert (
+            finding_of(incident(), evidence(services={"dnsmasq": fact})).proposal
+            is not None
+        )
+
+
+@pytest.mark.parametrize("cap", [None, False])
+def test_restart_proposal_needs_the_services_capability(cap: bool | None) -> None:
+    """DECIDED by the coordinator: data.services explicitly True."""
+    caps = {
+        "data.services": cap,
+        "data.wireless": True,
+        "config.capture": True,
+        "config.diff": True,
+    }
+    for inc, ev in (
+        (incident(), evidence(capabilities=caps)),
+        (incident(service="odhcpd", cause="dhcp_server"), dhcp_ev(capabilities=caps)),
+    ):
+        a = assess(inc, ev)
+        assert a.finding is not None
+        assert a.finding.proposal is None
+        if a.match.status is MS.MATCHED:
+            assert "wont_restart_capability_unknown" in a.finding.will_not
+            assert "services_capability_unknown" in a.finding.reasons
+
+
+_FACT_CLAIMS = (
+    "wont_restart_wireless_uplink",
+    "wont_restart_radio_with_dependants",
+    "wont_restart_radio_on_mgmt_path",
+    "rec_radio_carries_mgmt_path",
+    "wont_cycle_uplink_or_mgmt",
+)
+
+
+def test_unknown_is_never_stated_as_fact() -> None:
+    """P3-11: with the facts unknown, no text claims them."""
+    unknown_radio = pb.RadioFact(name="radio0")
+    f = finding_of(
+        radio_inc(occurrences=3),
+        evidence(role="access_point", radio=unknown_radio),
+    )
+    assert not set(_FACT_CLAIMS) & set(f.codes())
+    for code in (
+        "wont_restart_uplink_unknown",
+        "wont_restart_radio_dependants_unknown",
+        "wont_restart_radio_mgmt_unknown",
+    ):
+        assert code in f.will_not
+    f = finding_of(port_inc(), evidence(interface=pb.InterfaceFact(link_up=False)))
+    assert not set(_FACT_CLAIMS) & set(f.codes())
+    assert "wont_cycle_role_unknown" in f.will_not
+    for code, text in pb.TEXT_DE.items():
+        if code.endswith("_unknown") and code.startswith(("wont_", "rec_")):
+            assert "unbekannt" in text, code
+
+
+def test_manual_radio_advice_follows_the_catalog_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P3-12: the advice does not claim the catalog state; the will-not line
+    "gesperrt" appears only while the catalog has the action disabled."""
+    text = pb.TEXT_DE["rec_radio_restart_manual_with_approval"]
+    assert "gesperrt" not in text and "Katalog" not in text
+    f = finding_of(radio_inc(), radio_ev())
+    assert hc.CATALOG["wifi.radio_restart"].status is not hc.CatalogStatus.READY
+    assert "wont_restart_radio_disabled" in f.will_not
+    enabled = dataclasses.replace(
+        hc.CATALOG["wifi.radio_restart"],
+        status=hc.CatalogStatus.READY,
+        status_reason=None,
+    )
+    monkeypatch.setattr(hc, "CATALOG", {**hc.CATALOG, "wifi.radio_restart": enabled})
+    f = finding_of(radio_inc(), radio_ev())
+    assert "wont_restart_radio_disabled" not in f.will_not
+    assert not f.withheld
+    assert "rec_radio_restart_manual_with_approval" in f.recommendations
+    assert f.proposal is None  # C never proposes, catalog or not
+
+
 def _random_case(rng: random.Random) -> tuple[pb.IncidentInput, pb.Evidence]:
     def b() -> bool | None:
         return rng.choice((True, False, None))
@@ -1490,13 +2140,186 @@ def _random_assessment(rng: random.Random) -> pb.Assessment:
     return pb.assess(inc, ev)
 
 
+def _favourable_case(rng: random.Random) -> tuple[pb.IncidentInput, pb.Evidence]:
+    """A DNS/DHCP case close to a proposal: every fact favourable, then up to
+    three of them drawn from the hostile values where the review of PR #79
+    found holes (NI causes with a faulty daemon, pool readings around 90 %,
+    ``temporal_only`` given as False with nothing but the link observed, a
+    restart count alone, degraded chain stages, the WAN up as the only
+    "measurement", capabilities and drift times unknown)."""
+    itype, service = rng.choice(
+        [
+            ("system_service_restart", "dnsmasq"),
+            ("system_service_restart", "odhcpd"),
+            ("wifi_no_ip", None),
+            ("wifi_dhcp_after_connect", None),
+        ]
+    )
+    daemon = service if service == "odhcpd" else "dnsmasq"
+    down = pb.ServiceFact(enabled=True, running=False, crash_loop=False)
+    restarted = pb.ServiceFact(enabled=True, running=True, restarts_24h=2)
+    inc_f: dict[str, Any] = {
+        "incident_type": itype,
+        "service": service,
+        "cause": None if service == "dnsmasq" else "dhcp_server",
+        "source_families": ("log", "poll"),
+        "temporal_only": False,
+        "started_at": T_START,
+    }
+    ev_f: dict[str, Any] = {
+        "role": "gateway",
+        "capabilities": {
+            "data.services": True,
+            "data.wireless": True,
+            "config.capture": True,
+            "config.diff": True,
+        },
+        "services": {
+            "dnsmasq": down if daemon == "dnsmasq" else healthy_svc(),
+            "odhcpd": down if daemon == "odhcpd" else healthy_svc(),
+        },
+        "wan_up": True,
+        "dns": pb.DnsFact(local_ok=False, upstream_ok=True, log_hint=True),
+        "dhcp": pb.DhcpFact(daemons=(daemon,), pool_usage_pct=30),
+        "chain": {"router": "healthy", "gateway": "healthy", "wan": "healthy"},
+        "config": pb.ConfigFact(),
+    }
+    hostile: dict[str, tuple[dict[str, Any], str, list[Any]]] = {
+        "cause": (inc_f, "cause", sorted(pb.KNOWN_CAUSES)),
+        "families": (
+            inc_f,
+            "source_families",
+            [(), ("correlation",), ("poll",), ("correlation", "log")],
+        ),
+        "temporal": (inc_f, "temporal_only", [None, True]),
+        "started": (inc_f, "started_at", [None]),
+        "type": (inc_f, "incident_type", ["dhcp_pool_full", "dhcp_conflict"]),
+        "role": (ev_f, "role", ["access_point", None]),
+        "caps": (
+            ev_f,
+            "capabilities",
+            [{"data.services": None}, {"data.services": False}, {}],
+        ),
+        "services": (
+            ev_f,
+            "services",
+            [
+                {daemon: restarted},
+                {daemon: pb.ServiceFact(enabled=True, running=True, crash_loop=True)},
+                {
+                    daemon: pb.ServiceFact(
+                        enabled=True, running=True, crash_loop=False, restarts_24h=1
+                    )
+                },
+                {daemon: pb.ServiceFact(enabled=False, running=False)},
+                {daemon: pb.ServiceFact(enabled=None, running=False)},
+                {},
+            ],
+        ),
+        "wan_up": (ev_f, "wan_up", [None, False]),
+        "dns": (
+            ev_f,
+            "dns",
+            [
+                pb.DnsFact(),
+                pb.DnsFact(local_ok=False),
+                pb.DnsFact(local_ok=True, upstream_ok=False),
+                pb.DnsFact(local_ok=False, upstream_ok=None),
+            ],
+        ),
+        "pool": (
+            ev_f,
+            "dhcp",
+            [
+                pb.DhcpFact(daemons=(daemon,), pool_usage_pct=p)
+                for p in (None, 89, 89.9, 90, 90.1, 95)
+            ]
+            + [
+                pb.DhcpFact(daemons=d, pool_usage_pct=30)
+                for d in ((), None, hc.SERVICE_NAMES)
+            ],
+        ),
+        "chain": (
+            ev_f,
+            "chain",
+            [
+                {},
+                {"gateway": "degraded"},
+                {"wan": "degraded", "internet": "degraded"},
+                {"internet": "healthy"},
+                {"gateway": "failed"},
+                {"router": "healthy", "internet": "healthy", "wan": "degraded"},
+            ],
+        ),
+        "config": (
+            ev_f,
+            "config",
+            [
+                pb.ConfigFact(diff_proven=True, changed_areas=(area,), changed_at=at)
+                for area in ("dhcp", "dns", "vlan")
+                for at in (T_BEFORE, None, T_START + 60.0)
+            ],
+        ),
+    }
+    for name in rng.sample(sorted(hostile), rng.randint(0, 3)):
+        target, key, values = hostile[name]
+        target[key] = rng.choice(values)
+    return incident(**inc_f), evidence(**ev_f)
+
+
+def _check_proposal(inc: pb.IncidentInput, ev: pb.Evidence, f: Any) -> None:
+    """Every fact a proposal needs, checked from the inputs (not the code)."""
+    p = f.proposal
+    pid = f.playbook_id
+    assert p.action_type == "service.restart"
+    assert pid in ("dns_recovery", "dhcp_recovery")
+    name = p.params["service"]
+    assert name in pb.PLAYBOOKS[pid].service_choices
+    # P1-2: no cause named outside the allow-list
+    assert inc.cause is None or inc.cause in INSIDE_OK[pid], inc.cause
+    # P1-5: at least one family other than the link
+    assert inc.observed_families >= 1
+    assert set(inc.source_families) - {"correlation"}
+    assert inc.temporal_only is False
+    # DECIDED: data.services explicitly True
+    assert ev.capabilities.get("data.services") is True
+    # P2-9: down or an observed loop, never a restart count alone
+    fact = ev.service(name)
+    assert fact.enabled is True
+    assert fact.running is False or fact.crash_loop is True
+    facts = f.incident_facts
+    assert facts.cause_outside_router is False
+    assert facts.temporal_only is False
+    assert facts.target_fact is hp.TargetFact.DIRECT
+    if pid == "dns_recovery":
+        # P1-2: the outside measured healthy (WAN up alone is not enough)
+        assert ev.dns.upstream_ok is True or ev.chain.get("internet") == "healthy"
+        for stage in ("gateway", "wan", "internet"):
+            assert ev.chain.get(stage) not in ("failed", "degraded"), stage
+        assert ev.wan_up is not False
+    else:
+        # P1-1: never with a named or measured full pool, never blind
+        pool = ev.dhcp.pool_usage_pct
+        assert inc.cause != "pool_exhausted"
+        assert inc.incident_type not in ("dhcp_pool_full", "dhcp_conflict")
+        assert pool is None or pool < 90
+        if inc.incident_type in ("wifi_no_ip", "wifi_dhcp_after_connect"):
+            assert pool is not None
+        assert ev.dhcp.daemons is not None and name in ev.dhcp.daemons
+
+
 def test_invariants_over_random_cases_end_to_end() -> None:
     """No case ever executes; a proposal is at most an approval request, and
-    only for service.restart with every fact known and favourable."""
+    only for service.restart with every fact known and favourable.
+
+    Two generators: one uniform over every field, one close to a proposal
+    with the hostile draws of the review of PR #79 (it found P1-1, P1-2 and
+    P1-5 on the code before the fix)."""
     rng = random.Random(20261127)
-    proposals = 0
-    for _ in range(3000):
-        inc, ev = _random_case(rng)
+    proposals = {"uniform": 0, "favourable": 0}
+    for i in range(6000):
+        kind = "uniform" if i % 2 else "favourable"
+        inc, ev = _random_case(rng) if kind == "uniform" else _favourable_case(rng)
         a = pb.assess(inc, ev)
         f = a.finding
         if a.match.status is MS.NO_PLAYBOOK:
@@ -1509,20 +2332,8 @@ def test_invariants_over_random_cases_end_to_end() -> None:
         if f.proposal is None:
             assert pb.to_decision_input(f, context=ctx()) is None
             continue
-        proposals += 1
-        p = f.proposal
-        assert p.action_type == "service.restart"
-        assert f.playbook_id in ("dns_recovery", "dhcp_recovery")
-        assert p.params["service"] in pb.PLAYBOOKS[f.playbook_id].service_choices
-        facts = f.incident_facts
-        assert facts.cause_outside_router is False
-        assert facts.temporal_only is False
-        assert facts.target_fact is hp.TargetFact.DIRECT
-        assert ev.service(p.params["service"]).enabled is True
-        if f.playbook_id == "dhcp_recovery":
-            assert ev.dhcp.daemons is not None
-            assert p.params["service"] in ev.dhcp.daemons
-            assert ev.dhcp.pool_usage_pct is None or ev.dhcp.pool_usage_pct < 90
+        proposals[kind] += 1
+        _check_proposal(inc, ev, f)
         for mode in (M.OBSERVE, M.APPROVAL, M.AUTO_HEAL):
             for context in (ctx(), hp.RiskContext()):
                 v = gate(
@@ -1542,7 +2353,7 @@ def test_invariants_over_random_cases_end_to_end() -> None:
                     assert mode is not M.OBSERVE
                     assert v.decision is not None
                     assert v.decision.outcome is hm.DecisionOutcome.REQUIRES_APPROVAL
-    assert proposals > 0
+    assert proposals["favourable"] >= 50, proposals
 
 
 def test_approval_only_with_every_fact_known_and_favourable() -> None:
