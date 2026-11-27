@@ -447,7 +447,9 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
   beenden oder die gespeicherte Allowlist auf `service.restart` mit Risiko 3 umzuschreiben.
   Jetzt prüft ein Test das, und die Engine vergleicht nach jeder Entscheidung außer dem
   Datensatz auch alle Holds und die Einstellungen; hat sich etwas geändert, wird nichts
-  angewandt, alles wird zurückgesetzt und gezählt (`decision_tampered`). Das gilt bewusst
+  angewandt, alles wird zurückgesetzt und gezählt (`decision_tampered`). Der Datensatz kommt
+  auch zurück, wenn er durch ein anderes Objekt ersetzt oder entfernt wurde, und ein Fehler
+  beim Vergleich zählt als Änderung (drittes Review). Das gilt bewusst
   für jedes Schreiben in den Speicher während einer Entscheidung, auch ein rechtmäßiges:
   Entscheider und Faktenquellen schreiben nie in den Speicher.
 - **Ablehnung des Gates:** ohne die Prüfung der Ablehnung bliebe die Erlaubnis gleich
@@ -456,7 +458,8 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
 - **Kandidat:** die Erklärung zeigt nur noch die vom Katalog geprüften Parameter
   (`candidate.policy.params`), nicht mehr die rohen der Faktenquelle.
 - **Bekannte Kosten:** die Route `plans` braucht mit der Richtlinie rund 1 ms je Plan (3- bis
-  4-mal so lang wie vorher, linear); keine Änderung.
+  4-mal so lang wie vorher, linear); die Prüfung nach einer Entscheidung rund 0,4 ms bei 10
+  Routern und 3 ms bei 100 (linear mit Einstellungen und Holds); keine Änderung.
 - Mutationsprüfung auf grünem Stand: 93 Mutationen, 90 scheitern (darunter die geteilten
   Kopien von Hold, Ursache und Allowlist und die Ablehnung des Gates). Drei bleiben, weil sie
   nichts ändern (der Vorab-Check des Slots, ein Playbook, das die Entscheidung nicht liest,

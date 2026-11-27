@@ -1688,7 +1688,9 @@ class HealEngine:
         """The record, the holds and the settings are what they were
         before the decision. Else nothing is applied, all three are put
         back as they were and the case is counted (``decision_tampered``;
-        review of PR #81, P1, and its second review).
+        review of PR #81, P1, and its second and third review). A record
+        changed in place, replaced by another object or removed is put
+        back under its id; an error while comparing counts as a change.
 
         A decider or provider never writes to the store; a write during a
         decision is refused like a tampering (docs §2.1)."""
@@ -1714,9 +1716,11 @@ class HealEngine:
             "Self-Healing: the store changed during a decision (%s)",
             "record" if not record_same else "holds or settings",
         )
-        if live is action or live is None:
-            # the store still holds this object (or lost it): the last
-            # state the store itself wrote, rebuilt from its JSON form
+        if not record_same:
+            # whatever the store holds under the id now (the same object
+            # changed, a new object or nothing at all): the last state the
+            # store itself wrote, rebuilt from its JSON form, goes back
+            # under its id (third review of PR #81)
             store.actions[action_id] = RemediationAction.from_dict(before["record"])
         # the holds and settings as before, rebuilt the same way (the
         # holds map is refilled in place)

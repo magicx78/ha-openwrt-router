@@ -259,7 +259,12 @@ Dahinter prüft die Engine im Schritt nach PROPOSED: haben sich während der Ent
 Datensatz, irgendein Hold (`LoopState.holds`, auch der der Flotte) oder die Einstellungen
 (Modulschalter, Grenzen, Modi, Allowlisten) trotzdem geändert (`to_dict()` vorher und
 nachher), wird nichts angewandt, alle drei werden aus ihrer Form vor der Entscheidung
-wiederhergestellt und der Fall einmal gezählt (`decision_tampered`). **Gewollt:** das gilt
+wiederhergestellt und der Fall einmal gezählt (`decision_tampered`). Der Datensatz kommt in
+jedem Fall unter seiner Kennung zurück: ob er an Ort und Stelle geändert, durch ein anderes
+Objekt ersetzt oder aus dem Speicher entfernt wurde (drittes Review PR #81); der nächste Takt
+entscheidet ihn dann neu. Scheitert der Vergleich selbst (etwa ein Hold ohne JSON-Form), gilt
+das als Änderung. Nicht Teil der Prüfung sind die übrigen Teile des Speichers (Sperren,
+Doppelten-Kennungen, Versuche, Schutzschalter, Wartungsfenster). **Gewollt:** das gilt
 für jedes Schreiben in den Speicher während einer Entscheidung, auch ein an sich
 rechtmäßiges (etwa ein Hold, der die Lage nur strenger macht). Ein Entscheider oder eine
 Faktenquelle schreibt nie in den Speicher; tut sie es doch, wird die Entscheidung verworfen,
@@ -366,7 +371,9 @@ Schreiben des Speichers. Kein Coordinator-Listener, kein Refresh, kein Poll; die
 zweier Polls ist mit laufender Engine, einem Vorfall und einem Takt gleich der ohne
 (Test `test_zero_extra_router_calls`). **Bekannte Kosten** (Messung des zweiten Reviews von
 PR #81, keine Änderung): mit der Richtlinie ist die Route `plans` 3- bis 4-mal langsamer als
-mit `ObserveOnlyDecider`, rund 1 ms je Plan, linear in der Zahl der offenen Datensätze.
+mit `ObserveOnlyDecider`, rund 1 ms je Plan, linear in der Zahl der offenen Datensätze. Die
+Prüfung nach der Entscheidung wächst linear mit Einstellungen und Holds (Messung des dritten
+Reviews: rund 0,4 ms je Entscheidung bei 10 Routern, 3 ms bei 100).
 
 **DECIDED (C1):**
 
@@ -1978,6 +1985,12 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   `decision_input` liest das Playbook nicht, der Vorschlag trägt keines) und X08 (kein
   `schedule()` nach dem Zurücksetzen: das verzögerte Schreiben serialisiert den Speicher erst
   beim Schreiben, und zwischen Schreiben und Zurücksetzen in einer Entscheidung läuft keins).
+- **Drittes Review PR #81** (Abschnitt „Third review of PR #81“): ein Datensatz, der während
+  der Entscheidung durch ein anderes Objekt ersetzt oder entfernt wird, kommt unter seiner
+  Kennung zurück (auch in der gespeicherten Form) und wird im nächsten Takt neu entschieden;
+  ein Hold ohne JSON-Form oder Einstellungen falschen Typs zählen als Änderung. Mutationen:
+  G01–G13 des Reviewers und drei zur Bedingung des Zurücksetzens; alle scheitern außer G07
+  (wie X08) und G11 (die Momentaufnahme nach `context_for`: `context_for` schreibt nichts).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 

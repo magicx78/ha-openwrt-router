@@ -2146,4 +2146,103 @@ async def test_the_candidate_shows_only_catalog_validated_params(
         assert raw not in text
 
 
+# ---------------------------------------------------------------------------
+# Third review of PR #81: every changed record goes back; a failing compare
+# ---------------------------------------------------------------------------
+
+
+class OnceReaching:
+    """A decider that reaches the live store on its first call only and
+    keeps the record's JSON form from just before."""
+
+    def __init__(self, world: World, write: Any) -> None:
+        self.world, self.write, self.calls = world, write, 0
+        self.before: dict[str, Any] | None = None
+
+    def propose(self, context: he.DecisionContext) -> he.Proposal:
+        self.calls += 1
+        if self.calls == 1:
+            assert self.world.engine is not None
+            store = self.world.engine.store
+            action_id = context.action.action_id
+            self.before = store.actions[action_id].to_dict()
+            self.write(store, action_id)
+        return he.DEFAULT_DECIDER.propose(context)
+
+
+def _replace_record(store: Any, action_id: str) -> None:
+    live = store.actions[action_id]
+    store.actions[action_id] = dataclasses.replace(live, action_type="service.restart")
+
+
+def _remove_record(store: Any, action_id: str) -> None:
+    del store.actions[action_id]
+
+
+@pytest.mark.parametrize(
+    "write", [_replace_record, _remove_record], ids=["replaced", "removed"]
+)
+async def test_a_record_replaced_or_removed_during_its_decision_is_put_back(
+    world: World, write: Any
+) -> None:
+    decider = OnceReaching(world, write)
+    engine = await world.start(decider=decider)
+    store = engine.store
+    world.open("inc-1")
+    assert engine.counters["decision_tampered"] == 1
+    assert engine.counters["proposed"] == 0
+    [record] = world.records()
+    assert decider.before is not None
+    assert record.to_dict() == decider.before
+    assert record.state is S.ANALYZED
+    assert record.action_type == "observe.evaluate"
+    [saved] = store.payload()["actions"]
+    assert saved["action_type"] == "observe.evaluate"
+    assert saved["state"] == "analyzed"
+    assert saved == decider.before
+    # the next tick decides the record that was put back, as usual
+    world.tick()
+    [record] = world.records()
+    assert record.state is S.PROPOSED
+    assert record.action_type == "observe.evaluate"
+    assert engine.counters["decision_tampered"] == 1
+
+
+async def test_a_failing_compare_of_the_holds_counts_as_a_change(
+    world: World,
+) -> None:
+    """G08: something without a JSON form slipped into the holds; comparing
+    raises, which counts as changed, and the holds are put back."""
+
+    def slip(store: Any, action_id: str) -> None:
+        store.loop.holds[R2] = object()
+
+    engine = await world.start(decider=OnceReaching(world, slip))
+    store = engine.store
+    hold, _settings = _hold_and_allowlist(store)
+    world.open("inc-1")
+    assert engine.counters["decision_tampered"] == 1
+    assert engine.counters["proposed"] == 0
+    [record] = world.records()
+    assert record.state is S.ANALYZED
+    assert {k: h.to_dict() for k, h in store.loop.holds.items()} == {R1: hold}
+    assert store.payload()["loop"]["holds"] == [hold]
+
+
+async def test_a_failing_compare_of_the_settings_counts_as_a_change(
+    world: World,
+) -> None:
+    def slip(store: Any, action_id: str) -> None:
+        store.settings = object()
+
+    engine = await world.start(decider=OnceReaching(world, slip))
+    store = engine.store
+    _hold, settings = _hold_and_allowlist(store)
+    world.open("inc-1")
+    assert engine.counters["decision_tampered"] == 1
+    assert world.records()[0].state is S.ANALYZED
+    assert isinstance(store.settings, hm.HealSettings)
+    assert store.settings.to_dict() == settings
+
+
 __all__ += ["R2", "Event", "FakeNI", "hc"]
