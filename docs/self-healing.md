@@ -1,12 +1,13 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket F: Playbooks)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
      Paket D (Branch feature/self-healing-d, 2026-11-27, auf B und C1). Gebaut sind heal_model.py
      und heal_store.py (Paket B), die Kennung `rem_` in core_models.py, seit Paket C1
      heal_engine.py, heal_views.py, der Modulschalter `self_healing_enabled` und die
      Verdrahtung in __init__.py, config_flow.py und diagnostics.py, seit Paket D
-     heal_catalog.py und heal_policy.py (reine Logik, von der Engine noch nicht aufgerufen).
-     Aussagen zu B, C1 und D sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     heal_catalog.py und heal_policy.py (reine Logik, von der Engine noch nicht aufgerufen),
+     seit Paket F (Branch feature/self-healing-f) heal_playbooks.py (reine Logik, ebenfalls
+     noch nicht aufgerufen). Aussagen zu B, C1, D und F sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
      tests/full_router_kit.py); nicht auf Routern,
@@ -79,6 +80,13 @@ Ausführungsweg. Die Engine aus C1 ruft sie noch nicht auf (sie nutzt weiter
 `ObserveOnlyDecider`); das Einsetzen über die Schnittstelle `HealDecider` ist ein eigenes
 kleines Paket nach dem Merge von D. Auch Paket D ändert für Benutzer nichts.
 
+**Stand heute (Paket F):** Dazu kommen die Playbooks A–G als versionierte Daten mit Matcher
+und Analyse (`heal_playbooks.py`, Abschnitt 8). Ein Playbook ordnet die Ursache eines
+Wurzelvorfalls ein, füllt `IncidentFacts` samt `cause_outside_router` und schlägt höchstens
+einen Dienst-Neustart (dnsmasq, odhcpd) zur Freigabe vor; alles andere ist eine Empfehlung.
+Reine Logik, kein Router-Aufruf, von der Engine noch nicht aufgerufen; für Benutzer ändert
+sich nichts.
+
 ## 2. Modulaufbau
 
 Geplant ist **eine** Instanz für die ganze Flotte je HA-Installation, verdrahtet wie Security
@@ -93,7 +101,7 @@ frei).
 | `heal_catalog.py` | rein | geschlossene Liste typisierter Aktionen, Parameterprüfung, Rollback-Aussage je Aktion | **gebaut** (Paket D) |
 | `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); die Engine (C1) ruft sie noch nicht auf – ein eigenes kleines Paket setzt einen `HealDecider` über `heal_policy` ein (Abschnitt 2.1), I ruft `record_outcome` |
 | `heal_preflight.py` | rein + async | Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf** | Plan (E) |
-| `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten | Plan (F, G) |
+| `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten, Matcher (Vorfall → höchstens ein Playbook), Analyse je Playbook, `cause_outside_router`, deutsche Texte | **gebaut** (Paket F, Abschnitt 8); die Engine ruft es noch nicht auf; die tiefe Anbindung an den Configuration Manager (F-Plan) ist Paket G |
 | `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
 | `heal_engine.py` | async | Ablauf, Sperren, Warteschlange, Zeitgeber, Neustart | **gebaut** bis PROPOSED (C1, Abschnitt 2.1); Ausführen, Sperren, Warteschlange Plan (C2, I) |
 | `heal_views.py` | HTTP | Routen (Abschnitt 11) | **gebaut**: fünf lesende Routen (C1); schreibende Plan (C2) |
@@ -838,20 +846,217 @@ Ergebnis heute als Fakten aus `RiskContext` (Abschnitt 9). Kein Eintrag hat eine
 ## 8. Playbooks A–G
 
 Alle Playbooks arbeiten nur am **Wurzelvorfall** von Network Intelligence; ihre Leseschritte
-nutzen Daten, die ohnehin gepollt werden.
+nutzen Daten, die ohnehin gepollt werden. Kurzüberblick (Einzelheiten in 8.4):
 
 | Playbook | Mögliche Aktion | Harte Regel |
 |---|---|---|
 | A `dns_recovery` | `service.restart dnsmasq` | kein Neustart, wenn die Ursache außerhalb liegt (WAN aus, Upstream gestört, Gateway nicht erreichbar) oder dnsmasq absichtlich aus ist |
-| B `dhcp_recovery` | `service.restart dnsmasq/odhcpd` nur, wenn der Dienst nicht läuft oder ständig neu startet | nie Leases anfassen; voller Pool oder Konflikt ist eine Empfehlung |
+| B `dhcp_recovery` | `service.restart dnsmasq/odhcpd` nur, wenn der Dienst nicht läuft oder ständig neu startet, und nur für den Dienst, der DHCP vergibt | nie Leases anfassen; voller Pool oder Konflikt ist eine Empfehlung |
 | C `radio_recovery` | `wifi.radio_restart` (nicht verfügbar) | nie auf einem Funk mit STA- oder Mesh-Schnittstelle |
 | D `interface_recovery` | keine (Empfehlung) | kein automatisches Ab- und Anschalten einer Uplink- oder Management-Schnittstelle |
 | E `wan_recovery` | keine (Empfehlung) | kein pauschaler Neustart |
 | F `drift_recovery` | keine (Plan mit Version, Bereichen, Prüfergebnis, manuellen Schritten) | kein automatisches Zurücksetzen; Wiederherstellen ist ein **Probelauf** |
 | G `client_recovery` | keine | kein Trennen, kein Sperren, kein erzwungenes Umlenken |
 
-**Stand heute:** nichts davon gebaut. Das Modell hat die Felder `playbook_id` und
-`playbook_version`.
+**Stand heute (Paket F):** die sieben Playbooks sind als **Daten** gebaut
+(`heal_playbooks.py`, Registerversion 1, jedes Playbook Version 1), dazu der Matcher und je
+Playbook eine Analyse. Reine Logik: kein HA-Import, keine Uhr, **kein Router-Aufruf**, nichts
+wird ausgeführt. Die Engine ruft das Modul noch nicht auf (Anbindung wie bei D über ein
+eigenes Paket); wer die Beweisdaten (`Evidence`) aus Coordinator, Network Intelligence,
+Netzwerkdiagnose, WiFi RF, Client-Stabilität, Configuration Manager und Topologie füllt, ist
+ebenfalls Sache der Anbindung. Das Modell hat die Felder `playbook_id` und `playbook_version`.
+
+### 8.1 Was jedes Playbook als Daten trägt
+
+- Kennung, Version, Rollen (`gateway`, `access_point`), nötige Fähigkeiten des Core
+  (`data.services`, `data.wireless`, `config.capture`, `config.diff`), Rechte (die Leserechte
+  des Polls plus die ACL der Katalogaktionen, **aus dem Katalog abgeleitet**).
+- **Erkennung:** die echten Vorfallarten von Network Intelligence, die passen, und ob die
+  Erkennung heute da ist (`available`, `partial`, `not_available`); fehlt etwas, steht dort,
+  welche Erkennung fehlt.
+- **Risikoklasse:** das Maximum der Grundrisiken der Katalogaktionen, die das Playbook nennt;
+  nie eine eigene, niedrigere Zahl. Nennt es keine Aktion, ist sie 0.
+- Vorabprüfungen nur mit den Kennungen aus Paket E (`router_reachable`, `identity_unique`,
+  `action_supported`, `permissions_present`, `no_concurrent_repair`, `maintenance_window_ok`,
+  `no_critical_state`, `management_path_available`, `components_known`, `config_captured`,
+  `backup_present`, `recovery_path_checked`, `approval_valid`). Die Playbooks mit möglicher
+  Dienst- oder Funkaktion nennen alle außer `backup_present`, E und G nur die drei lesenden
+  (`router_reachable`, `identity_unique`, `components_known`), F alle dreizehn.
+- **Schritte, typisiert:** Lesen (welche Daten im Speicher, was der Schritt folgert, was er
+  heute **nicht** wissen kann), Einordnen, Vorschlagen, und spätere Schritte mit dem Paket, das
+  sie bringt (C2 ausführen, H prüfen, K dokumentieren, G Wiederherstellen). Alle lesenden Daten
+  werden ohnehin gepollt oder berechnet; ein Schritt ruft nichts ab.
+- Prüfproben (die des Katalogs plus eigene Namen), Abbruchbedingungen, Rollback (wörtlich die
+  ehrliche Aussage des Katalogs), Eskalation, Nie-Regeln.
+- Vorschlagbar ist **nur `service.restart`** (A: nur `dnsmasq`; B: `dnsmasq` oder `odhcpd`),
+  über `heal_catalog.validate` gebaut und mit dem eigenen Konstanten-Wert des Playbooks als
+  Parameter, nie mit einem Text vom Router. C, D und F nennen ihre Katalogaktion nur als
+  **modelliert**; sie schlagen sie nie vor. E und G nennen keine Aktion.
+
+Die Registerprüfung läuft beim Import: unbekannte Katalogaktion, unbekannte
+Vorabprüfung, unbekannte Vorfallart, eine Vorfallart in zwei Playbooks, eine Aktion zugleich
+vorgeschlagen und verboten oder ein Code ohne deutschen Text – dann lädt das Modul nicht.
+Jede Vorfallart von Network Intelligence gehört **genau einem** Playbook oder hat einen Grund
+für „kein Playbook“.
+
+### 8.2 Matcher (`match`)
+
+Ein Vorfall ergibt **höchstens ein** Playbook, deterministisch; die erste Regel, die greift,
+gilt:
+
+1. unbekannte Vorfallart → kein Playbook;
+2. kein Wurzelvorfall (`is_root` False) → kein Playbook (`not_root_incident`); unbekannt
+   (`None`) → kein Playbook (`root_unknown`);
+3. **nur zeitliche Nähe** (`temporal_only` True; ist der Wert nicht gesetzt und die einzige
+   Quellfamilie die Verbindung zur Wurzel, `correlation`, gilt er als True) → kein Playbook;
+4. Vorfall der ganzen Flotte → kein Playbook;
+5. Vorfallart ohne Playbook → ihr Grund (Tabelle unten); `system_service_restart` geht nach
+   dem Dienst: `dnsmasq` → A, `odhcpd` → B, `hostapd`/`wpad` → C, `network` oder keiner →
+   `service_not_covered`;
+6. belegt ein **Vergleich** (nicht nur die Zeit) eine Konfigurationsänderung in einem Bereich,
+   den der Vorfall berührt, gilt Playbook F statt des Playbooks der Vorfallart;
+7. bekannte Rolle passt nicht, oder eine nötige Fähigkeit fehlt (False; unbekannt zählt nicht
+   als fehlend) → **nicht unterstützt** mit Grund (`role_not_supported`,
+   `capability_missing`); die Schritte laufen dann nicht.
+
+| Vorfallart ohne Playbook | Grund |
+|---|---|
+| `system_cpu_high`, `system_ram_high`, `system_conntrack_jump`, `lan_port_load` | `load_not_repairable` |
+| `system_clock_skew` | `clock_not_covered` |
+| `system_reboot`, `wan_ip_changed`, `wan_gateway_changed`, `dns_server_changed`, `lan_lldp_change` | `event_not_a_fault` |
+| `router_unreachable`, `lan_unreachable` | `router_unreachable_no_data` |
+| `wifi_weak_clients`, `wifi_channel_busy` | `coverage_not_a_fault` |
+| `wifi_auth_wave` | `security_domain` (Security Center) |
+
+### 8.3 Ergebnis (`assess`, `PlaybookFinding`)
+
+`assess(incident, evidence)` gibt Matcher-Ergebnis und, wenn ein Playbook passt, seinen Befund:
+eingeordnete Ursache, Schritte mit Ergebnis (`known`, `unknown`, `not_in_release`, `not_run`),
+Empfehlungs-Codes, was das System **nicht** tut (immer auch „diese Version führt nichts aus“),
+Gründe, ein Vorschlag oder „nur Empfehlung“, zurückgehaltene Katalogaktionen mit Grund, bei F
+der Plan. Status: `proposal`, `recommendation_only`, `nothing_to_repair`, `unsupported`.
+
+Der Befund füllt `heal_policy.IncidentFacts`, auch **`cause_outside_router`** (True, False
+oder None). Die Quellfamilie `correlation` zählt dabei nicht als Beweis. `to_decision_input`
+macht aus einem Vorschlag den `DecisionInput` der Richtlinie; Fakten, die das Playbook
+gelesen hat, ergänzen den `RiskContext` nur dort, wo er nichts weiß – widersprechen sie
+ihm, wird das Feld unbekannt. Ein Befund ohne Vorschlag ergibt **keinen** `DecisionInput`.
+Das Playbook gewährt nie etwas; es entscheidet die Richtlinie (`heal_policy.gate`).
+
+Ein Vorschlag entsteht nur, wenn **alles** stimmt: der Dienst ist eingeschaltet
+(`rc list`), er läuft nicht, steckt in einer Neustart-Schleife oder ist in 24 h mindestens
+zweimal neu gestartet; `cause_outside_router` ist False; `temporal_only` ist False; der Dienst
+ist bei B der, der auf diesem Router DHCP vergibt; der Katalog führt die Aktion als bereit.
+Sonst: nur Empfehlung.
+
+Deutsche Texte stehen als feste Tabelle im Modul (`TEXT_DE`, `strings.json` gehört anderen
+Paketen); kein Text setzt Werte ein, Router-Texte erscheinen nie darin.
+
+### 8.4 Die Playbooks
+
+**A `dns_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **teilweise**: `system_service_restart` mit Dienst `dnsmasq`. Es fehlt eine Prüfung „DNS-Auflösung scheitert bei funktionierender IP-Verbindung“ (`dns_resolution_probe`); die dnsmasq-Zeilen „keine Server“ und „Anfragegrenze“ sind nur Ereignisse, kein Vorfall |
+| Rollen, Fähigkeit | Gateway, Access Point; `data.services` |
+| Schritte | Dienstzustand (Poll `rc list`/`service list`; nicht bekannt: warum er stoppte) · lokaler Resolver (Probe der Diagnose von HA aus; keine Prüfung auf dem Router) · Upstream (Diagnosekette, WAN) · Konfiguration und Logs (Ereignisse, Configuration Manager; nicht bekannt: ob gespeicherte und laufende Konfiguration abweichen) · betroffene Clients · Vorschlag · kontrollierter Neustart (C2) · DNS erneut prüfen (H) · dokumentieren (K) |
+| Darf vorschlagen | `service.restart` mit `dnsmasq`, nur mit Freigabe (Risiko 2) |
+| Ursache außerhalb | **True**, wenn nur äußere Hinweise da sind (WAN dieses Routers aus; Stufe Gateway, WAN oder Internet der Kette gescheitert; lokaler Resolver antwortet, der vorgelagerte nicht; Network Intelligence nennt `wan_down`); **False**, wenn nur innere Hinweise da sind (dnsmasq an, aber aus oder instabil; lokal scheitert, vorgelagert antwortet) **und** außen gemessen gesund ist; sonst **None** |
+| Nie | kein Neustart, wenn die Ursache klar außerhalb liegt (`cause_outside_router` True – die Richtlinie sagt dann ohnehin Not Safe); kein Neustart eines absichtlich abgeschalteten dnsmasq (dann „nichts zu reparieren“); nie ein Router-Neustart |
+| Abbruch | Ursache außerhalb, Dienst absichtlich aus, Konfiguration nicht übernommen, Router unerreichbar, laufende Reparatur, Vorfall erledigt, neuer Wurzelvorfall, Zustand seit Freigabe geändert |
+| Eskalation | Neustart hilft nicht → Administrator, kein zweiter Versuch ohne Bestätigung; Ursache bleibt unklar → von Hand; Schutzschalter offen → nur Administrator |
+
+**B `dhcp_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **teilweise**: `dhcp_pool_full`, `dhcp_conflict`, `wifi_no_ip`, `wifi_dhcp_after_connect`, `system_service_restart` mit `odhcpd`. Es fehlt eine Rate fehlgeschlagener Lease-Vorgänge je Router (`failed_lease_rate`; heute nur je Client). Ein dnsmasq-Neustart-Vorfall geht an A |
+| Rollen, Fähigkeit | Gateway, Access Point; `data.services` |
+| Schritte | Dienstzustand · Belegung des Adressbereichs (Poll `dhcp_pools`) · Logs und Vorfall · VLAN-Zuordnung (nicht bekannt: in welchem VLAN ein Client landet) · Konfigurationsänderungen · Vorschlag · Neustart nach Freigabe (C2) · Funktion belegen (H) |
+| Darf vorschlagen | `service.restart` mit `dnsmasq` oder `odhcpd` – **nur für den Dienst, der auf diesem Router wirklich DHCP vergibt**; ist das unbekannt oder vergeben beide, nur Empfehlung |
+| Ursache außerhalb | **True** bei Ursache am Client (`static_ip`, `wrong_network`, `client_side`) oder Adresskonflikt; **False**, wenn der vergebende Dienst an, aber aus oder instabil ist; sonst **None** |
+| Nie | nie Leases löschen (es gibt keine solche Aktion, `dhcp.*` steht nicht im Katalog); voller Adressbereich (Vorfall oder ≥ 90 %) → nur Empfehlung; kein Neustart bei unbekanntem Dienst; kein Neustart eines absichtlich abgeschalteten Dienstes |
+| Abbruch | Adressbereich voll, Dienst absichtlich aus, Dienst unbekannt, Konfiguration nicht übernommen, sowie die allgemeinen Abbrüche wie bei A |
+| Eskalation | Neustart hilft nicht → Administrator; voller Adressbereich → Konfiguration durch den Administrator; Schutzschalter offen → nur Administrator |
+
+**C `radio_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **teilweise**: `wifi_mass_disconnect`, `wifi_radio_change`, `system_service_restart` mit `hostapd` oder `wpad`. Es fehlt ein Vorfall „Funk fällt wiederholt aus“ (`radio_failure_counter`) |
+| Rollen, Fähigkeit | Gateway, Access Point; `data.wireless` |
+| Schritte | Funkzustand · hostapd-Ereignisse (nicht bekannt: Zustand im Treiber) · Funkwerte aus WiFi RF (ohne RF-Modul keine) · betroffene Clients · Uplink und Router (STA-Schnittstellen, Topologie) · Vorschlag · Auswirkung auf Clients · Prüfung (H) |
+| Darf vorschlagen | **nichts**. `wifi.radio_restart` ist im Katalog gesperrt (`call_unverified_on_fleet`); der Befund sagt „gesperrt“ und warum, und empfiehlt einen Neustart von Hand mit Blick auf die Clients |
+| Ursache außerhalb | **True** bei Interferenz oder Stromversorgung (genannt oder gemessen); **False**, wenn ein Funk- oder hostapd-Neustart die genannte Ursache ist; sonst **None** |
+| Nie | nie ein automatischer Funk-Neustart auf einem WLAN-Uplink (auch unbekannt zählt als Uplink); nie, wenn andere Router daran hängen oder der Weg von HA darüber läuft; nie `wpad`. Diese Regeln stehen **vor** dem Katalogstatus: sie gelten auch an dem Tag, an dem der Katalog die Aktion freigibt (Test mit gepatchtem Katalog). Ein Kanalwechsel ohne Wiederholung ist „nichts zu reparieren“ |
+| Abbruch | WLAN-Uplink, abhängige Router, Management-Weg, sowie die allgemeinen Abbrüche |
+| Eskalation | wiederkehrende Ausfälle → von Hand; Schutzschalter offen → nur Administrator |
+
+**D `interface_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **teilweise**: `lan_uplink_down`, `lan_port_flap`, `lan_port_errors`, `lan_port_speed_drop`. Es fehlt ein Vorfall für eine logische Schnittstelle, die unerwartet ausfällt (`logical_interface_down`) |
+| Rollen, Fähigkeit | Gateway, Access Point; keine besondere Fähigkeit |
+| Schritte | physische Verbindung (nicht unterscheidbar: Kabel oder Gegenstelle) · Fehlerzähler · VLAN-Konfiguration (nicht bekannt: VLAN am Switch) · Uplink-Abhängigkeiten · Ursache eingrenzen · Vorschlag |
+| Darf vorschlagen | **nichts**, nur Empfehlung. `interface.cycle` ist modelliert (Risiko 3, im Katalog `recommendation_only_no_acl`) |
+| Ursache außerhalb | **True** nur, wenn der vorgelagerte Router als ausgefallen bekannt ist; sonst **None** (am Port lässt sich Kabel und Gegenstelle nicht unterscheiden, False wird nie behauptet) |
+| Nie | nie automatisches Ab- und Anschalten einer Uplink- oder Management-Schnittstelle; eine Schnittstelle gilt als kritisch, wenn sie Uplink oder Management ist **oder** Management-Weg oder Abhängige nicht als „nein“ bekannt sind; nie eine automatische Schnittstellenänderung überhaupt |
+| Abbruch | Uplink- oder Management-Schnittstelle, vorgelagerter Router aus, sowie die allgemeinen Abbrüche |
+| Eskalation | Kabel und Gegenstelle prüft ein Mensch; Schutzschalter offen → nur Administrator |
+
+**E `wan_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **vorhanden**: `wan_down`, `wan_unstable` |
+| Rollen, Fähigkeit | nur Gateway (auf einem Access Point: nicht unterstützt) |
+| Schritte | Router und Schnittstellen (Poll WAN, Ports) · Gateway (Diagnosekette; kein Ping vom Router aus) · externe Erreichbarkeit · DNS getrennt · WAN-Zustand und Logs (nicht bekannt: Zustand beim Anbieter) · Anbieter oder lokal · Vorschlag |
+| Darf vorschlagen | **nichts**, nur Empfehlung |
+| Ursache außerhalb | **True** (Störung beim Anbieter): WAN oben mit Adresse, aber Gateway- oder Internet-Stufe gescheitert → „am Router ist nichts zu reparieren“; **False**: Leitung oben, WAN-Schnittstelle unten; Kabel, Modem, fehlende Adresse → **None** (vom Router aus nicht vom Anbieter zu unterscheiden) |
+| Nie | nie ein pauschaler Router-Neustart als Standardantwort (`router.reboot` ist ausdrücklich ausgeschlossen) |
+| Abbruch | Störung beim Anbieter, sowie die allgemeinen Abbrüche |
+| Eskalation | Anbieter-Störung → Anbieter kontaktieren; lokale WAN-Störung → von Hand |
+
+**F `drift_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **nicht vorhanden**: Network Intelligence meldet keine Konfigurationsabweichung als Vorfall (`drift_incident`). F greift als **Überlagerung**: belegt ein Vergleich des Configuration Managers eine Änderung im Bereich des Vorfalls (DHCP, DNS, WLAN, VLAN, Schnittstelle, Routing, Dienste), gilt F statt des Playbooks der Vorfallart. Nur zeitliche Nähe einer Änderung genügt nicht |
+| Rollen, Fähigkeit | Gateway, Access Point; `config.capture`, `config.diff` |
+| Schritte | letzte bekannte Version · Vergleich · relevante Änderungen · Auswirkung · Kompatibilität der Wiederherstellung (Probelauf; es gibt keinen Ausführer) · Rücksetz-Plan · Freigabe (C2) · gesicherte Wiederherstellung (G) · Prüfung (H) |
+| Darf vorschlagen | **nichts**. Ergebnis ist ein Plan: Version, relevante und kritische Bereiche, Risiko der Änderung, Prüfergebnis, Sicherung vorhanden, manuelle Schritte (Vergleich prüfen, Probelauf, ausdrückliche Freigabe, von Hand wiederherstellen, danach prüfen); der Plan führt nie aus und verlangt immer eine ausdrückliche Freigabe (eine andere Einstellung lehnt der Typ ab). Die tiefe Anbindung an den Configuration Manager ist Paket G |
+| Ursache außerhalb | **False**, wenn ein Vergleich eine Änderung im Bereich belegt; sonst **None** |
+| Nie | nie eine automatische Wiederherstellung (`config.restore` ist Probelauf, gesperrt); nie eine automatische Rücksetzung kritischer Konfiguration (VLAN, Schnittstelle, Management-IP, Firewall, Routing, SSH, oder Änderungsrisiko hoch/kritisch) |
+| Abbruch | Sicherung passt nicht, keine Sicherung, kritischer Bereich, sowie die allgemeinen Abbrüche |
+| Eskalation | Wiederherstellen nur von Hand durch den Administrator; Abweichung bestätigen oder von Hand zurücksetzen |
+
+**G `client_recovery`**
+
+| | |
+|---|---|
+| Erkennung heute | **vorhanden**: `wifi_reconnect_storm`, `wifi_auth_failures`, `wifi_band_flapping`, `wifi_roam_flapping` |
+| Rollen, Fähigkeit | Gateway, Access Point; `data.wireless` |
+| Schritte | Stabilitätsverlauf (Client-Stabilität) · Signal · Roaming · Verfügbarkeit des AP · DHCP-/DNS-Auffälligkeiten (nicht bekannt: Zustand im Gerät) · einordnen · Empfehlungen |
+| Darf vorschlagen | **nichts**, nur Empfehlung (Abdeckung, Roaming-Schwellen, AP prüfen, Client prüfen, A/B für DHCP und DNS) |
+| Ursache außerhalb | **True** bei Ursache am Client (Treiber, Energiesparen, falsches Passwort, SAE, falsches Netz, feste Adresse, MAC-Filter); **False**, wenn der AP des Clients nicht verfügbar war; schwaches Signal, Roaming, Steering → **None** |
+| Nie | nie Deauthentifizierung, Sperre oder erzwungenes Roaming; der Katalog hat keine Client-Aktion (`client.*` steht auf der Nie-Liste) |
+| Abbruch | Client nicht mehr da |
+| Eskalation | bleibt das Muster, prüft ein Mensch den Client |
+
+### 8.5 Flotte
+
+- Sechs arbeitende Router und ein abgeschalteter Eintrag; drei Access Points hängen hinter
+  einem Access Point. Für C und D heißt das: ein Funk oder Port, dessen Abhängige oder
+  Management-Weg nicht als „nein“ bekannt sind, gilt als kritisch.
+- Zwei Repeater eines anderen Herstellers: Fehlt eine Fähigkeit (`data.services`,
+  `data.wireless`, `config.*` als False), ist das Playbook **nicht unterstützt** mit Grund
+  `capability_missing`; es wird nie angenommen, dass OpenWrt-Dienste da sind. E passt dort
+  schon wegen der Rolle nicht.
+- Auf dem kleinsten Access Point sind dnsmasq und odhcpd **absichtlich aus** (`rc list`):
+  „läuft nicht“ ist dort der Sollzustand, keine Störung und nie ein Neustart-Kandidat (A und B
+  melden „nichts zu reparieren“).
 
 ## 9. Entscheidung und Konfidenz
 
@@ -1283,7 +1488,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Versuchsgrenze am Fensterrand umgangen (zwei Versuche kurz vor und zwei kurz nach dem Ende eines festen Fensters) | gleitendes Fenster: höchstens N Versuche in jeder Spanne von 24 h; Abklingzeit nie verkürzt; offener Ausgang zählt nie als Erfolg | **gebaut** in Richtlinie und Speicher (Abschnitt 10.2) |
 | Ergebnis unbekannt, die nächste Aktion verschlimmert es | Hold bis zur Freigabe durch einen Administrator | **gebaut** im Speicher (Abschnitt 5.1) |
 | Wanduhr springt (NTP, RTC, Hand) | Sicherheitsuhr: monotone Zeit im Lauf, Höchstmarke der Wanduhr über Starts, im Zweifel länger warten | **gebaut** (Abschnitt 5.2); ein Start kann höchstens 900 s gewinnen |
-| Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | **teilweise**: die Richtlinie sperrt einen Dienst-Neustart bei `cause_outside_router` (sicher außerhalb: Not Safe, unbekannt: Insufficient Evidence); den Fakt füllt erst Paket F |
+| Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | **teilweise**: die Richtlinie sperrt einen Dienst-Neustart bei `cause_outside_router` (sicher außerhalb: Not Safe, unbekannt: Insufficient Evidence); Paket F füllt den Fakt aus den Beweisdaten (Abschnitt 8.4, A) und schlägt bei True nie einen Neustart vor; aufgerufen wird es noch nicht |
 | Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab; der Katalog (Paket D) nimmt nur genaue `str` aus geschlossenen Mengen, keine Unterklassen, keine Zusatzschlüssel, und wiederholt abgelehnte Werte nie; nie-Familien (Client, Firewall, VLAN, Management, Routing, Firmware, `network`, `wpad`, UCI, Shell) stehen nicht im Katalog. Kein Schreibweg vorhanden |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
@@ -1297,9 +1502,9 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 |---|---|---|
 | **B** | Zustandsmaschine, Datenmodell, Speicher, Neustartregel, Grenzen | **gebaut** (PR #75) |
 | **C1** | Engine-Gerüst, Modulschalter, Verdrahtung, lesende Routen, Listener | **gebaut** (PR #78; nur Observe, Abschnitt 2.1 und 11) |
-| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik; die Engine ruft sie noch nicht auf (eigenes kleines Paket nach dem Merge: ein `HealDecider` über `heal_policy`, Abschnitt 2.1) | **dieser Stand** |
+| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik; die Engine ruft sie noch nicht auf (eigenes kleines Paket nach dem Merge: ein `HealDecider` über `heal_policy`, Abschnitt 2.1) | **gebaut** (PR #77) |
 | E | Vorabprüfungen | offen |
-| F | Playbooks A–G; **muss `IncidentFacts.cause_outside_router` füllen** (Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt) – bis dahin ist er `None` und sperrt jeden Dienst-Neustart (Insufficient Evidence) | offen |
+| **F** | Playbooks A–G als Daten (`heal_playbooks.py`): Register, Matcher, Analyse je Playbook, Nie-Regeln, deutsche Texte; **füllt `IncidentFacts.cause_outside_router`** (True/False/None je Playbook, Abschnitt 8.4; Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt). Reine Logik; die Engine ruft es noch nicht auf (Anbindung wie bei D), die Beweisdaten füllt die Anbindung | **dieser Stand** |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
 | I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
@@ -1434,6 +1639,37 @@ Hold.
   offenes Ergebnis, Ursache außerhalb, ungeladene Konfiguration, Auswirkung, Mindestabstand):
   jede der 76 lässt mindestens einen Test scheitern, darunter die zehn, die das Review
   überlebt hatten (M3, M5, M6, M8, M16, M19, M22, M23, M24, M26).
+
+- `tests/test_heal_playbooks_v1530.py` (Paket F, 130 Tests): Auftragstests 10 (DNS-Plan:
+  Schritte, Vorschlag `service.restart dnsmasq`, durch den Gate nur Empfehlung bzw. Freigabe,
+  nie ausführbar), 11 (DHCP: nur der vergebende Dienst, unbekannter oder nicht vergebender
+  Dienst, voller Bereich, Konflikt, Ursache am Client), 12 (Funk: Empfehlung mit Grund
+  „gesperrt“, Kanalwechsel, Interferenz, einzelner Ausfall), 13 (WAN: Anbieter-Störung „nichts
+  zu reparieren“, fünf Einordnungen), 14 (Form des Drift-Plans, Überlagerung nur mit Vergleich),
+  34 (nur Wurzelvorfälle; eine Wurzel mit Kindern ergibt genau einen Befund). Jedes Playbook
+  gegen den Katalog und nur bekannte Vorabprüfungen; Vorfallarten, Ursachen, Bereiche,
+  Familien, Diagnosestufen gegen `net_rules`, `net_events`, `config_const`, `diag_model`; jede
+  Nie-Regel einzeln (Ursache außerhalb, keine Lease- und keine Client-Aktion im Katalog, Funk
+  auf Uplink – auch mit gepatchtem Katalog, der die Aktion freigibt –, Uplink-/Management-
+  Schnittstelle, kein Neustart irgendwo, keine automatische Wiederherstellung, kritische
+  Konfiguration); Flotte (kleinster AP mit absichtlich abgeschalteten Diensten, Repeater ohne
+  Fähigkeit); unbekannte Beweise → `None` und nur Empfehlung; Matcher deterministisch und
+  höchstens ein Playbook, nur zeitliche Nähe ergibt nichts; feindliche Texte (Shell-Zeichen,
+  HTML, Nullbyte, Unterklassen von `str`, 5000 Zeichen) erreichen weder Vorschlag noch Text;
+  3000 Zufallsfälle durch `heal_policy.gate` in allen drei Modi: `executable_now` immer False,
+  höchstens „Freigabe nötig“ und nur für `service.restart`; Reinheit per AST (nur Standard-
+  bibliothek, `heal_catalog`, `heal_policy`, `heal_model`; kein HA, keine API, keine Uhr).
+- **Mutationsprüfung Paket F:** 38 gezielte Änderungen an `heal_playbooks.py` (je eine
+  Nie-Regel, eine Matcher-Regel oder eine Ableitung von `cause_outside_router` entfernt oder
+  gelockert) in einer Kopie: alle 38 lassen mindestens einen Test scheitern. Im ersten Lauf
+  überlebten fünf (Dienst aus gilt als gestört, Ursache am Client bei B, Uplink-Rolle und
+  unbekannte Abhängige bei D, Konstante statt Aufruferwert); für jede kam ein Test dazu.
+
+Nicht geprüft (Paket F): wer `Evidence` füllt und ob die Werte stimmen (Anbindung); dass die
+Vorfallarten und Ursachen von Network Intelligence auf der echten Flotte so auftreten, wie die
+Playbooks sie erwarten; die deutschen Texte in einer Oberfläche; die Kennungen der
+Vorabprüfungen gegen `heal_preflight.py` (Paket E läuft parallel, geprüft ist nur die Liste
+des Auftrags).
 
 Nicht geprüft (Paket D): wer die Fakten von `RiskContext` und `IncidentFacts` füllt (etwa
 `service_config_unapplied`, `service_dependant_routers`, `cause_outside_router`) und ob sie

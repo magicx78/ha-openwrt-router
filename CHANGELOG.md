@@ -280,6 +280,43 @@ keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwickl
   überlebt hatten) und 44 eigene an den neuen Regeln lassen jede mindestens einen Test
   scheitern.
 
+### Self-Healing, Paket F (Playbooks A–G als Daten, noch nicht verdrahtet)
+
+Dritter Baustein der Logik von Phase 7: die sieben Reparatur-Playbooks als versionierte
+Daten mit Matcher und Analyse (`heal_playbooks.py`). Reine Logik ohne HA-Import, ohne Uhr
+und **ohne Router-Aufruf**; die Engine ruft sie noch nicht auf. Für Benutzer ändert sich
+nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 8.
+
+- **Register A–G:** je Playbook Version, Rollen, Fähigkeiten, Rechte (aus dem Katalog),
+  die echten Vorfallarten von Network Intelligence und ob die Erkennung heute da ist (A, B,
+  C, D teilweise, E und G vorhanden, F nicht – mit der jeweils fehlenden Erkennung),
+  Risikoklasse aus dem Katalog, Vorabprüfungen (nur die Kennungen aus Paket E), typisierte
+  Leseschritte, Prüfproben, Abbruch, Rollback-Aussage des Katalogs, Eskalation, Nie-Regeln.
+  Ein fehlerhaftes Register lädt nicht.
+- **Matcher:** ein Wurzelvorfall ergibt höchstens ein Playbook, immer gleich; Folgevorfälle,
+  unbekannte Wurzel, nur zeitliche Nähe und Flotten-Vorfälle ergeben keins. Eine durch einen
+  Vergleich belegte Konfigurationsänderung im betroffenen Bereich führt zu Playbook F.
+  Fehlt einem Router eine Fähigkeit (etwa einem Repeater eines anderen Herstellers), ist das
+  Playbook „nicht unterstützt“ mit Grund.
+- **Analyse:** eingeordnete Ursache, Schritte mit Ergebnis, Empfehlungen, was das System
+  nicht tut, und `IncidentFacts` für die Richtlinie samt **„Ursache außerhalb des Routers“**
+  (ja, nein oder unbekannt). Vorschlagen kann nur A (`service.restart dnsmasq`) und B
+  (`dnsmasq`/`odhcpd`, nur der Dienst, der DHCP vergibt), und nur bei eingeschaltetem, aber
+  ausgefallenem oder instabilem Dienst mit Ursache sicher am Router. Alles andere ist eine
+  Empfehlung; durch die Richtlinie wird ein Vorschlag höchstens „Freigabe nötig“, ausführbar
+  ist in 1.53.0 nichts.
+- **Nie-Regeln:** kein Neustart bei Ursache außerhalb; keine Leases löschen, kein Neustart bei
+  vollem Adressbereich oder unbekanntem Dienst; kein Funk-Neustart auf einem WLAN-Uplink;
+  kein Ab- und Anschalten von Uplink- oder Management-Schnittstellen; kein pauschaler
+  Router-Neustart; keine automatische Wiederherstellung und keine automatische Rücksetzung
+  kritischer Konfiguration (F liefert nur einen Plan, der nie ausführt); keine
+  Client-Aktion. Absichtlich abgeschaltete Dienste (`rc list`) sind keine Störung.
+- Deutsche Texte als feste Tabelle im Modul; Texte vom Router landen nie in einem Vorschlag
+  oder Text.
+- Tests: 130 neue (Auftragstests 10–14 und 34, jede Nie-Regel, Flotte, feindliche Texte,
+  3000 Zufallsfälle durch die Richtlinie). Mutationsprüfung: 38 Änderungen, jede lässt
+  mindestens einen Test scheitern.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
