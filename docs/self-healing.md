@@ -2174,7 +2174,56 @@ Sicherungsverweis oder „nicht nötig: keine Konfigurationsänderung“, Risiko
 nachher, Rollback-Aussage), Freigabe-Ablauf (Knöpfe nur für verfügbare Aktionen) und Verlauf.
 Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 
-**Stand heute:** nichts davon gebaut; Frontend und `_PANEL_VERSION` unverändert.
+**Stand heute (Paket J):** der Tab „Self-Healing“ unter Enterprise (Reihenfolge 35, nach
+Netzwerkdiagnose, vor WiFi Intelligence), **nur lesend**. Er ruft ausschließlich die fünf
+GET-Routen aus Abschnitt 11 auf und hat keinen Knopf, der etwas ändert (kein Freigeben,
+Ausführen, Aufheben, Pausieren, kein Moduswechsel); Freigabe-Ablauf und Warteschlange mit
+Knöpfen kommen erst mit einem Schreibweg. Code in
+`frontend/topology/src/enterprise/selfhealing/`, `_PANEL_VERSION` `20261127-selfhealing1`.
+
+Von oben nach unten:
+
+- **Hinweis, immer oben** (auch beim Laden, bei Fehlern und ausgeschaltet): „Nur beobachten –
+  diese Version ändert nie etwas an einem Router.“ Meldet der Server je etwas anderes als
+  `observe_only` und `write_path: false`, steht das darunter.
+- **Übersicht:** Kacheln aus `counts.by_state` (offen, laufend, wartende Freigaben, erfolgreich,
+  fehlgeschlagen, ohne Aktion abgeschlossen), letzte Aktivität, Zahl der Datensätze und Router,
+  wartende Vorfälle, die Zeile zum automatischen Rollback. Die Kachel „Blockierte riskante
+  Aktionen“ steht auf „unbekannt“ mit Grund: keine Route liefert diese Zahl.
+- **Router und Modus:** Flotten-Pause und Flotten-Hold mit Grund und Restzeit; je Router
+  eingestellter und geltender Modus (mit dem Grund, den der Server erkennen lässt), Hold mit
+  Grund und Ende, geladen, offene Datensätze. Router heißen wie in den anderen Tabs „Router
+  xxxxxx“ (die Routen senden nur `rtr_`-Kennungen).
+- **Datensätze:** alle Datensätze (höchstens 200, neueste zuerst; Hinweis, wenn es mehr gibt),
+  Filter Alle/Offen/Abgeschlossen und Router im Browser. Je Zeile Zeit, Zustand, Vorfallart,
+  Router, Ursache, Entscheidung, Aktion und Risikoklasse.
+- **Ein Datensatz** (aufgeklappt unter seiner Zeile, lädt `actions/{id}` und
+  `plans?action_id=`): Vorfall und Ursache, Entscheidung mit Beiträgen zur Konfidenz,
+  Erklärung der Richtlinie (Ergebnis, Gründe, Risiko, Auswirkung, Wiederherstellung, Erlaubnis
+  des Gates, unbekannte Fakten), der Kandidat mit dem Etikett **„Kandidat – nicht ausgeführt“**
+  (oder der Satz, dass der Server keinen nennt – im Live-Betrieb von 1.53.0 der Normalfall),
+  „Was würde blockieren“ (Blocker des Plans und gespeicherte Vorabprüfungen), Zähler
+  (Wiederöffnungen, Ausführungsversuche, frühere Versuche laut Richtlinie, Schritte im
+  Verlauf), der Verlauf und die übrigen Felder (Freigabe, Sicherung, Rollback, Nachprüfung,
+  Bauteile).
+- **Einstellungen (nur Anzeige):** Schalter, Modul im Speicher, Grenzen und Aufbewahrung.
+
+Regeln: Was der Server nicht oder nicht als Code sendet, steht als „unbekannt“ (nie 0, „nein“
+oder grün). Ein fehlgeschlagener Abruf zeigt einen Fehler mit „Erneut versuchen“; eine frühere
+Antwort bleibt dann sichtbar und der Fehler steht darüber. „Noch nichts beobachtet“ ist ein
+eigener, freundlicher Zustand. Modul aus (`module_disabled`), 503 `not_running` und 404 ohne
+Route zeigen den Kasten „ausgeschaltet“ mit dem Weg zum Schalter. Nicht-Administratoren sehen
+nur die Übersicht der Zahlen (der Tab fragt für sie keine andere Route an); 403 heißt „Nur für
+Administratoren“. Alle Gründe kommen aus **einer** Tabelle im Frontend (`shTexts.ts`, Kopie
+von `heal_policy.REASON_TEXT_DE` plus Blocker-, Verlaufs-, Hold- und Pausengründe; ein Test
+vergleicht sie mit den Python-Quellen); ein unbekannter Code wird roh gezeigt. Die Texte
+`texts_de` des Servers nutzt der Tab nicht. Abruf beim Öffnen, mit „Aktualisieren“ und danach
+höchstens alle 60 s, nur solange die Seite sichtbar ist; ein anderer Tab ist nicht eingehängt
+und fragt nichts. Das Panel ist nur dunkel; ein helles Design gibt es nicht.
+
+Nicht gezeigt, weil keine Route es liefert: Anzeigenamen der Router, Zahl blockierter
+riskanter Aktionen, Versuche je Router in 24 h und Restzeit der Abklingzeit, ein Verlauf mit
+eigenen Filtern über alle Datensätze.
 
 ## 14. Bedrohungsmodell
 
