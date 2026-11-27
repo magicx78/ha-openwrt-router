@@ -193,7 +193,13 @@ def full_action() -> hm.RemediationAction:
                 )
             },
         ),
-        (S.EXECUTING, A.ENGINE, "intent_written", {}),
+        # the attempt number is fixed when the intent is written
+        (
+            S.EXECUTING,
+            A.ENGINE,
+            "intent_written",
+            {"execution": hm.Execution(attempt_no=1)},
+        ),
         (
             S.VERIFYING,
             A.ENGINE,
@@ -730,7 +736,8 @@ def test_new_action_defaults() -> None:
     assert action.rollback.status is hm.RollbackStatus.NOT_AVAILABLE
     assert action.execution.call_result is None
     assert action.verification.result is None
-    assert action.risk.risk_class is hm.RiskClass.READ_ONLY
+    # unassessed counts as the highest risk (decided in the review of PR #75)
+    assert action.risk.risk_class is hm.RiskClass.HIGH
     assert new_action().action_id != action.action_id
 
 
@@ -792,15 +799,26 @@ def test_action_dedupe_id() -> None:
     assert new_action().action_dedupe == a
 
 
-def test_incident_dedupe_id() -> None:
-    comp = hm.Component(kind=hm.ComponentKind.SERVICE, name="dnsmasq")
-    i = hm.incident_dedupe_id(R1, "inc-7", comp)
-    assert i == hm.incident_dedupe_id(R1, "inc-7", comp)
+def test_incident_and_component_dedupe_ids() -> None:
+    i = hm.incident_dedupe_id("inc-7")
+    assert i == hm.incident_dedupe_id("inc-7")
     assert i.startswith("ddi_") and not looks_like_key_material(i)
-    assert i != hm.incident_dedupe_id(R1, "inc-8", comp)
-    assert i != hm.incident_dedupe_id(R2, "inc-7", comp)
+    assert i != hm.incident_dedupe_id("inc-8")
+    # the root incident is fleet-wide (Network Intelligence numbers it so)
     assert new_action().incident_dedupe == i
+    assert new_action(router_id=R2).incident_dedupe == i
     assert new_action(incident_id=None).incident_dedupe is None
+    comp = hm.Component(kind=hm.ComponentKind.SERVICE, name="dnsmasq")
+    c = hm.component_dedupe_id(R1, comp)
+    assert c.startswith("ddc_") and not looks_like_key_material(c)
+    assert c != hm.component_dedupe_id(R2, comp)
+    assert new_action().component_dedupes == (c,)
+    assert new_action().loop_keys == ((R1, "service.restart", "service:dnsmasq"),)
+    long_name = hm.Component(
+        kind=hm.ComponentKind.INTERFACE, name="-".join(f"vlan{i}" for i in range(10))
+    )
+    (ref,) = {k[2] for k in new_action(components=(long_name,)).loop_keys}
+    assert ref.startswith("cmp_") and len(ref) == 36
 
 
 def test_idempotency_id_never_keeps_the_raw_value() -> None:
@@ -934,18 +952,29 @@ def _filled_loop() -> hm.LoopState:
     action = new_action()
     loop.incident_dedupe[action.incident_dedupe or ""] = action.action_id
     loop.action_dedupe[action.action_dedupe] = action.action_id
+    for dedupe in action.component_dedupes:
+        loop.component_dedupe[dedupe] = action.action_id
     loop.idempotency[hm.idempotency_id("req-1")] = hm.IdempotencyRecord(
         action_id=action.action_id, created_at=T0
     )
-    assert loop.try_lock(
-        hm.LockRecord(
-            router_id=R1,
-            holder=hm.LockHolder.ENGINE,
-            action_id=action.action_id,
-            since=T0,
-            source="self_healing",
+    assert loop.try_lock(hm.LockRecord.engine(action, T0))
+    loop.place_hold(
+        hm.RouterHold(
+            router_id=R2,
+            reason=hm.HoldReason.OUTCOME_UNKNOWN,
+            since=T0 + 40,
+            action_id="rem_" + "8" * 32,
         )
     )
+    loop.place_hold(
+        hm.RouterHold(
+            router_id=None,
+            reason=hm.HoldReason.STORE_LOST,
+            since=T0,
+            until=T0 + 86400,
+        )
+    )
+    loop.clock = hm.SafetyClock().observe(T0).observe(T0 + 50).observe(T0 + 10)
     loop.record_external_write(
         hm.ExternalWrite(
             router_id=R2,
@@ -975,16 +1004,14 @@ def test_router_lock_is_data_with_one_holder() -> None:
         since=T0,
         source="self_healing",
     )
-    button = hm.LockRecord(
-        router_id=R1, holder=hm.LockHolder.EXTERNAL, since=T0, source="button.reboot"
-    )
+    button = hm.LockRecord.external(R1, "button.reboot", T0)
     assert loop.lock_holder(R1) is None
     assert loop.try_lock(engine)
-    assert loop.try_lock(engine)  # the same holder again
+    assert loop.try_lock(engine)  # the same holder (same lock id) again
     assert not loop.try_lock(button)  # a repair is active: the button must wait
     assert loop.lock_holder(R1) == engine
-    assert not loop.release_lock(R1, button)  # only the holder releases
-    assert loop.release_lock(R1, engine)
+    assert not loop.release_lock(R1, button.lock_id)  # only the holder releases
+    assert loop.release_lock(R1, engine.lock_id)
     assert loop.try_lock(button)
     assert loop.repair_active(R1) is False  # an external write is not a repair
     assert loop.lock_holder(R2) is None

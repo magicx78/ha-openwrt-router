@@ -26,6 +26,21 @@ Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/
   und pausiert Auto-Heal 24 h für die ganze Flotte. Grenzen: 500 Datensätze, 20 offene je
   Router, 90 Tage für abgeschlossene, 1 MB Datei; verdrängt werden nur abgeschlossene
   Datensätze, nie eine laufende Aktion.
+- Nach dem unabhängigen Review von PR #75:
+  - Schreiben vor dem Handeln: Schließen und Flush warten auf den laufenden Schritt, und jedes
+    Schreiben währenddessen enthält schon den neuen Zustand.
+  - Die Felder der Doppelt-Prüfung (Aktion, Parameter, Vorfall, Bauteile, Idempotenz) sind
+    nach dem Anlegen eingefroren. Weitere Felder ändern sich nur mit ihrem Übergang;
+    „unterbrochen“ setzt nur die Neustartregel.
+  - Doppelte: eine offene Aktion je Wurzelvorfall und je Router und Bauteil.
+  - Eine Idempotenz-Kennung ohne Datensatz wird abgelehnt.
+  - Jede Router-Sperre hat einen eigenen Halter mit eigener Kennung.
+  - Ein unbekannter oder eskalierter Ausgang, ein unlesbarer Datensatz oder ein verlorener
+    Speicher setzt den Router bzw. die Flotte in Observe (Hold), bis ein Administrator oder
+    die Zeit es aufhebt.
+  - Wartezeiten laufen auf einer Uhr, die eine springende Wanduhr nie verkürzt.
+  - Beim Ausführen gelten Abklingzeit, Versuche in 24 h und offene Schutzschalter.
+  - Abgeschlossene Datensätze fallen nur, wenn das die Datei wirklich unter die Grenze bringt.
 - `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
 
 ## [1.52.2] - 2026-11-27

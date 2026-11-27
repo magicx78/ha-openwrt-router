@@ -39,9 +39,18 @@ mapping keys never name a secret (``core_masking.is_secret_key``).
 Router-supplied names (services, radios, interfaces) are stored as such data
 and never interpreted. Errors name the field, never the value.
 
-**Times** are UTC wall-clock seconds passed in by the caller and kept to the
-millisecond. Nothing here invents a time; a clock jump back is recorded as
-given.
+**Fields.** Identity, the dedupe inputs and the flags never change after
+creation; the planning fields change only while the action is planned;
+approval, execution, verification and rollback change only together with
+the transition they belong to, the approval binding never; ``audit_refs``
+only grows; ``interrupted`` is set only by the restart rule (docs §3.1).
+
+**Times.** Record times (history, ``created_at``, ``updated_at``) are UTC
+wall-clock seconds passed in by the caller, kept to the millisecond and
+recorded as given (also after a jump back). Every wait of the loop
+protection (cooldowns, attempt windows, pauses, holds, retention of safety
+state) runs on the :class:`SafetyClock`, which never runs backwards and
+never jumps ahead by more than ``CLOCK_STEP_MAX_S`` at a time (docs §5.2).
 """
 
 from __future__ import annotations
@@ -73,7 +82,7 @@ from .core_models import (
 _LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Limits of one record (docs/self-healing.md §2.4)
+# Limits of one record (docs/self-healing.md §3)
 # ---------------------------------------------------------------------------
 
 HISTORY_MAX: Final = 24  # the longest legal path has 13 entries
@@ -98,8 +107,16 @@ OUTAGE_MAX_S: Final = 86_400
 # masking never takes them for key material.
 ACTION_DEDUPE_PREFIX: Final = "dda_"
 INCIDENT_DEDUPE_PREFIX: Final = "ddi_"
+COMPONENT_DEDUPE_PREFIX: Final = "ddc_"
+COMPONENT_REF_PREFIX: Final = "cmp_"  # a component too long for a loop key
 IDEMPOTENCY_PREFIX: Final = "idm_"
 MAINTENANCE_ID_PREFIX: Final = "mtw_"
+LOCK_ID_PREFIX: Final = "lck_"
+
+# Safety clock (docs §5.2): the largest step one observation may add.
+CLOCK_STEP_MAX_S: Final = 900
+CLOCK_BACK_TOLERANCE_S: Final = 1.0  # smaller steps back are not counted
+CLOCK_JUMPS_MAX: Final = 1_000_000
 
 # Loop protection defaults and bounds (design §7; configurable within them).
 COOLDOWN_DEFAULT_S: Final = 1800
@@ -123,6 +140,12 @@ _CODE_RE: Final = re.compile(r"[a-z][a-z0-9_.]{0,63}")
 _MKEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,47}")
 _CORE_ID_RE: Final = re.compile(r"[a-z]{3}_[0-9a-f]{32}")
 _IDEM_RAW_RE: Final = re.compile(r"[\x21-\x7e]{1,128}")
+_SEGMENT_SPLIT_RE: Final = re.compile(r"[._:@-]")
+# A name segment this long with mixed case and digits, or this long with
+# many digits among letters, is more likely a key than a router name.
+_MIXED_SEGMENT_MIN: Final = 12
+_DIGIT_SEGMENT_MIN: Final = 16
+_DIGIT_SEGMENT_DIGITS: Final = 4
 _TS_MAX: Final = 1e11  # far beyond any wall time; above it is not a time
 
 
@@ -363,6 +386,23 @@ class LockHolder(StrEnum):
     EXTERNAL = "external"  # a write from outside the engine (button, switch)
 
 
+class HoldReason(StrEnum):
+    """Why a router (or the fleet) is held (docs §5.1)."""
+
+    # a call ran and its outcome is unknown (MANUAL_RECOVERY_REQUIRED)
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    # a call ran and the action escalated to an admin
+    OUTCOME_ESCALATED = "outcome_escalated"
+    # a record of the store could not be read at load
+    RECORD_UNREADABLE = "record_unreadable"
+    # the store file was lost, unreadable or newer
+    STORE_LOST = "store_lost"
+    # an admin released an action stuck in a running state
+    STUCK_RELEASED = "stuck_released"
+    # an admin force-released a stuck external lock
+    LOCK_FORCED = "lock_forced"
+
+
 class MaintenanceScope(StrEnum):
     """Maintenance scopes kept by this module.
 
@@ -426,7 +466,7 @@ _ONCE = (Precondition.FIRST_ENTRY,)
 _KNOWN = (Precondition.NOT_INTERRUPTED,)
 
 # (from, to) -> who may trigger it, under which conditions. The ONLY place
-# that decides whether a state change is allowed (docs/self-healing.md §2.2).
+# that decides whether a state change is allowed (docs/self-healing.md §4).
 TRANSITIONS: Final[Mapping[tuple[ActionState, ActionState], Rule]] = MappingProxyType(
     {
         (S.DETECTED, S.ANALYZED): _rule(_E),
@@ -463,7 +503,7 @@ TRANSITIONS: Final[Mapping[tuple[ActionState, ActionState], Rule]] = MappingProx
     }
 )
 
-# Restart rule (docs §2.3): state found at load -> (target, reason). States
+# Restart rule (docs §5): state found at load -> (target, reason). States
 # not listed (DETECTED, ANALYZED, PROPOSED, terminal ones) stay as they are;
 # the engine re-checks open proposals against the current incidents.
 _RESTART_RULES: Final[Mapping[ActionState, tuple[ActionState, str]]] = MappingProxyType(
@@ -535,11 +575,33 @@ def _bool(value: Any, what: str) -> bool:
     return value
 
 
+def _token_like_segment(segment: str) -> bool:
+    """A segment shaped like an API key, a JWT part or a base64 run."""
+    letters = sum(c.isalpha() for c in segment)
+    digits = sum(c.isdigit() for c in segment)
+    if (
+        len(segment) >= _MIXED_SEGMENT_MIN
+        and digits
+        and any(c.isupper() for c in segment)
+        and any(c.islower() for c in segment)
+    ):
+        return True
+    return (
+        len(segment) >= _DIGIT_SEGMENT_MIN
+        and letters > 0
+        and digits >= _DIGIT_SEGMENT_DIGITS
+    )
+
+
 def _token(value: Any, what: str) -> str:
     """A short router- or module-supplied name; never key material."""
     if not isinstance(value, str) or _TOKEN_RE.fullmatch(value) is None:
         _fail(what)
-    if _CORE_ID_RE.fullmatch(value) is None and looks_like_key_material(value):
+    if _CORE_ID_RE.fullmatch(value) is not None:
+        return value
+    if looks_like_key_material(value) or any(
+        _token_like_segment(seg) for seg in _SEGMENT_SPLIT_RE.split(value)
+    ):
         _fail(what)
     return value
 
@@ -816,10 +878,14 @@ class Decision(_Record):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Risk(_Record):
-    """Risk class 0..3 with its reasons (never only from the action name)."""
+    """Risk class 0..3 with its reasons (never only from the action name).
+
+    Unassessed means the highest class: a record without a risk assessment
+    is never treated as read-only (holds and Auto-Heal check the class).
+    """
 
     _what = "risk"
-    risk_class: RiskClass = RiskClass.READ_ONLY
+    risk_class: RiskClass = RiskClass.HIGH
     reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -1107,16 +1173,38 @@ def action_dedupe_id(
     )
 
 
-def incident_dedupe_id(router_id: str, incident_id: str, component: Component) -> str:
-    """Same (router, root incident, component) -> same id."""
+def incident_dedupe_id(incident_id: str) -> str:
+    """Same root incident -> same id, fleet-wide.
+
+    Network Intelligence numbers incidents fleet-wide (``inc-N``), so one
+    root incident has at most one open action in the whole fleet.
+    """
+    return _digest_id(INCIDENT_DEDUPE_PREFIX, {"i": _token(incident_id, "incident_id")})
+
+
+ROUTER_COMPONENT: Final = Component(kind=ComponentKind.ROUTER, name="router")
+
+
+def component_dedupe_id(router_id: str, component: Component) -> str:
+    """Same (router, component) -> same id: one open action per component."""
     return _digest_id(
-        INCIDENT_DEDUPE_PREFIX,
+        COMPONENT_DEDUPE_PREFIX,
         {
             "r": _id(router_id, ROUTER_ID_PREFIX, "router_id"),
-            "i": _token(incident_id, "incident_id"),
-            "c": component.to_dict(),
+            "c": _part(component, Component, "component").to_dict(),
         },
     )
+
+
+def component_ref(component: Component) -> str:
+    """The ``ref`` of a loop key for one component: ``kind:name``.
+
+    A name too long for a key is replaced by a digest id of the component.
+    """
+    ref = f"{component.kind.value}:{component.name}"
+    if len(ref) <= TOKEN_MAX:
+        return ref
+    return _digest_id(COMPONENT_REF_PREFIX, component.to_dict())
 
 
 def idempotency_id(raw: str) -> str:
@@ -1130,9 +1218,72 @@ def idempotency_id(raw: str) -> str:
 # The record
 # ---------------------------------------------------------------------------
 
-# Fields ``transition(changes=...)`` and ``with_changes`` may not touch.
-_FIXED_FIELDS: Final = frozenset(
+# Fields nothing may change after creation (docs §3.1): identity and the
+# history, the dedupe inputs, and the flags (``interrupted`` is set only by
+# the restart rule, the others through ``with_flags``).
+_IDENTITY_FIELDS: Final = frozenset(
     {"action_id", "router_id", "state", "history", "created_at", "updated_at"}
+)
+_FIXED_FIELDS: Final = _IDENTITY_FIELDS | frozenset(
+    {"action_type", "params", "incident_id", "components", "idempotency_id", "flags"}
+)
+# States in which the action is still being planned (nothing approved yet).
+PLANNING_STATES: Final = frozenset(
+    {
+        ActionState.DETECTED,
+        ActionState.ANALYZED,
+        ActionState.PROPOSED,
+        ActionState.PREFLIGHT,
+    }
+)
+# Change only while planning (``with_changes`` or a transition from there).
+_PLAN_FIELDS: Final = frozenset(
+    {
+        "incident_type",
+        "incident_reopen",
+        "cause",
+        "playbook_id",
+        "playbook_version",
+        "decision",
+        "risk",
+        "prerequisites",
+        "planned_changes",
+        "expected_impact",
+        "backup_ref",
+        "state_fingerprint",
+    }
+)
+# Change only together with a transition from these source states.
+_STEP_FIELD_SOURCES: Final[Mapping[str, frozenset[ActionState]]] = MappingProxyType(
+    {
+        "preflight": PLANNING_STATES | {ActionState.APPROVED},
+        "approval": PLANNING_STATES
+        | {ActionState.WAITING_APPROVAL, ActionState.APPROVED},
+        "execution": frozenset(
+            {ActionState.APPROVED, ActionState.EXECUTING, ActionState.VERIFYING}
+        ),
+        "verification": frozenset(
+            {
+                ActionState.PREFLIGHT,
+                ActionState.APPROVED,
+                ActionState.EXECUTING,
+                ActionState.VERIFYING,
+                ActionState.ROLLING_BACK,
+            }
+        ),
+        "rollback": PLANNING_STATES
+        | {
+            ActionState.FAILED,
+            ActionState.ROLLBACK_PENDING,
+            ActionState.ROLLING_BACK,
+        },
+    }
+)
+# ``with_changes`` may set these step fields while planning (no transition).
+_PLANNED_STEP_FIELDS: Final = frozenset({"preflight", "rollback"})
+# A new record starts with these at their defaults.
+_NEW_REFUSED: Final = _IDENTITY_FIELDS | frozenset(
+    {"flags", "approval", "execution", "verification"}
 )
 
 
@@ -1297,9 +1448,14 @@ class RemediationAction(_Record):
         reason: str = "detected",
         **values: Any,
     ) -> RemediationAction:
-        """A new record in DETECTED (its first history entry has no source)."""
+        """A new record in DETECTED (its first history entry has no source).
+
+        Identity, flags, approval, execution and verification start at their
+        defaults; the dedupe inputs (action type, params, incident,
+        components, idempotency id) are given here and never change.
+        """
         stamp = _ts(ts, "ts")
-        if any(name in _FIXED_FIELDS for name in values):
+        if any(name in _NEW_REFUSED for name in values):
             _fail("fixed field")
         try:
             return cls(
@@ -1326,15 +1482,45 @@ class RemediationAction(_Record):
             raise HealModelError("invalid action") from err
 
     def with_changes(self, **changes: Any) -> RemediationAction:
-        """A copy with other field values; never state, history or identity."""
-        if any(name in _FIXED_FIELDS for name in changes):
-            _fail("fixed field")
+        """A copy with other field values, outside a transition.
+
+        Allowed: the planning fields (and planned preflight checks and the
+        rollback statement) while the action is planned, and more
+        ``audit_refs`` at any time. Everything else is fixed or changes only
+        with its transition (:func:`transition`).
+        """
+        planning = self.state in PLANNING_STATES
+        for name in changes:
+            if name in _FIXED_FIELDS:
+                _fail("fixed field")
+            if name in _PLAN_FIELDS or name in _PLANNED_STEP_FIELDS:
+                if not planning:
+                    _fail("planning field")
+            elif name in _STEP_FIELD_SOURCES:
+                _fail("transition field")
         try:
-            return replace(self, **changes)
+            new = replace(self, **changes)
         except HealModelError:
             raise
         except (TypeError, ValueError, AttributeError) as err:
             raise HealModelError("invalid action") from err
+        if not _audit_refs_grow(self, new):
+            _fail("audit_refs")
+        return new
+
+    def with_flags(self, **flags: Any) -> RemediationAction:
+        """A copy with ``in_maintenance`` or ``acknowledged_by_admin`` changed.
+
+        ``interrupted`` is never set here (only the restart rule sets it) and
+        an admin acknowledgement cannot be taken back.
+        """
+        allowed = {"in_maintenance", "acknowledged_by_admin"}
+        if any(name not in allowed for name in flags):
+            _fail("flags")
+        new_flags = _build(Flags, {**self.flags.to_dict(), **flags}, "flags")
+        if self.flags.acknowledged_by_admin and not new_flags.acknowledged_by_admin:
+            _fail("flags.acknowledged_by_admin")
+        return replace(self, flags=new_flags)
 
     # -- derived -----------------------------------------------------------------------
 
@@ -1355,15 +1541,44 @@ class RemediationAction(_Record):
 
     @property
     def incident_dedupe(self) -> str | None:
-        """Dedupe id of (router, root incident, first component)."""
+        """Dedupe id of the root incident (fleet-wide), None without one."""
         if self.incident_id is None:
             return None
-        component = (
-            self.components[0]
-            if self.components
-            else Component(kind=ComponentKind.ROUTER, name="router")
+        return incident_dedupe_id(self.incident_id)
+
+    @property
+    def target_components(self) -> tuple[Component, ...]:
+        """The components the action acts on (the router if none is named)."""
+        return self.components or (ROUTER_COMPONENT,)
+
+    @property
+    def component_dedupes(self) -> tuple[str, ...]:
+        """Dedupe ids of (router, component) for every component."""
+        return tuple(
+            dict.fromkeys(
+                component_dedupe_id(self.router_id, c) for c in self.target_components
+            )
         )
-        return incident_dedupe_id(self.router_id, self.incident_id, component)
+
+    @property
+    def loop_keys(self) -> tuple[tuple[str, str, str], ...]:
+        """Attempt and breaker keys: (router, action type, component ref)."""
+        return tuple(
+            dict.fromkeys(
+                (self.router_id, self.action_type, component_ref(c))
+                for c in self.target_components
+            )
+        )
+
+    @property
+    def entered_executing(self) -> bool:
+        """The action reached EXECUTING once (a router call may have run)."""
+        return any(h.to_state is ActionState.EXECUTING for h in self.history)
+
+
+def _audit_refs_grow(old: RemediationAction, new: RemediationAction) -> bool:
+    """``audit_refs`` only grows: the old refs stay first, in order."""
+    return new.audit_refs[: len(old.audit_refs)] == old.audit_refs
 
 
 def binding_hash(action: RemediationAction, *, catalog_version: int) -> str:
@@ -1461,18 +1676,18 @@ def transition(
     except HealModelError:
         raise BadTransitionInputError(src, dst, who, "entry") from None
     extra = dict(changes or {})
-    if any(name in _FIXED_FIELDS for name in extra):
-        raise BadTransitionInputError(src, dst, who, "fixed_field")
+    detail = _refused_change(src, dst, extra)
+    if detail is not None:
+        raise BadTransitionInputError(src, dst, who, detail)
     try:
         if who in rule.interrupts:
-            flags = _part(extra.get("flags", action.flags), Flags, "flags")
-            extra["flags"] = replace(flags, interrupted=True)
+            extra["flags"] = replace(action.flags, interrupted=True)
         if dst is ActionState.EXECUTING:
             execution = _part(
                 extra.get("execution", action.execution), Execution, "execution"
             )
             extra["execution"] = replace(execution, intent_written_at=entry.ts)
-        return replace(
+        new = replace(
             action,
             state=dst,
             history=(*action.history, entry),
@@ -1481,6 +1696,50 @@ def transition(
         )
     except (HealModelError, TypeError, ValueError, AttributeError):
         raise BadTransitionInputError(src, dst, who, "changes") from None
+    detail = _refused_result(action, new, dst)
+    if detail is not None:
+        raise BadTransitionInputError(src, dst, who, detail)
+    return new
+
+
+def _refused_change(
+    src: ActionState, dst: ActionState, extra: Mapping[str, Any]
+) -> str | None:
+    """Which field of ``changes`` a transition src -> dst may not touch."""
+    for name in extra:
+        if name in _FIXED_FIELDS:
+            return "fixed_field"
+        if name in _PLAN_FIELDS and src not in PLANNING_STATES:
+            return "planning_field"
+        sources = _STEP_FIELD_SOURCES.get(name)
+        if sources is not None and src not in sources:
+            return "step_field"
+        if (
+            name == "approval"
+            and src is ActionState.APPROVED
+            and dst is not ActionState.CANCELLED
+        ):
+            return "step_field"
+    return None
+
+
+def _refused_result(
+    old: RemediationAction, new: RemediationAction, dst: ActionState
+) -> str | None:
+    """Field rules that compare the old and the new record."""
+    if not _audit_refs_grow(old, new):
+        return "audit_refs"
+    if old.state in (ActionState.WAITING_APPROVAL, ActionState.APPROVED) and (
+        new.approval.guard_approval_id != old.approval.guard_approval_id
+        or new.approval.binding_hash != old.approval.binding_hash
+    ):
+        return "approval_binding"
+    if dst is not ActionState.EXECUTING and (
+        new.execution.intent_written_at != old.execution.intent_written_at
+        or new.execution.attempt_no != old.execution.attempt_no
+    ):
+        return "execution_intent"
+    return None
 
 
 def restart_recovery(action: RemediationAction) -> tuple[ActionState, str] | None:
@@ -1520,6 +1779,32 @@ def apply_restart_recovery(
     )
 
 
+def hold_reason_for(action: RemediationAction) -> HoldReason | None:
+    """Whether the end of ``action`` holds its router, and why (docs §5.1).
+
+    An action that reached EXECUTING (a router call may have run) and ended
+    in MANUAL_RECOVERY_REQUIRED (outcome unknown) or ESCALATED holds the
+    router until an admin releases it. Not held: a call the router refused
+    cleanly (EXECUTING -> FAILED with ``call_result`` REJECTED, not
+    interrupted), and every action that never reached EXECUTING.
+    """
+    if not action.entered_executing:
+        return None
+    if action.state is ActionState.MANUAL_RECOVERY_REQUIRED:
+        return HoldReason.OUTCOME_UNKNOWN
+    if action.state is not ActionState.ESCALATED:
+        return None
+    clean_refusal = (
+        not action.flags.interrupted
+        and action.execution.call_result is CallResult.REJECTED
+        and any(
+            h.from_state is ActionState.EXECUTING and h.to_state is ActionState.FAILED
+            for h in action.history
+        )
+    )
+    return None if clean_refusal else HoldReason.OUTCOME_ESCALATED
+
+
 # ---------------------------------------------------------------------------
 # Loop protection state (data only; packages D/I decide with it)
 # ---------------------------------------------------------------------------
@@ -1556,7 +1841,10 @@ class LoopLimits(_Record):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class AttemptRecord(_Record):
-    """Attempts of one (router, action type, incident) key."""
+    """Attempts of one (router, action type, component ref) key.
+
+    Times are safety-clock seconds (``SafetyClock.safe``).
+    """
 
     _what = "attempt"
     count: int = 0
@@ -1634,16 +1922,28 @@ class FleetPause(_Record):
         return self.paused_until is not None and now < self.paused_until
 
 
+LOCK_SOURCE_ENGINE: Final = "self_healing"
+
+
+def _new_lock_id() -> str:
+    return new_id(LOCK_ID_PREFIX)
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class LockRecord(_Record):
-    """Holder of a router's repair lock."""
+    """Holder of a router's repair lock.
+
+    Every holder has its own ``lock_id``: two writes from the same source
+    are two holders, and only the id releases the lock.
+    """
 
     _what = "lock"
     router_id: str
     holder: LockHolder
-    since: float
+    since: float  # wall time (information only; a lock never expires)
     source: str  # "self_healing", "button.reboot", "switch.service" ...
     action_id: str | None = None
+    lock_id: str = field(default_factory=_new_lock_id)
 
     def __post_init__(self) -> None:
         """Validate (an engine lock names its action, an external one none)."""
@@ -1656,16 +1956,31 @@ class LockRecord(_Record):
             "action_id",
             _opt_id(self.action_id, REMEDIATION_ID_PREFIX, "lock.action_id"),
         )
+        _set(self, "lock_id", _id(self.lock_id, LOCK_ID_PREFIX, "lock.lock_id"))
         if (self.holder is LockHolder.ENGINE) is (self.action_id is None):
             _fail("lock.action_id")
 
-    def same_holder(self, other: LockRecord) -> bool:
-        """Same holder kind, source and action."""
-        return (self.holder, self.source, self.action_id) == (
-            other.holder,
-            other.source,
-            other.action_id,
+    @classmethod
+    def external(cls, router_id: str, source: str, since: float) -> LockRecord:
+        """A new holder for a write from outside the engine."""
+        return cls(
+            router_id=router_id, holder=LockHolder.EXTERNAL, since=since, source=source
         )
+
+    @classmethod
+    def engine(cls, action: RemediationAction, since: float) -> LockRecord:
+        """The lock of a remediation action."""
+        return cls(
+            router_id=action.router_id,
+            holder=LockHolder.ENGINE,
+            action_id=action.action_id,
+            since=since,
+            source=LOCK_SOURCE_ENGINE,
+        )
+
+    def same_holder(self, other: LockRecord) -> bool:
+        """The same holder: the same lock id."""
+        return self.lock_id == other.lock_id
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -1714,7 +2029,115 @@ class IdempotencyRecord(_Record):
         _set(self, "created_at", _ts(self.created_at, "idempotency.created_at"))
 
 
-LoopKey = tuple[str, str, str]  # (router_id, action_type, incident or target)
+@dataclass(frozen=True, kw_only=True, slots=True)
+class SafetyClock(_Record):
+    """The clock every wait of the loop protection runs on (docs §5.2).
+
+    ``observe(wall)`` moves ``safe`` on by the wall-clock step since the
+    last observation, but never backwards (a jump back adds nothing) and by
+    at most ``CLOCK_STEP_MAX_S`` (a jump ahead, or a long downtime, adds
+    one step). So a wrong wall clock can only make waits longer, never
+    shorter. The engine observes it at least every few minutes.
+    """
+
+    _what = "clock"
+    wall: float | None = None  # the last wall time observed
+    safe: float | None = None
+    jumps_ahead: int = 0
+    jumps_back: int = 0
+
+    def __post_init__(self) -> None:
+        """Validate (both times set, or neither)."""
+        _set(self, "wall", _opt_ts(self.wall, "clock.wall"))
+        _set(self, "safe", _opt_ts(self.safe, "clock.safe"))
+        if (self.wall is None) is not (self.safe is None):
+            _fail("clock.safe")
+        for name in ("jumps_ahead", "jumps_back"):
+            _set(
+                self,
+                name,
+                _int(getattr(self, name), f"clock.{name}", 0, CLOCK_JUMPS_MAX),
+            )
+
+    def observe(self, now: float) -> SafetyClock:
+        """The clock after observing the wall time ``now``."""
+        wall = _ts(now, "clock.now")
+        if self.wall is None or self.safe is None:
+            return replace(self, wall=wall, safe=wall)
+        delta = wall - self.wall
+        ahead, back = self.jumps_ahead, self.jumps_back
+        if delta < 0:
+            step = 0.0
+            if -delta > CLOCK_BACK_TOLERANCE_S:
+                back = min(back + 1, CLOCK_JUMPS_MAX)
+        elif delta > CLOCK_STEP_MAX_S:
+            step = float(CLOCK_STEP_MAX_S)
+            ahead = min(ahead + 1, CLOCK_JUMPS_MAX)
+        else:
+            step = delta
+        return SafetyClock(
+            wall=wall,
+            safe=min(self.safe + step, _TS_MAX),
+            jumps_ahead=ahead,
+            jumps_back=back,
+        )
+
+
+FLEET_HOLD_KEY: Final = ""  # key of the fleet-wide hold in ``LoopState.holds``
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RouterHold(_Record):
+    """A router (or the whole fleet) held: Observe only (docs §5.1).
+
+    While a hold is active the router's effective mode is Observe: no
+    approval, no Auto-Heal, no write of Risk 1 or more. Read-only
+    diagnostics (Risk 0) still run. ``until`` None: only an admin releases
+    it. Times are safety-clock seconds.
+    """
+
+    _what = "hold"
+    router_id: str | None  # None: the whole fleet
+    reason: HoldReason
+    since: float
+    until: float | None = None
+    action_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate."""
+        _set(
+            self,
+            "router_id",
+            _opt_id(self.router_id, ROUTER_ID_PREFIX, "hold.router_id"),
+        )
+        _set(self, "reason", _enum(HoldReason, self.reason, "hold.reason"))
+        _set(self, "since", _ts(self.since, "hold.since"))
+        _set(self, "until", _opt_ts(self.until, "hold.until"))
+        if self.until is not None and self.until < self.since:
+            _fail("hold.until")
+        _set(
+            self,
+            "action_id",
+            _opt_id(self.action_id, REMEDIATION_ID_PREFIX, "hold.action_id"),
+        )
+
+    @property
+    def key(self) -> str:
+        """Key in ``LoopState.holds`` (the router id, or the fleet key)."""
+        return self.router_id or FLEET_HOLD_KEY
+
+    def active(self, safe_now: float) -> bool:
+        """The hold is in force at safety-clock time ``safe_now``."""
+        return self.until is None or safe_now < self.until
+
+    def outlasts(self, other: RouterHold) -> bool:
+        """This hold ends later than ``other`` (no end is the latest)."""
+        if other.until is None:
+            return False
+        return self.until is None or self.until > other.until
+
+
+LoopKey = tuple[str, str, str]  # (router_id, action_type, component ref)
 _KEY_FIELDS: Final = ("router_id", "action_type", "ref")
 
 
@@ -1750,12 +2173,15 @@ def _map(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 class LoopState:
     """Every piece of loop-protection state that must survive a restart.
 
-    ``attempts``: per (router, action type, incident ref); ``breakers``: per
-    (router, action type, target); ``fleet``: the fleet-wide pause;
-    ``incident_dedupe`` / ``action_dedupe``: dedupe id -> the non-terminal
-    action holding it; ``idempotency``: idempotency id -> action; ``locks``:
-    the repair lock holder per router; ``external_writes``: the newest
-    writes from outside the engine (bounded).
+    ``attempts`` and ``breakers``: per (router, action type, component
+    ref); ``fleet``: the fleet-wide pause; ``action_dedupe`` (router,
+    action type, params), ``incident_dedupe`` (root incident, fleet-wide)
+    and ``component_dedupe`` (router, component): dedupe id -> the
+    non-terminal action holding it; ``idempotency``: idempotency id ->
+    action; ``locks``: the repair lock holder per router; ``holds``: held
+    routers (key: router id, ``""`` for the fleet); ``clock``: the safety
+    clock; ``external_writes``: the newest writes from outside the engine
+    (bounded).
     """
 
     attempts: dict[LoopKey, AttemptRecord] = field(default_factory=dict)
@@ -1763,8 +2189,11 @@ class LoopState:
     fleet: FleetPause = field(default_factory=FleetPause)
     incident_dedupe: dict[str, str] = field(default_factory=dict)
     action_dedupe: dict[str, str] = field(default_factory=dict)
+    component_dedupe: dict[str, str] = field(default_factory=dict)
     idempotency: dict[str, IdempotencyRecord] = field(default_factory=dict)
     locks: dict[str, LockRecord] = field(default_factory=dict)
+    holds: dict[str, RouterHold] = field(default_factory=dict)
+    clock: SafetyClock = field(default_factory=SafetyClock)
     external_writes: list[ExternalWrite] = field(default_factory=list)
 
     # -- locks -------------------------------------------------------------------------
@@ -1779,20 +2208,47 @@ class LoopState:
         return lock is not None and lock.holder is LockHolder.ENGINE
 
     def try_lock(self, record: LockRecord) -> bool:
-        """Take the lock if it is free or already held by the same holder."""
+        """Take the lock if it is free; True again only for the same holder
+        (the same ``lock_id``), never for another one of the same source."""
         held = self.locks.get(record.router_id)
         if held is not None:
             return held.same_holder(record)
         self.locks[record.router_id] = record
         return True
 
-    def release_lock(self, router_id: str, record: LockRecord) -> bool:
-        """Release the lock; only its holder can."""
+    def release_lock(self, router_id: str, lock_id: str) -> bool:
+        """Release the lock; only its holder (its ``lock_id``) can."""
         held = self.locks.get(router_id)
-        if held is None or not held.same_holder(record):
+        if held is None or held.lock_id != lock_id:
             return False
         del self.locks[router_id]
         return True
+
+    # -- holds -------------------------------------------------------------------------
+
+    def hold_on(self, router_id: str, safe_now: float) -> RouterHold | None:
+        """The active hold on a router: its own, else the fleet's."""
+        for key in (router_id, FLEET_HOLD_KEY):
+            hold = self.holds.get(key)
+            if hold is not None and hold.active(safe_now):
+                return hold
+        return None
+
+    def place_hold(self, hold: RouterHold) -> RouterHold:
+        """Hold a router (or the fleet); a hold in force that lasts longer
+        stays. Returns the hold now in force for that key."""
+        held = self.holds.get(hold.key)
+        if held is None or hold.outlasts(held):
+            self.holds[hold.key] = hold
+            return hold
+        return held
+
+    def drop_expired_holds(self, safe_now: float) -> int:
+        """Forget holds whose time is over (safety clock)."""
+        gone = [k for k, h in self.holds.items() if not h.active(safe_now)]
+        for key in gone:
+            del self.holds[key]
+        return len(gone)
 
     # -- external writes ---------------------------------------------------------------
 
@@ -1811,10 +2267,13 @@ class LoopState:
             "fleet": self.fleet.to_dict(),
             "incident_dedupe": dict(sorted(self.incident_dedupe.items())),
             "action_dedupe": dict(sorted(self.action_dedupe.items())),
+            "component_dedupe": dict(sorted(self.component_dedupe.items())),
             "idempotency": {
                 k: v.to_dict() for k, v in sorted(self.idempotency.items())
             },
             "locks": [v.to_dict() for _k, v in sorted(self.locks.items())],
+            "holds": [v.to_dict() for _k, v in sorted(self.holds.items())],
+            "clock": self.clock.to_dict(),
             "external_writes": [w.to_dict() for w in self.external_writes],
         }
 
@@ -1836,6 +2295,7 @@ class LoopState:
         for name, prefix, target in (
             ("incident_dedupe", INCIDENT_DEDUPE_PREFIX, state.incident_dedupe),
             ("action_dedupe", ACTION_DEDUPE_PREFIX, state.action_dedupe),
+            ("component_dedupe", COMPONENT_DEDUPE_PREFIX, state.component_dedupe),
         ):
             for dedupe, action_id in _map(data, name).items():
                 target[_id(dedupe, prefix, f"loop.{name}")] = _id(
@@ -1848,6 +2308,12 @@ class LoopState:
         for row in _list(data, "locks"):
             lock = _build(LockRecord, row, "loop.locks")
             state.locks[lock.router_id] = lock
+        for row in _list(data, "holds"):
+            hold = _build(RouterHold, row, "loop.holds")
+            if hold.key in state.holds:
+                _fail("loop.holds")
+            state.holds[hold.key] = hold
+        state.clock = _build(SafetyClock, data.get("clock") or {}, "loop.clock")
         state.external_writes = [
             _build(ExternalWrite, row, "loop.external_writes")
             for row in _list(data, "external_writes")
@@ -1988,14 +2454,21 @@ class MaintenanceWindow(_Record):
             _fail("maintenance.created_by")
         _set(self, "created_by", who)
 
-    def active(self, now: float) -> bool:
-        """The window covers ``now``."""
+    def covers(self, now: float) -> bool:
+        """The window covers the time ``now``."""
         return self.start <= now and (self.end is None or now <= self.end)
+
+    def active(self, now: float, safe_now: float | None = None) -> bool:
+        """The window covers the wall time ``now`` or the safety-clock time
+        ``safe_now``: a clock jump can only make maintenance count longer
+        (an alarm in maintenance is held back, never acted on)."""
+        return self.covers(now) or (safe_now is not None and self.covers(safe_now))
 
 
 __all__ = [
     "IN_FLIGHT_STATES",
     "LOCKING_STATES",
+    "PLANNING_STATES",
     "TERMINAL_STATES",
     "TRANSITIONS",
     "WRITE_AHEAD_STATES",
@@ -2004,15 +2477,22 @@ __all__ = [
     "ActorNotAllowedError",
     "HealModelError",
     "HealSettings",
+    "HoldReason",
     "IllegalTransitionError",
+    "LockRecord",
     "LoopState",
     "PreconditionFailedError",
     "RemediationAction",
+    "RouterHold",
+    "SafetyClock",
     "TerminalStateError",
     "TransitionError",
     "allowed_targets",
     "apply_restart_recovery",
     "can_transition",
+    "component_dedupe_id",
+    "hold_reason_for",
+    "incident_dedupe_id",
     "restart_recovery",
     "transition",
 ]

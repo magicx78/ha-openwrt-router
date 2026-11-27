@@ -56,6 +56,17 @@ class Clock:
         return self.now
 
 
+def advance(store: hs.SelfHealingStore, clock: Clock, seconds: float) -> None:
+    """Let ``seconds`` pass in plausible steps (the engine's tick), so the
+    safety clock follows the wall clock."""
+    left = seconds
+    while left > 0:
+        step = min(600.0, left)
+        clock.now += step
+        left -= step
+        store.now()
+
+
 @pytest.fixture
 def disks() -> Any:
     kit = FakeDisks()
@@ -101,12 +112,13 @@ def new_action(*, router_id: str = R1, ts: float = T0, **overrides: Any) -> Any:
 
 def svc(i: int, **overrides: Any) -> Any:
     """An action on its own service and incident (no dedupe with others)."""
-    return new_action(
-        params={"name": f"svc{i}"},
-        incident_id=f"inc-{i}",
-        components=(hm.Component(kind=hm.ComponentKind.SERVICE, name=f"svc{i}"),),
-        **overrides,
-    )
+    args: dict[str, Any] = {
+        "params": {"name": f"svc{i}"},
+        "incident_id": f"inc-{i}",
+        "components": (hm.Component(kind=hm.ComponentKind.SERVICE, name=f"svc{i}"),),
+    }
+    args.update(overrides)
+    return new_action(**args)
 
 
 def on_disk(disks: FakeDisks) -> dict[str, Any]:
@@ -417,14 +429,18 @@ async def test_action_and_incident_dedupe(disks: FakeDisks, clock: Clock) -> Non
     assert first.created and first.dedupe is None
     same = store.add(new_action(ts=T0 + 1))
     assert (same.created, same.action, same.dedupe) == (False, first.action, "action")
-    # other params, same root incident on the same component
+    # other params, same root incident
     incident = store.add(new_action(ts=T0 + 2, params={"name": "dnsmasq", "x": 1}))
     assert (incident.created, incident.action, incident.dedupe) == (
         False,
         first.action,
         "incident",
     )
-    assert store.add(new_action(router_id=R2)).created  # another router
+    # the root incident is fleet-wide: another router, same incident
+    elsewhere = store.add(new_action(router_id=R2))
+    assert (elsewhere.created, elsewhere.dedupe) == (False, "incident")
+    # another router with its own incident: its own component
+    assert store.add(new_action(router_id=R2, incident_id="inc-70")).created
     assert len(store.actions) == 2
     # a terminal action no longer blocks a new one
     store.apply(
@@ -458,8 +474,9 @@ async def test_idempotency_returns_the_first_action_even_when_finished(
         first.action_id,
         "idempotency",
     )
-    # after the TTL the id is free again
-    assert store.prune(T0 + hs.IDEMPOTENCY_TTL_S + 10) >= 1
+    # after the TTL (on the safety clock) the id of a finished action is free
+    advance(store, clock, hs.IDEMPOTENCY_TTL_S + 10)
+    assert store.prune() >= 1
     assert store.add(svc(2, idempotency_id=idem, ts=T0 + 2)).created
 
 
@@ -528,15 +545,16 @@ async def test_the_size_limit_evicts_terminal_records_oldest_first(
         finished.append(action.action_id)
     open_id = store.add(svc(9)).action.action_id
     keep = {k: v for k, v in store.actions.items() if k != finished[0]}
-    store.max_bytes = hs.store_bytes(store._payload_of(keep, store.loop, 99)) + 20
+    store._fit(dict(keep), store.loop, store._seq + 1)  # the estimate of ``keep``
+    store.max_bytes = store.last_bytes + 20
     payload = store.payload()
     assert {a["action_id"] for a in payload["actions"]} == {
         finished[1],
         finished[2],
         open_id,
     }
-    assert hs.store_bytes(payload) <= store.max_bytes
-    assert store.last_bytes == hs.store_bytes(payload)
+    # the estimate is an upper bound of the real size
+    assert hs.store_bytes(payload) <= store.last_bytes <= store.max_bytes
     assert finished[0] not in store.actions
     assert store.counters["evicted_terminal"] == 1
 
@@ -586,12 +604,12 @@ async def test_prune_keeps_open_actions_and_open_breakers(
             created_by=A.ADMIN,
         )
     )
-    later = T0 + hs.TERMINAL_RETENTION_S + 100
-    assert store.prune(later) == 4
+    advance(store, clock, hs.TERMINAL_RETENTION_S + 100)  # real time passes
+    assert store.prune() == 4
     assert set(store.actions) == {old_open}
     assert list(store.loop.breakers) == [(R1, "service.restart", "svc1")]
     assert store.loop.attempts == {} and store.maintenance == []
-    assert store.prune(later) == 0
+    assert store.prune() == 0
 
 
 # --- write before act ------------------------------------------------------------------
@@ -755,7 +773,8 @@ async def test_the_real_store_catches_a_write_home_assistant_swallows(
         record = next(r for r in data["actions"] if r["action_id"] == action_id)
         assert record["state"] == "executing"
         assert oct(path.stat().st_mode & 0o777) == "0o600"
-        assert store.last_bytes == hs.store_bytes(data)
+        # the size estimate is an upper bound of the real file
+        assert hs.store_bytes(data) <= store.last_bytes <= hs.store_bytes(data) + 64
         assert_no_credentials(data)
     finally:
         await hass.async_stop(force=True)
@@ -764,50 +783,93 @@ async def test_the_real_store_catches_a_write_home_assistant_swallows(
 # --- no action executes twice (property, with restarts) -------------------------------
 
 
-@pytest.mark.parametrize("seed", range(40))
-async def test_random_runs_with_restarts_never_execute_twice(
-    disks: FakeDisks, clock: Clock, seed: int
-) -> None:
+# The engine's way forward from each state (the walk prefers it, so runs
+# really reach the durable step instead of wandering into CANCELLED).
+_PROGRESS: dict[hm.ActionState, tuple[hm.ActionState, hm.Actor]] = {
+    S.DETECTED: (S.ANALYZED, A.ENGINE),
+    S.ANALYZED: (S.PROPOSED, A.ENGINE),
+    S.PROPOSED: (S.PREFLIGHT, A.ENGINE),
+    S.PREFLIGHT: (S.APPROVED, A.ENGINE),
+    S.WAITING_APPROVAL: (S.APPROVED, A.ADMIN),
+    S.APPROVED: (S.EXECUTING, A.ENGINE),
+    S.EXECUTING: (S.VERIFYING, A.ENGINE),
+    S.VERIFYING: (S.RESOLVED, A.ENGINE),
+    S.FAILED: (S.ROLLBACK_PENDING, A.ENGINE),
+    S.ROLLBACK_PENDING: (S.ROLLING_BACK, A.ENGINE),
+    S.ROLLING_BACK: (S.ROLLED_BACK, A.ENGINE),
+}
+SEEDS = 40
+
+
+async def _random_run(disks: FakeDisks, clock: Clock, seed: int) -> dict[str, int]:
+    """One run: four actions, 80 steps, restarts; returns executions per id."""
     rng = random.Random(seed)
+    clock.now = T0
+    disks.disks.clear()  # every run starts on an empty disk
+    disks.stores.clear()
     store, _ = await open_store(clock)
     ids = [
         store.add(svc(i, router_id=rng.choice((R1, R2)))).action.action_id
         for i in range(4)
     ]
+    disks.flush_delayed()
     executed: dict[str, int] = dict.fromkeys(ids, 0)
-    for step in range(60):
+    for step in range(80):
         clock.now = T0 + step + 1
-        if rng.random() < 0.1:  # HA restarts, maybe after the delayed write
+        if rng.random() < 0.08:  # HA restarts, maybe after the delayed write
             if rng.random() < 0.5:
                 disks.flush_delayed()
             store, _ = await open_store(clock)
             continue
         action_id = rng.choice(ids)
         action = store.get(action_id)
-        if action is None:  # added after the last write, lost by a restart
+        if action is None or action.is_terminal:
             continue
-        actor = rng.choice(list(A))
-        targets = sorted(hm.allowed_targets(action.state, actor))
-        if not targets:
-            continue
-        target = rng.choice(targets)
+        if rng.random() < 0.75 and action.state in _PROGRESS:
+            target, actor = _PROGRESS[action.state]
+        else:
+            actor = rng.choice(list(A))
+            targets = sorted(hm.allowed_targets(action.state, actor))
+            if not targets:
+                continue
+            target = rng.choice(targets)
         if not hm.TRANSITIONS[(action.state, target)].durable:
             try:
                 store.apply(action_id, target, actor=actor, ts=clock.now, reason="walk")
-            except (hm.TransitionError, hs.RouterLockedError):
+            except (hm.TransitionError, hs.RouterLockedError, hs.RouterHeldError):
                 pass
             continue
-        result = await store.async_apply_durable(
-            action_id, target, actor=actor, ts=clock.now, reason="walk"
-        )
+        try:
+            result = await store.async_apply_durable(
+                action_id, target, actor=actor, ts=clock.now, reason="walk"
+            )
+        except hm.TransitionError:
+            continue
         if result.ok and target is S.EXECUTING:
             executed[action_id] += 1
-    assert all(count <= 1 for count in executed.values()), executed
     for action in store.actions.values():
         assert [h.to_state for h in action.history].count(S.EXECUTING) <= 1
+        assert [h.to_state for h in action.history].count(S.ROLLING_BACK) <= 1
     # one repair per router at a time
     holders = [a for a in store.actions.values() if a.state in hm.LOCKING_STATES]
     assert len({a.router_id for a in holders}) == len(holders)
+    return executed
+
+
+async def test_random_runs_with_restarts_never_execute_twice(
+    disks: FakeDisks, clock: Clock
+) -> None:
+    """40 seeded runs steered towards the durable step: actions really
+    execute (in at least half of the runs), none twice, across restarts."""
+    runs_with_execution = 0
+    executions = 0
+    for seed in range(SEEDS):
+        executed = await _random_run(disks, clock, seed)
+        assert all(count <= 1 for count in executed.values()), (seed, executed)
+        executions += sum(executed.values())
+        runs_with_execution += any(executed.values())
+    assert runs_with_execution >= SEEDS // 2, runs_with_execution
+    assert executions >= SEEDS, executions
 
 
 # --- locks and writes from outside the engine ------------------------------------------
@@ -819,18 +881,23 @@ async def test_external_writes_and_the_router_lock(
     store, _ = await open_store(clock)
     action_id = store.add(new_action()).action.action_id
     to_approved(store, action_id)
-    assert store.try_external_lock(R1, "button.reboot", T0 + 5)
-    assert store.try_external_lock(R1, "button.reboot", T0 + 5)  # same holder
-    assert not store.try_external_lock(R1, "switch.service", T0 + 5)
+    lock_id = store.try_external_lock(R1, "button.reboot", T0 + 5)
+    assert lock_id is not None and lock_id.startswith("lck_")
+    # one holder: a second press of the same button is another holder
+    assert store.try_external_lock(R1, "button.reboot", T0 + 5) is None
+    assert store.try_external_lock(R1, "switch.service", T0 + 5) is None
     result = await execute(store, action_id)
     assert (result.ok, result.reason) == (False, "router_locked")
-    assert not store.release_external_lock(R1, "switch.service")
+    # only the holder's id releases it, never the source name
+    assert not store.release_external_lock(R1, "button.reboot")
+    assert not store.release_external_lock(R1, "lck_" + "0" * 32)
     store.record_external_write(
         hm.ExternalWrite(
             router_id=R1, source="button.reboot", target="system", ts=T0 + 6
         )
     )
-    assert store.release_external_lock(R1, "button.reboot")
+    assert store.release_external_lock(R1, lock_id)
+    assert not store.release_external_lock(R1, lock_id)
     assert (await execute(store, action_id)).ok
     assert store.loop.repair_active(R1)
     assert not store.try_external_lock(R1, "button.reboot", T0 + 12)
@@ -927,9 +994,15 @@ async def test_nothing_in_the_file_looks_like_a_credential(
     full = full_action()
     store.actions[full.action_id] = full
     store.loop = _filled_loop()
-    # R1's lock belongs to the action of _filled_loop: this one runs on R2
+    # R1's lock belongs to the action of _filled_loop: this one runs on R2,
+    # read-only, because _filled_loop also holds R2 and the fleet
     action = store.add(
-        svc(1, router_id=R2, idempotency_id=hm.idempotency_id(SECRET))
+        svc(
+            1,
+            router_id=R2,
+            idempotency_id=hm.idempotency_id(SECRET),
+            risk=hm.Risk(risk_class=hm.RiskClass.READ_ONLY),
+        )
     ).action
     to_approved(store, action.action_id)
     assert (await execute(store, action.action_id)).ok

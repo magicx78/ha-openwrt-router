@@ -129,14 +129,53 @@ Abweichungen vom Entwurf (alle in Paket B):
   `statement_key`. Der Core behandelt jeden Feldnamen mit „key“ als geheim.
 - **DECIDED: der Verlauf speichert nur Akteursarten** (`engine`, `admin`, `recovery`). Welcher
   Benutzer gehandelt hat, steht im Audit-Log des Core, nicht hier.
-- **DECIDED: Idempotenz- und Doppelt-Kennungen sind Hashes** (`idm_`, `dda_`, `ddi_`), nie die
-  Rohwerte.
+- **DECIDED: Idempotenz- und Doppelt-Kennungen sind Hashes** (`idm_`, `dda_`, `ddi_`, `ddc_`),
+  nie die Rohwerte. Sperren tragen eine eigene Kennung `lck_` (Abschnitt 10).
+- **DECIDED (Review PR #75): ein Risiko ohne Bewertung zählt als das höchste** (`risk_class`
+  ist ohne Angabe 3). Ein Datensatz, den noch niemand bewertet hat, kommt so nie als
+  „nur lesend“ an einer Sperre (Hold, Abschnitt 5.1) vorbei.
 
 Hilfsfunktionen: `action_dedupe_id(router_id, action_type, params)` (gleiche Eingabe → gleiche
-`dda_`-Kennung), `incident_dedupe_id(router_id, incident_id, component)` (`ddi_`),
+`dda_`-Kennung), `incident_dedupe_id(incident_id)` (`ddi_`, flottenweit),
+`component_dedupe_id(router_id, component)` (`ddc_`), `component_ref(component)`
+(`kind:name` für die Schlüssel des Schleifenschutzes, bei zu langem Namen `cmp_` + Hash),
 `idempotency_id(raw)` (`idm_`) und `binding_hash(action, catalog_version=…)` (sha256 über
 Router, Aktion, Parameter, Katalog- und Playbook-Fassung, Vorfall mit Wiederöffnungszahl und
 Zustands-Fingerabdruck).
+
+### 3.1 Feldregeln (Review PR #75)
+
+Kein sicherheitsrelevantes Feld lässt sich außerhalb seines Übergangs ändern. Es gibt nur drei
+Wege, einen Datensatz zu ändern: `transition(…, changes=…)` (mit dem Zustandswechsel),
+`with_changes(**felder)` (ohne Zustandswechsel, Speicher: `update()`) und
+`with_flags(in_maintenance=…, acknowledged_by_admin=…)` (Speicher: `update_flags()`).
+
+**Nie änderbar** (weder `with_changes` noch `transition`): `action_id`, `router_id`, `state`,
+`history`, `created_at`, `updated_at` (diese vier setzt nur `transition` selbst),
+**`action_type`, `params`, `incident_id`, `components`, `idempotency_id`** (die Eingaben der
+Doppelt-Prüfung, Punkt P1-2) und **`flags`**.
+
+**DECIDED (P1-2): die Eingaben der Doppelt-Prüfung werden nach DETECTED eingefroren**, statt
+die Doppelt-Tabellen bei jeder Änderung neu zu buchen. Begründung: die Engine legt den
+Datensatz erst an, wenn das Playbook die Aktion gewählt hat; einfrieren passt zu ihrem Ablauf,
+ist einfacher und strenger. Soll eine andere Aktion laufen, entsteht ein neuer Datensatz (der
+alte wird abgebrochen).
+
+| Feld | wann änderbar |
+|---|---|
+| `incident_type`, `incident_reopen`, `cause`, `playbook_id`, `playbook_version`, `decision`, `risk`, `prerequisites`, `planned_changes`, `expected_impact`, `backup_ref`, `state_fingerprint` | nur in der Planung (DETECTED, ANALYZED, PROPOSED, PREFLIGHT): `with_changes` oder ein Übergang **aus** einem dieser Zustände |
+| `preflight` | Planung (auch `with_changes`) oder ein Übergang aus APPROVED |
+| `rollback` | Planung (auch `with_changes`) oder ein Übergang aus FAILED, ROLLBACK_PENDING, ROLLING_BACK |
+| `approval` | nur mit einem Übergang aus der Planung oder aus WAITING_APPROVAL, dazu APPROVED → CANCELLED; ab WAITING_APPROVAL bleiben `guard_approval_id` und `binding_hash` gleich (die Bindung ändert sich nie) |
+| `execution` | nur mit einem Übergang aus APPROVED, EXECUTING oder VERIFYING; `intent_written_at` und `attempt_no` nur beim Eintritt in EXECUTING (den Zeitpunkt setzt das Modell, die Nummer der Speicher) |
+| `verification` | nur mit einem Übergang aus PREFLIGHT, APPROVED, EXECUTING, VERIFYING, ROLLING_BACK |
+| `audit_refs` | jederzeit, aber nur anhängen (die alten Einträge bleiben vorn, in ihrer Reihenfolge) |
+| `flags.interrupted` | nur die Neustartregel (Übergänge mit `interrupts`) setzt es; nichts löscht es |
+| `flags.in_maintenance` | `with_flags`, in beide Richtungen |
+| `flags.acknowledged_by_admin` | `with_flags`, nur von `false` nach `true` |
+
+`RemediationAction.new()` nimmt `flags`, `approval`, `execution` und `verification` nicht an:
+ein neuer Datensatz beginnt mit ihren Standardwerten.
 
 **Stand heute:** gebaut und getestet. Niemand erzeugt bisher Datensätze außer den Tests.
 
@@ -211,9 +250,13 @@ Entscheidungen gegenüber dem Entwurf:
   Neustart ändert nichts mehr.
 
 Eigenschaften, die die Tests über alle Wege prüfen: Kein Weg führt zweimal nach EXECUTING
-(erschöpfende Suche über 88 Konfigurationen, 200 Zufallswege, im Speicher 40 Zufallsläufe mit
-Neustarts); die Wiederherstellung (R) betritt nie EXECUTING, ROLLING_BACK oder APPROVED; nur ein
-Administrator gibt frei oder lehnt ab.
+(erschöpfende Suche über 88 Konfigurationen, die Breitensuche des Reviews mit bis zu drei
+Neustarts, 200 Zufallswege, im Speicher 40 Zufallsläufe mit Neustarts); die Wiederherstellung
+(R) betritt nie EXECUTING, ROLLING_BACK oder APPROVED; nur ein Administrator gibt frei oder
+lehnt ab. Die 40 Zufallsläufe bevorzugen den Weg der Engine nach vorn (75 % der Schritte), damit
+sie wirklich bis zum dauerhaften Schreiben kommen: gemessen führen 30 von 40 Läufen mindestens
+eine Aktion aus, 48 Ausführungen insgesamt, keine doppelt. Der Test verlangt mindestens 20
+Läufe und 40 Ausführungen. (Vor dem Review lief dort keine einzige Ausführung.)
 
 **Stand heute:** gebaut und getestet; die Engine, die die Übergänge auslöst, fehlt.
 
@@ -229,7 +272,7 @@ Tag). Inhalt:
 | `write_seq` | zählt jedes Schreiben; daran erkennt das Rücklesen das eigene Schreiben |
 | `settings` | Modul an/aus, Grenzen des Schleifenschutzes, je Router Modus und Allowlist |
 | `actions` | die Datensätze (Abschnitt 3) |
-| `loop` | Schleifenschutz als Daten (Abschnitt 10) |
+| `loop` | Schleifenschutz als Daten (Abschnitt 10), Holds (5.1), Sicherheitsuhr (5.2) |
 | `maintenance` | Wartungsfenster für Schnittstellen und Dienste |
 
 **Schreiben.** Eine Änderung im Arbeitsspeicher stellt **ein** verzögertes Schreiben nach
@@ -241,15 +284,36 @@ Neustartregel etwas geändert oder etwas Kaputtes übersprungen hat.
 `apply()` lehnt sie ab (`WriteAheadRequiredError`). Ablauf:
 
 1. Übergang prüfen (ein unerlaubter wirft, nichts wird geschrieben).
-2. Kein Schreiben, wenn der Speicher nicht geladen ist (`not_loaded`), HA herunterfährt
-   (`stopping`; Zustände stopping, final_write, stopped), ein anderer Halter die Router-Sperre
-   hat (`router_locked`) oder die Datei auch ohne Endzustände zu groß wäre (`over_size`).
-3. Die Datei mit dem neuen Zustand **sofort** schreiben und **zurücklesen** (im Executor).
-   Nur wenn die gelesene Datei genau dieses Schreiben (`write_seq`) mit genau diesem Datensatz
-   enthält, ändert sich der Datensatz im Arbeitsspeicher, und das Ergebnis ist `ok`.
-4. Sonst bleibt der Datensatz, wo er war (`write_failed` bzw. `not_durable`), und das nächste
+2. Kein Schreiben, wenn der Speicher nicht geladen (`not_loaded`) oder schon geschlossen ist
+   (`closed`), HA herunterfährt (`stopping`; Zustände stopping, final_write, stopped), der
+   Router gesperrt ist (`router_held`, Abschnitt 5.1), ein anderer Halter die Router-Sperre
+   hat (`router_locked`) oder die offenen Datensätze allein schon zu groß sind (`over_size`).
+3. Nur beim Eintritt in EXECUTING: der Schleifenschutz prüft je Schlüssel (Router, Aktion,
+   Bauteil) einen offenen Schutzschalter (`breaker_open`), eine laufende Abklingzeit
+   (`cooling_down`) und die Versuche in 24 h (`max_attempts`). Geht es weiter, wird der
+   Versuch **im selben Schreiben** gebucht: Zähler und 24-h-Fenster, Abklingzeit = die längere
+   von `cooldown_s` und dem exponentiellen Backoff (`backoff_base_s` · 2^(n−1), höchstens
+   `backoff_cap_s`), `execution.attempt_no` = Nummer des Versuchs. Alles auf der Sicherheitsuhr
+   (Abschnitt 5.2). Das ist eine zweite Linie neben der Entscheidung der Engine (Paket D/I).
+4. Die Schreibnummer (`write_seq`) wird **vor** dem Warten vergeben. Die Datei mit dem neuen
+   Zustand wird **sofort** geschrieben und **zurückgelesen** (im Executor). Nur wenn die
+   gelesene Datei diese oder eine spätere Schreibnummer mit genau diesem Datensatz enthält,
+   ändert sich der Datensatz im Arbeitsspeicher, und das Ergebnis ist `ok`.
+5. Sonst bleibt der Datensatz, wo er war (`write_failed` bzw. `not_durable`), und das nächste
    Schreiben wird sofort angestellt, damit auf der Platte wieder der wahre Zustand steht. Der
    Aufrufer darf dann den Router **nicht** aufrufen.
+
+**Nebenläufigkeit (Review P1-1).** Es läuft immer nur ein dauerhafter Schritt; `async_flush()`
+und `async_close()` warten auf ihn (dieselbe asyncio-Sperre). Solange er läuft, enthält **jede**
+Nutzlast, die gebaut wird – ein verzögertes Schreiben oder HAs letztes Schreiben beim
+Herunterfahren – schon den neuen Datensatz, die gebuchten Versuche und die Router-Sperre. Kein
+späteres Schreiben kann so den alten Zustand zurück auf die Platte legen, nachdem `ok`
+gemeldet wurde. Schlägt der Schritt fehl, steht auf der Platte vielleicht kurz der neue Zustand,
+obwohl `ok` nicht kam; das ist die sichere Richtung (nach einem Neustart „unbekannt“, nie
+wiederholt), und das sofort angestellte Schreiben legt den wahren Zustand zurück. Nach
+`async_close()` meldet kein dauerhafter Schritt mehr Erfolg (`closed`). Zwei Tests stellen den
+Fall des Reviews nach (Schließen, während das Rücklesen zurückkommt), einer davon mit HAs
+echtem Store und Executor.
 
 **DECIDED: Rücklesen statt nur `await async_save`.** Der Entwurf verlangte ein abgewartetes
 `async_save`. Das reicht nicht: HAs `Store.async_save` fängt einen Schreibfehler
@@ -279,33 +343,61 @@ einmal ausgeführt**. Freigaben des Guards leben nur im Arbeitsspeicher und sind
 Neustart weg; deshalb verfällt auch die Freigabe hier. **DECIDED:** PREFLIGHT wird abgebrochen
 (die Prüfung muss neu laufen) und FAILED eskaliert (die Entscheidung über einen Rollback fiel
 vor dem Neustart nicht mehr). Dass nach einer Unterbrechung der Schutzschalter des Schlüssels
-öffnet (Entwurf), kommt mit Paket I.
+öffnet (Entwurf), kommt mit Paket I. Macht die Neustartregel eine Aktion, die schon EXECUTING
+erreicht hatte, endgültig (FAILED → ESCALATED, ROLLBACK_PENDING → MANUAL_RECOVERY_REQUIRED),
+wird ihr Router gesperrt wie in Abschnitt 5.1.
 
 Sperren und Doppelt-Kennungen werden beim Laden aus den Datensätzen neu aufgebaut. **Sperren
 von Schreibzugriffen außerhalb der Engine fallen beim Laden weg** – nach einem Neustart kann
-keiner davon mehr laufen.
+keiner davon mehr laufen. Holds (5.1) und die Sicherheitsuhr (5.2) stehen in der Datei und
+überleben den Neustart.
 
 **Verlust und Schaden.** Eine fehlende Datei ist ein erster Start (Standardwerte). Eine
 unlesbare, fremde oder neuere Hauptversion startet leer, bleibt als `.bak` (bzw. HAs
-`.corrupt.<Zeit>`) liegen und **pausiert Auto-Heal für die ganze Flotte** für 24 h (Grund
-`store_lost`), weil Versuche und Schutzschalter unbekannt sind. Einzelne kaputte Teile
-(Datensatz, doppelte Kennung, Einstellungen, Wartungsliste) werden übersprungen und gezählt;
-dann gibt es ebenfalls eine `.bak`-Kopie und die Pause (Grund `store_damaged`). Kaputte
-Einstellungen heißen Standardwerte, also Observe für jeden Router.
+`.corrupt.<Zeit>`) liegen, **pausiert Auto-Heal für die ganze Flotte** für 24 h (Grund
+`store_lost`), weil Versuche und Schutzschalter unbekannt sind, und **sperrt die ganze Flotte**
+für 24 h (Hold `store_lost`). Einzelne kaputte Teile (Datensatz, doppelte Kennung,
+Einstellungen, Wartungsliste, Schleifenschutz) werden übersprungen und gezählt; dann gibt es
+ebenfalls eine `.bak`-Kopie und die Pause (Grund `store_damaged`), und:
 
-**Grenzen** (keine davon wirft je eine laufende Aktion hinaus):
+- ein kaputter Datensatz oder ein kaputtes Wartungsfenster mit **lesbarer** Router-Kennung
+  sperrt diesen Router für 24 h (Hold `record_unreadable`);
+- ist die Router-Kennung nicht lesbar oder der Schleifenschutz kaputt, wird die **ganze Flotte**
+  für 24 h gesperrt.
+
+**DECIDED (Koordinator, P2-7):** gesperrt heißt Observe, Freigabe und Auto-Heal blockiert; die
+Sperre gilt 24 h oder bis ein Administrator sie aufhebt, steht in der Datei und ist sichtbar
+(`router_hold()`, `stats()["holds"]`). Kaputte Einstellungen heißen Standardwerte, also Observe
+für jeden Router.
+
+**Grenzen** (keine davon wirft je eine laufende Aktion hinaus; alle Zeiten auf der
+Sicherheitsuhr, Abschnitt 5.2):
 
 | Grenze | Wert | Verhalten |
 |---|---|---|
 | Datensätze gesamt | 500 | ein neuer verdrängt den ältesten Endzustand; gibt es keinen, wird er abgelehnt (`CapacityError`) |
 | offene je Router | 20 | darüber wird ein neuer abgelehnt |
 | Aufbewahrung Endzustände | 90 Tage | `prune()` entfernt ältere |
-| Idempotenz | 24 h, höchstens 1000 | danach frei |
+| Idempotenz | 24 h, höchstens 1000 | die Kennung einer **offenen** Aktion bleibt immer; die einer beendeten ist nach 24 h vergessen (siehe unten) |
 | Wartungsfenster | höchstens 100, beendete 90 Tage | |
-| Versuchszähler | 7 Tage ohne Versuch und ohne laufende Abklingzeit, höchstens 1000 | |
+| Versuchszähler | 7 Tage ohne Versuch, nur außerhalb des 24-h-Fensters und ohne laufende Abklingzeit, höchstens 1000 (die Obergrenze verdrängt nur solche) | |
 | Schutzschalter | ein **offener** bleibt immer; geschlossene 90 Tage, höchstens 1000 | |
+| Holds | ohne Ende nur durch einen Administrator; mit Ende danach | |
 | Fremd-Schreibzugriffe | die letzten 200 | |
-| Datei | 1 000 000 Byte | darüber fallen Endzustände, die ältesten zuerst; reicht das nicht, wird ein verzögertes Schreiben trotzdem ausgeführt (gezählt, `save_over_size`), weil sonst eine offene Aktion verloren ginge, und ein Schreiben vor dem Handeln wird abgelehnt (`over_size`) |
+| Datei | 1 000 000 Byte | darüber fallen Endzustände, die ältesten zuerst – aber **nur, wenn das die Datei unter die Grenze bringt**. Sind die offenen Datensätze allein schon zu groß, fällt nichts (Review P2-10): ein verzögertes Schreiben wird trotzdem ausgeführt (gezählt, `save_over_size`), weil sonst eine offene Aktion verloren ginge, und ein Schreiben vor dem Handeln wird abgelehnt (`over_size`) |
+
+**Idempotenz (Review P2-5).** Eine bekannte Idempotenz-Kennung, deren Datensatz fehlt
+(verdrängt oder entfernt), wird abgelehnt (`IdempotencyExpiredError`) und **nie** zu einer neuen
+Aktion. Nach Ablauf (24 h auf der Sicherheitsuhr, Aktion beendet) ist die Kennung vergessen; eine
+Wiederholung darf dann einen neuen Datensatz anlegen. Was eine zweite Ausführung trotzdem
+verhindert, zeigen Tests: ist die erste Aktion noch offen, gibt die Doppelt-Prüfung sie zurück
+(ihre Kennung wird auch nie vergessen); ist sie beendet, lehnt der Schleifenschutz beim
+dauerhaften Schritt mit `cooling_down` bzw. `max_attempts` ab.
+
+**Größe.** Die Größe ist eine Schätzung nach oben aus den zwischengespeicherten Größen der
+Datensätze (je Datensatz einmal in seiner Tiefe in der Datei gemessen, plus Trennzeichen);
+nur der Teil außerhalb der Datensätze wird je Schreiben serialisiert. Früher wurde die ganze
+Nutzlast bei jedem Verdrängen neu serialisiert (rund 70 ms nahe 1 MB in der Ereignisschleife).
 
 Gemessen (Python 3.13, HAs eigene JSON-Serialisierung, eingerückt wie HA schreibt): ein
 vollständig gefüllter Datensatz wie in `full_action()` der Tests hat **5 908 Byte**, ein neuer
@@ -314,6 +406,72 @@ höchstens rund 170 solcher Datensätze, die übrigen Endzustände fallen vorher
 20 je Router und rund 6 KB je Datensatz für etwa 8 Router alle gleichzeitig in der Datei
 stehen. **DECIDED:** 1 MB aus dem Entwurf beibehalten; die Grenze ist die strengere, und eine
 Aktion, die nicht mehr sicher in die Datei passt, wird nicht ausgeführt.
+
+### 5.1 Gesperrte Router (Holds)
+
+Ein **Hold** (`heal_model.RouterHold`, in `loop.holds`, Schlüssel Router-Kennung bzw. `""` für
+die Flotte) ist etwas anderes als die Router-Sperre (`LockRecord`): die Sperre gilt, solange
+eine Reparatur läuft; ein Hold bleibt danach, bis ein Administrator ihn aufhebt oder seine Zeit
+abläuft. Solange ein Hold gilt:
+
+- ist der wirksame Modus des Routers Observe (`effective_mode()`), auch wenn Approval oder
+  Auto-Heal eingestellt ist;
+- lehnt der Speicher für eine Aktion mit Risiko 1 oder mehr jeden Schritt zu einem Schreiben ab:
+  WAITING_APPROVAL, APPROVED, EXECUTING, ROLLBACK_PENDING, ROLLING_BACK (`RouterHeldError` bzw.
+  `router_held`);
+- laufen nur lesende Diagnosen (Risiko 0) weiter.
+
+| Grund | wann | Ende |
+|---|---|---|
+| `outcome_unknown` | eine Aktion, die EXECUTING erreicht hatte, endet in MANUAL_RECOVERY_REQUIRED | nur Administrator |
+| `outcome_escalated` | eine solche Aktion endet in ESCALATED – außer wenn der Router den Aufruf sauber abgelehnt hat (EXECUTING → FAILED mit `call_result` `rejected`, nicht unterbrochen) | nur Administrator |
+| `record_unreadable` | kaputter Datensatz beim Laden (Router, sonst Flotte) | 24 h oder Administrator |
+| `store_lost` | Datei verloren, unlesbar oder neuer (Flotte) | 24 h oder Administrator |
+| `stuck_released` | ein Administrator beendet eine hängende Aktion (`admin_release_stuck`) | nur Administrator |
+| `lock_forced` | ein Administrator entfernt eine hängende Fremd-Sperre (`admin_force_release_lock`) | nur Administrator |
+
+**DECIDED (Koordinator, P2-8):** ein Hold mit Grund, Zeitpunkt und Aktions-Kennung, getrennt von
+der Router-Sperre, steht in der Datei und gilt bis zur ausdrücklichen Freigabe durch einen
+Administrator (`release_hold(router_id oder None, actor=admin, ts=…)`); lesende Diagnosen
+(Risiko 0) sind nicht blockiert. Treffen zwei Holds auf denselben Schlüssel, bleibt der, der
+länger gilt.
+
+**Auswege für den Administrator (Review P3).** `admin_release_stuck(action_id, actor=admin, ts=…)`
+führt eine Aktion, die in EXECUTING, VERIFYING oder ROLLING_BACK hängt, über die
+Wiederherstellungskanten (EXECUTING/ROLLING_BACK → VERIFYING mit `interrupted`, dann →
+MANUAL_RECOVERY_REQUIRED) heraus, gibt die Router-Sperre frei und hinterlässt den Hold
+`stuck_released`; nie eine neue Ausführung oder einen Rollback.
+`admin_force_release_lock(router_id, actor=admin, ts=…)` entfernt eine hängende Fremd-Sperre
+und hinterlässt den Hold `lock_forced`; eine Sperre der Engine fasst es nicht an. Beides prüft
+nur die Akteursart; dass wirklich ein HA-Administrator handelt und das Audit, kommt mit den
+Routen (Paket C2/F).
+
+### 5.2 Sicherheitsuhr
+
+Alle Wartezeiten des Schleifenschutzes laufen auf der **Sicherheitsuhr**
+(`heal_model.SafetyClock`, in `loop.clock`, abgefragt mit `SelfHealingStore.now()`), nicht auf
+der Wanduhr. Bei jeder Beobachtung der Wanduhr rückt sie um den Schritt seit der letzten
+Beobachtung vor, aber **nie rückwärts** und **höchstens 900 s** (`CLOCK_STEP_MAX_S`) auf
+einmal. Sprünge werden gezählt (`jumps_ahead`, `jumps_back`, in `stats()`).
+
+**DECIDED (P2-9): im Zweifel länger warten.** Ein Sprung zurück lässt keine Zeit vergehen; ein
+Sprung nach vorn (oder eine lange Pause von HA) zählt als ein Schritt von 900 s. Eine falsche
+Wanduhr kann eine Wartezeit so nur verlängern, nie verkürzen. Der Preis: Zeit, in der HA aus war
+oder in der niemand die Uhr abgefragt hat, zählt höchstens 900 s – alle Wartezeiten verlängern
+sich um diese Zeit. Die Engine (Paket C1) fragt die Uhr deshalb mindestens alle 5 Minuten ab.
+
+| Wartezeit | Uhr | Sprung zurück | Sprung nach vorn |
+|---|---|---|---|
+| Abklingzeit, Backoff (`cooldown_until`) | Sicherheitsuhr | keine Zeit vergeht: länger | höchstens +900 s je Beobachtung: nie kürzer |
+| 24-h-Fenster der Versuche | Sicherheitsuhr | länger | nie kürzer |
+| Pause der Flotte (`paused_until`) | Sicherheitsuhr | länger | nie kürzer |
+| Hold mit Ende (`until`) | Sicherheitsuhr | länger | nie kürzer |
+| Idempotenz (24 h) | Sicherheitsuhr | länger behalten | nie früher vergessen |
+| Aufbewahrung Versuche (7 Tage), Schutzschalter, Endzustände, Wartungsfenster (90 Tage) | Sicherheitsuhr (Endzustände: ihr `updated_at` gegen die Sicherheitsuhr) | länger behalten | nie früher entfernt |
+| Wartungsfenster aktiv | Wanduhr **oder** Sicherheitsuhr | zählt, solange eine von beiden im Fenster liegt: länger | ebenso: länger |
+| Freigabe (`approval.expires_at`) | Guard des Core, nicht dieser Speicher (das Feld ist nur Auskunft) | offen für C2: ein Sprung zurück darf eine Freigabe nicht verlängern | verfällt früher (sicher) |
+| Router-Sperre (`since`) | Wanduhr, nur Auskunft | läuft nie ab | läuft nie ab |
+| Verlauf, `created_at`, `updated_at` | Wanduhr, wie übergeben | festgehalten, wie er kam | festgehalten, wie er kam |
 
 **Versionen:** Unterversionen nur additiv (eine neuere Unterversion wird gelesen, unbekannte
 Schlüssel werden ignoriert); eine unbekannte Hauptversion → `.bak` und leer, wie bei den
@@ -447,24 +605,35 @@ Router, Ziel, Beginn, Ende oder offen, Grund, angelegt von `engine` oder `admin`
 | Schutzschalter je Schlüssel | schließt nur durch Bestätigung eines Administrators | – |
 | Flotten-Pause | ab 3 Fehlschlägen in 24 h, 24 h lang | 1–10; 1 h – 7 Tage |
 | gleichzeitig laufende Aktionen in der Flotte | 1 | 1 |
-| Doppelte je Vorfall und Bauteil, je (Router, Aktion, Parameter) | die vorhandene offene Aktion wird zurückgegeben | – |
+| Doppelte (Review P2-6) | eine offene Aktion je (Router, Aktion, Parameter), **je Wurzelvorfall** (flottenweit) und **je (Router, Bauteil)** über alle Bauteile der Aktion (ohne Bauteil: der Router selbst); sonst wird die vorhandene offene Aktion zurückgegeben | – |
 | Router-Sperre | eine laufende Reparatur je Router | – |
+| Hold | Router (oder Flotte) nur Observe, Abschnitt 5.1 | – |
+
+Die Schlüssel von Versuchen und Schutzschaltern sind (Router, Aktion, `kind:name` des Bauteils);
+eine Aktion mit mehreren Bauteilen zählt bei jedem. Vorfälle nummeriert Network Intelligence
+flottenweit (`inc-N`), deshalb genügt die Vorfallkennung allein als Schlüssel.
 
 **Router-Sperre und Schreibzugriffe von außerhalb** (Entscheidung des Eigentümers): Das Modell
 hat je Router **eine** Sperre mit genau einem Halter (`LockRecord`: Halter `engine` mit der
-Aktionskennung oder `external` mit einer Quelle wie `button.reboot`).
-`LoopState.repair_active(router_id)` sagt, ob gerade eine Reparatur den Router hält. Die
-Engine bekommt die Sperre automatisch mit den Zuständen EXECUTING, VERIFYING, ROLLBACK_PENDING
-und ROLLING_BACK und gibt sie mit dem nächsten Zustand wieder ab; ein Übergang in einen dieser
-Zustände, während ein anderer Halter die Sperre hat, wird abgelehnt (`router_locked`). Knöpfe
-und Schalter (später) nehmen die Sperre mit `try_external_lock()`, geben sie mit
-`release_external_lock()` frei und halten ihren Schreibzugriff mit `record_external_write()`
-fest (Router, Quelle, Ziel, Zeitpunkt, Audit-Kennung; die letzten 200).
+Aktionskennung oder `external` mit einer Quelle wie `button.reboot`). **Jeder Halter hat seine
+eigene Kennung `lock_id` (`lck_` + 32 hex, Review P1-3):** ein zweiter Druck auf denselben Knopf
+ist ein zweiter Halter und wird abgelehnt, solange der erste die Sperre hat, und freigeben kann
+nur, wer die Kennung hat – nie über den Namen der Quelle. `LoopState.repair_active(router_id)`
+sagt, ob gerade eine Reparatur den Router hält. Die Engine bekommt die Sperre automatisch mit
+den Zuständen EXECUTING, VERIFYING, ROLLBACK_PENDING und ROLLING_BACK und gibt sie mit dem
+nächsten Zustand wieder ab; ein Übergang in einen dieser Zustände, während ein anderer Halter
+die Sperre hat, wird abgelehnt (`router_locked`). Knöpfe und Schalter (später) nehmen die Sperre
+mit `try_external_lock(router_id, source, ts)` (gibt die `lock_id` zurück oder `None`), geben sie
+mit `release_external_lock(router_id, lock_id)` frei und halten ihren Schreibzugriff mit
+`record_external_write()` fest (Router, Quelle, Ziel, Zeitpunkt, Audit-Kennung; die letzten
+200). Eine hängende Fremd-Sperre entfernt nur ein Administrator (Abschnitt 5.1).
 
-**Stand heute:** Grenzen, Zähler, Sperre und Fremd-Schreibzugriffe gibt es als Daten mit
-Prüfung, Speicherung und Tests. Es gibt **keine Logik**, die einen Versuch zählt, einen
-Schutzschalter öffnet oder die Flotte pausiert – außer der Pause nach einem verlorenen oder
-beschädigten Speicher. Knöpfe und Schalter benutzen die Sperre noch nicht.
+**Stand heute:** Grenzen, Zähler, Sperre, Holds und Fremd-Schreibzugriffe gibt es als Daten mit
+Prüfung, Speicherung und Tests. Der Speicher zählt Versuche und hält Abklingzeit, Versuche in
+24 h, offene Schutzschalter und Holds beim dauerhaften Schritt nach EXECUTING ein (Abschnitt 5).
+Es gibt **keine Logik**, die einen Schutzschalter öffnet oder die Flotte nach Fehlschlägen
+pausiert – außer der Pause nach einem verlorenen oder beschädigten Speicher. Knöpfe und
+Schalter benutzen die Sperre noch nicht.
 
 ## 11. HTTP-API, Entitäten, Ereignisse, Dienste
 
@@ -517,16 +686,18 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Bedrohung | Gegenmaßnahme | Stand heute |
 |---|---|---|
 | Nicht-Administrator oder Automation löst ein Schreiben aus | Guard, schreibende Routen nur für Administratoren, keine Dienste, nur lesende Entitäten | Plan |
-| Freigabe wiederholt, doppelt ausgeführt | einmalige Schreiberlaubnis, Idempotenz, Prüfsumme | **teilweise**: das Modell lässt EXECUTING nur einmal zu; der Speicher gibt bei gleicher Idempotenz-, Aktions- oder Vorfallkennung die vorhandene Aktion zurück |
-| Zustand ändert sich zwischen Freigabe und Ausführung | `binding_hash` mit Fingerabdruck, letzte Vorabprüfung | Funktion `binding_hash()` vorhanden |
-| Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | Daten vorhanden, keine Logik |
+| Freigabe wiederholt, doppelt ausgeführt | einmalige Schreiberlaubnis, Idempotenz, Prüfsumme | **teilweise**: das Modell lässt EXECUTING nur einmal zu; der Speicher gibt bei gleicher Idempotenz-, Aktions-, Vorfall- oder Bauteilkennung die vorhandene Aktion zurück, lehnt eine Idempotenz-Kennung ohne Datensatz ab, und die Eingaben dieser Prüfung sind eingefroren |
+| Zustand ändert sich zwischen Freigabe und Ausführung | `binding_hash` mit Fingerabdruck, letzte Vorabprüfung | Funktion `binding_hash()` vorhanden; Bindung und Fingerabdruck sind nach der Planung unveränderlich |
+| Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; Öffnen der Schutzschalter fehlt (Paket I) |
+| Ergebnis unbekannt, die nächste Aktion verschlimmert es | Hold bis zur Freigabe durch einen Administrator | **gebaut** im Speicher (Abschnitt 5.1) |
+| Wanduhr springt (NTP, RTC, Hand) | Sicherheitsuhr, im Zweifel länger warten | **gebaut** (Abschnitt 5.2) |
 | Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | Plan |
 | Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
 | Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | Sperre und Fremd-Schreibzugriff als Daten vorhanden, noch nicht benutzt |
 | Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für den Speicher; Test mit der Maskierung des Core |
-| Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe und 24 h Flotten-Pause | **gebaut** |
+| Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers | **gebaut** |
 
 ## 15. Arbeitspakete und Releases
 
@@ -539,7 +710,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | F | Playbooks A–G | offen |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
-| I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell) | offen |
+| I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
 | J | Tab im Dashboard | offen |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
@@ -576,10 +747,38 @@ Entscheidungen des Eigentümers:
   Speicher, Neustart während der Ausführung (Auftragstest 22), Verlust, neuere Version,
   kaputte Datei und kaputte Teile, Doppelte über einen Neustart (Auftragstest 32), Grenzen und
   Verdrängung (nie eine offene Aktion), Schreiben vor dem Handeln mit allen Fehlerarten, HAs
-  echter Store auf einer temporären Platte, 40 Zufallsläufe mit Neustarts, Sperre und
-  Fremd-Schreibzugriffe, keine Zugangsdaten in der Datei.
+  echter Store auf einer temporären Platte, 40 gelenkte Zufallsläufe mit Neustarts (mindestens
+  die Hälfte führt wirklich aus), Sperre und Fremd-Schreibzugriffe, keine Zugangsdaten in der
+  Datei.
+- `tests/test_heal_review_v1530.py`: zu jedem Punkt des Reviews von PR #75 der umgedrehte
+  Angriffstest (vor der Korrektur rot): Schließen während des Rücklesens (FakeDisks und HAs
+  echter Store), verzögertes Schreiben während des dauerhaften Schritts, eingefrorene
+  Doppelt-Felder, ein Halter je Sperre, Feldregeln, Idempotenz nach dem Verdrängen und nach
+  Ablauf, Doppelte je Vorfall und Bauteil, Holds bei kaputtem Datensatz, Verlust und
+  unbekanntem Ausgang, Sicherheitsuhr, Verdrängen nur wenn es hilft, Auswege des Administrators,
+  schlüsselartige Namen; dazu die Breitensuche des Reviews über die Tabelle mit bis zu drei
+  Neustarts.
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (nichts ist verdrahtet), mit echten Plattenfehlern außer dem nachgestellten `WriteError`,
 mit mehr als einem Prozess auf derselben Datei, und die Größen mit Datensätzen, die alle
 Felder bis an ihre Grenzen füllen (gemessen ist nur der Datensatz der Tests).
+
+**Bekannte Grenzen und TODO (Review P3 und Folgen):**
+
+- `binding_hash` und `state_fingerprint` sind sha256-Werte; die Maskierung des Core hält
+  64 hex für Schlüsselmaterial. Die Tests nehmen genau diese zwei Felder aus
+  (`DIGEST_FIELDS`); wer die Datei später mit der Maskierung des Core anzeigt (Paket J/K), muss
+  sie ebenso als Prüfsumme kennzeichnen, sonst werden sie geschwärzt.
+- Die Prüfung schlüsselartiger Namen (`_token`) lehnt jetzt auch Abschnitte ab, die wie JWT-,
+  API-Schlüssel- oder Base64-Stücke aussehen (ab 12 Zeichen mit Groß-, Kleinbuchstaben und
+  Ziffern, oder ab 16 Zeichen mit mindestens 4 Ziffern). Ein echter Router-Name dieser Form
+  (etwa `Wohnzimmer12AP`) würde ebenfalls abgelehnt; der Datensatz entsteht dann nicht. Keine
+  Heuristik erkennt jeden Schlüssel.
+- Zeit, in der HA aus war, zählt auf der Sicherheitsuhr höchstens 900 s (Abschnitt 5.2): nach
+  einer langen Pause dauern Abklingzeiten und Holds entsprechend länger. Die Engine muss die Uhr
+  regelmäßig abfragen (C1).
+- Die Freigabe-Frist (`approval.expires_at`) prüft der Guard des Core (Paket C2); dort muss ein
+  Sprung der Wanduhr zurück eine Freigabe ebenfalls nicht verlängern.
+- Ob ein Administrator wirklich ein HA-Administrator ist, prüfen die Routen (C2); der Speicher
+  sieht nur die Akteursart. Das Audit dieser Eingriffe kommt mit Paket F/K.
