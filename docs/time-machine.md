@@ -1218,6 +1218,12 @@ Antwort ist `partial`, wenn ein Teil `unreadable` ist; ein ausgeschaltetes Modul
 Antwort **nicht** `partial`. Time Machine aus: `status: "off"`, alle Teile leer; Store noch
 nicht geladen: `status: "unavailable"`, `reason: "not_loaded"`.
 
+Funkdaten (`utilization`) gibt es nur für Stunden, die der WiFi-RF-Verlauf noch hält: höchstens
+8 Tage; über der Speichergrenze (seit 1.52.3 8 MB) kürzt WiFi RF die ältesten Stunden. Eine
+Stunde, die nicht (mehr) im Verlauf ist, liest `window_at` als `state: "unknown"`, `mean`
+null, `buckets` 0, nie als Wert (`test_window_at_reads_a_trimmed_hour_as_unknown`). Was bis
+1.52.2 beim Herunterfahren über 2 MB verloren ging, ist nicht wiederherstellbar.
+
 ### 20.3 Regeln: abgeleitet und unbekannt
 
 Ein Wert ist nie geraten. Es gilt:

@@ -269,8 +269,20 @@ Branch `claude/traffic-analytics-d7ae50`. Nutzerdoku: `docs/traffic-analytics.md
       `expired_points` stehen in `overview()["drops"]`, sind aber keine Verluste (Verdichtung,
       Ersatz, Ablauf). Seit 1.49.4 hat jeder Schlüssel einen deutschen Text
       (`tests/test_traffic_drop_texts_v1494.py`); eigene Zeile oder Hinweis erwägen.
+- [ ] **Feiner Speicher beim allerersten Schreiben über der Grenze** (gefunden bei der
+      Diagnose zu 1.52.3, theoretisch): Gibt es noch keine Datei und liegt die erste Nutzlast
+      von `traffic_fine` nach dem Kürzen je Teil (`_fit`) noch über
+      `TRAFFIC_FINE_STORE_MAX_BYTES`, schreibt `fine_payload` `{}` (`self._last_fine or {}`).
+      Auf der Platte geht nichts verloren (es gab keine Datei), aber der Verlauf dieses Laufs
+      wird nicht gesichert. Kein Zwei-Zeilen-Fix: dafür müsste weiter gekürzt (wie
+      `rf_store._trim` in 1.52.3) oder über der Grenze geschrieben werden. Mit den Budgets der
+      Profile ist der Fall bisher nicht erreichbar.
 
 ### WiFi RF (1.48.0, Nachprüfung 1.49.3)
+
+- [ ] **Speichergrenze nach einer Woche mit 1.52.3 nachsehen:** Diagnose `wifi_rf` →
+      `store.last_save_bytes` und `store.drops.trimmed` der echten Instanz (13 Radios, erwartet
+      etwa 2,9 MB, `trimmed` 0). Wächst `trimmed`, sind die Werte länger als in der Simulation.
 
 - [ ] **Retry-Zählung an echter Hardware bestätigen** (nur lesend, mit Freigabe): seit 1.49.3
       gilt eine 0 als echte 0, sobald ein Client desselben Radios im Fenster Retries > 0
