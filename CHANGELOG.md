@@ -582,6 +582,28 @@ unverändert. Für Benutzer ändert sich nichts, 1.53.0 bleibt nur Observe. Entw
 - **Für ein späteres Paket (I/C2):** das Modell hat keine Felder für Zuordnung, Endgültigkeit,
   Eskalation, Bindung, die Sicherheitszeiten und die Momentaufnahme davor; der Ablauf der
   Anbindung steht in Abschnitt 7.2.
+- **Nach dem Review von PR #83** (strenger, nichts davon kann einen Erfolg erzeugen):
+  - **Alter jedes Fakts:** ein Fakt zählt nur mit bekanntem Alter und passender Messzeit (davor
+    in den 300 s vor dem Start, danach erst nach der Wartezeit); eine frische Momentaufnahme
+    alter Daten ist unbekannt. Dienste, die der Coordinator nach einem Lesefehler aus dem
+    letzten Poll weiterreicht, gelten als unbekannt.
+  - **Eine unlesbare Zeile macht den ganzen Fakt unbekannt**, nie wird sie übersprungen.
+    Schnittstellennamen wie `IoT` oder `4g` werden gelesen.
+  - **Haltezeit:** eine Lösung zählt erst, wenn sie 300 s gehalten hat.
+  - **Wanduhrsprung** zwischen den Momentaufnahmen: das Lösungsalter zählt dann nicht.
+  - **Clients:** von einer Zahl über 0 auf 0 ist immer schlechter, unter 7 Clients schon ein
+    Verlust von mehr als 1; dieselbe Regel je Funkschnittstelle (neuer Wächter).
+  - **Früher Verlust:** ein frisch gemessener Verlust des Verwaltungswegs oder des WAN ist
+    sofort „neue Störung“, ohne die 600 s Wartezeit.
+  - Ein Wächter, der vorher und nachher schlecht ist (Verwaltungsweg, WAN, abhängige Router,
+    andere Vorfälle), verhindert „behoben“; quittierte Vorfälle zählen als offen.
+  - Eine schreibende Aktion ohne Aufrufergebnis wird abgelehnt; abgeleitete Felder werden mit
+    genauem Typ geprüft.
+  - `planned_end` gibt den Zielzustand nach `verdict_key` (nur `repaired_by_action` wird
+    RESOLVED), geprüft gegen die echte Übergangstabelle.
+  - Tests: 424 (vorher 253); 32 000 Zufallsfälle gegen ein eigenes Orakel für jede der acht
+    Aktionen. Mutationsprüfung: die acht Überlebenden des Reviewers und je eine neue Mutation
+    pro geänderter Regel scheitern; zwei gleichwertige sind in Abschnitt 17 begründet.
 
 ## [1.52.3] - 2026-11-27
 
