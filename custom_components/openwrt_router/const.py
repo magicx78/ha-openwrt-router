@@ -1038,3 +1038,18 @@ TIME_MACHINE_STORE_MINOR_VERSION = 2  # 1.52.0: seen, clients_cov, lost
 SERVICE_TIME_MACHINE_FORGET_CLIENT = "time_machine_forget_client"
 SERVICE_TIME_MACHINE_CLEAR = "time_machine_clear_history"
 # --- Ende Network Time Machine ---
+
+
+# --- Self-Healing (Phase 7, package C1) ---
+# ONE fleet-wide switch, ON by default (owner decision for 1.53.0: every
+# router in Observe; no router write exists in this release). It lives in
+# the options of every router entry (the options flow writes the value
+# through to all entries, like the Time Machine switch); an entry without
+# the option counts as on, and the module is off as soon as any entry says
+# off (the stricter reading). Off: no engine, no store read, no listener,
+# no task, no route. The store key lives in heal_store.py.
+OPTION_SELF_HEALING_ENABLED = "self_healing_enabled"
+DEFAULT_SELF_HEALING_ENABLED = True
+DATA_SELF_HEALING_ENGINE = f"{DOMAIN}_self_healing_engine"
+DATA_SELF_HEALING_VIEWS_BOUND = f"{DOMAIN}_self_healing_views_bound"
+# --- end Self-Healing ---

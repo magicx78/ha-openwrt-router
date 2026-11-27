@@ -421,6 +421,8 @@ class TestNoSwitchOrFritzboxSteps:
             "traffic_history_profile",
             # Network Time Machine (Phase A): one fleet switch, off by default.
             "time_machine_enabled",
+            # Self-Healing (Phase 7, C1): one fleet switch, on by default.
+            "self_healing_enabled",
         }
         assert not any("fritzbox" in k for k in keys)
 

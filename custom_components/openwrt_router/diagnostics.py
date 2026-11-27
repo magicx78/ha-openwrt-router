@@ -664,3 +664,112 @@ async def async_get_config_entry_diagnostics(
 
 
 # --- Ende Network Time Machine ---
+
+
+# --- Self-Healing (Phase 7, package C1) ---
+# The fleet-wide engine as one more block ("self_healing"): the switch, the
+# release mode, counts per state and mode, the fixed limits, the safety
+# clock (jumps, last tick), the holds (reason, fleet or router, end) and
+# the fleet pause, plus the engine and store counters. No router id, action
+# id, incident id, entry id, name or address; redacted like the other
+# blocks. Off: only the switch, nothing is read. A failure here never fails
+# the download.
+_async_get_config_entry_diagnostics_tm = async_get_config_entry_diagnostics
+
+
+def _self_healing_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
+    """Self-Healing counts, limits, safety clock and holds; never fails."""
+    try:
+        from .heal_engine import (
+            TICK_S,
+            WRITE_PATH_AVAILABLE,
+            async_get_self_healing,
+            count_by_state,
+            self_healing_enabled,
+        )
+        from .heal_model import FLEET_HOLD_KEY, HealMode
+        from .heal_store import (
+            MAX_ACTIONS,
+            MAX_OPEN_PER_ROUTER,
+            STORE_MAX_BYTES,
+            TERMINAL_RETENTION_S,
+        )
+
+        enabled = self_healing_enabled(hass)
+        engine = async_get_self_healing(hass)
+        if not enabled or engine is None:
+            return {"enabled": enabled, "running": False}
+        store = engine.store
+        safe = store.now()
+        holds = [
+            {
+                "reason": hold.reason.value,
+                "fleet": key == FLEET_HOLD_KEY,
+                "no_end": hold.until is None,
+                "remaining_s": None
+                if hold.until is None
+                else max(0, round(hold.until - safe)),
+            }
+            for key, hold in sorted(store.loop.holds.items())
+            if hold.active(safe)
+        ]
+        router_ids = engine.router_ids()
+        modes = dict.fromkeys((m.value for m in HealMode), 0)
+        for rid in router_ids:
+            modes[store.effective_mode(rid).value] += 1
+        own = engine.router_id_for_entry(entry_id)
+        fleet = store.loop.fleet
+        paused = fleet.paused(safe)
+        return _redact(
+            {
+                "enabled": True,
+                "running": True,
+                "release_mode": "observe_only",
+                "write_path": WRITE_PATH_AVAILABLE,
+                "module_enabled_in_store": engine.module_enabled(),
+                "this_router_held": own is not None
+                and store.loop.hold_on(own, safe) is not None,
+                "effective_modes": modes,
+                "records_by_state": count_by_state(store.actions.values()),
+                "holds": holds,
+                "fleet_pause": {
+                    "paused": paused,
+                    "reason": fleet.reason if paused else None,
+                    "remaining_s": max(0, round(fleet.paused_until - safe))
+                    if paused and fleet.paused_until is not None
+                    else None,
+                },
+                "safety_clock": {
+                    "tick_s": TICK_S,
+                    "last_tick_s_ago": engine.stats()["last_tick_s_ago"],
+                    "jumps_ahead": store.loop.clock.jumps_ahead,
+                    "jumps_back": store.loop.clock.jumps_back,
+                },
+                "limits": {
+                    "max_actions": MAX_ACTIONS,
+                    "max_open_per_router": MAX_OPEN_PER_ROUTER,
+                    "store_max_bytes": STORE_MAX_BYTES,
+                    "terminal_retention_s": TERMINAL_RETENTION_S,
+                    "loop": store.settings.limits.to_dict(),
+                },
+                "store": store.stats(),
+                "engine": engine.stats(),
+            }
+        )
+    except Exception as err:  # noqa: BLE001 - the download must not fail
+        _LOGGER.debug("Self-Healing diagnostics failed: %s", type(err).__name__)
+        return {"loaded": False, "error": True}
+
+
+@_sec_wraps(_async_get_config_entry_diagnostics_tm)
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+) -> dict[str, Any]:
+    """Diagnostics of the entry plus the Self-Healing block."""
+    diagnostics = await _async_get_config_entry_diagnostics_tm(hass, entry)
+    diagnostics["self_healing"] = _self_healing_summary(hass, entry.entry_id)
+    return diagnostics
+
+
+# --- end Self-Healing ---

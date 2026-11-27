@@ -40,6 +40,7 @@ ha-openwrt-router/
 │   ├── traffic_*.py            # Traffic Analytics (traffic_engine, traffic_output, traffic_views)
 │   ├── net_*.py                # Network Intelligence (net_engine, net_rules, net_query)
 │   ├── tm_*.py                 # Network Time Machine: Phase A (tm_sources, tm_query, tm_views), eigener Verlauf B/C (tm_marks, tm_store, tm_engine, tm_clients); Tab „Zeitreise“ in frontend/…/enterprise/timemachine
+│   ├── heal_*.py               # Self-Healing (Phase 7, docs/self-healing.md): Modell + Speicher (heal_model, heal_store), Engine nur Observe + lesende Routen (heal_engine, heal_views; Schalter self_healing_enabled)
 │   ├── strings.json            # UI Strings
 │   ├── translations/en.json
 │   ├── brand/                  # icon.png + icon.svg (für HACS Validation)

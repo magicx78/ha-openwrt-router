@@ -1378,6 +1378,15 @@ class NetIntelligence:
         """True while ``router`` (or the whole fleet) is in maintenance."""
         return router in self._maintenance or self._fleet_maintenance()
 
+    def announced_reopen_count(self, incident_id: str) -> int | None:
+        """The reopen count with which ``incident_id`` was announced on the
+        bus (``opened``/``reopened``) and is still open, else None.
+
+        Read only, memory only. Self-Healing uses it to tell NI's own
+        announcements from an event anyone could fire.
+        """
+        return self._announced.get(incident_id)
+
     def _fleet_maintenance(self, now: float | None = None) -> bool:
         """``settings.maintenance.fleet_until`` (epoch s) not yet reached."""
         until = self.settings.get("maintenance", {}).get("fleet_until")

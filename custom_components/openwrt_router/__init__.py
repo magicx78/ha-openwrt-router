@@ -1125,3 +1125,50 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> 
 
 
 # --- Ende Network Time Machine ---
+
+
+# --- Self-Healing (Phase 7, package C1; 1.53.0 Observe only) ---
+# One fleet-wide engine per HA instance (heal_engine.py), wired like the
+# Time Machine above: the two entry functions are wrapped once more, so no
+# existing code changes. Set up after everything else, released after the
+# base unload. On by default (fleet switch ``self_healing_enabled``); off it
+# creates no store, no listener, no task and no route. It never calls a
+# router and never refreshes a coordinator. Every error stays here and is
+# logged by type only; a setup or an unload never fails because of it.
+try:
+    from . import heal_engine as _heal_engine
+except Exception:  # noqa: BLE001 - the routers work without it
+    _heal_engine = None  # type: ignore[assignment]
+
+_async_setup_entry_tm = async_setup_entry
+_async_unload_entry_tm = async_unload_entry
+
+
+@wraps(_async_setup_entry_tm)
+async def async_setup_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Set up a config entry, then add it to Self-Healing."""
+    ok = await _async_setup_entry_tm(hass, entry)
+    if ok is not False and _heal_engine is not None:
+        try:
+            await _heal_engine.async_setup_self_healing(hass, entry)
+        except Exception as err:  # noqa: BLE001 - by type only; the router works on
+            _LOGGER.warning(
+                "Self-Healing setup failed (%s); the router works without it",
+                type(err).__name__,
+            )
+    return ok
+
+
+@wraps(_async_unload_entry_tm)
+async def async_unload_entry(hass: HomeAssistant, entry: OpenWrtConfigEntry) -> bool:
+    """Unload a config entry, then release it from Self-Healing."""
+    unload_ok = await _async_unload_entry_tm(hass, entry)
+    if unload_ok is not False and _heal_engine is not None:
+        try:
+            await _heal_engine.async_release_self_healing(hass, entry.entry_id)
+        except Exception as err:  # noqa: BLE001 - by type only; the unload goes on
+            _LOGGER.warning("Self-Healing release failed (%s)", type(err).__name__)
+    return unload_ok
+
+
+# --- end Self-Healing ---
