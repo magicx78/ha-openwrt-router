@@ -1015,7 +1015,11 @@ async def test_nothing_in_the_file_looks_like_a_credential(
         )
     ).action
     to_approved(store, action.action_id)
+    # the durable step refuses during a fleet pause (package X): the pause
+    # of _filled_loop comes back once the step is written
+    fleet, store.loop.fleet = store.loop.fleet, hm.FleetPause()
     assert (await execute(store, action.action_id)).ok
+    store.loop.fleet = fleet
     store.record_external_write(
         hm.ExternalWrite(
             router_id=R2, source="switch.service", target="dnsmasq", ts=T0 + 3

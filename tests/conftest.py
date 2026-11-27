@@ -758,18 +758,50 @@ def _stray_paths() -> list[Path]:
     ]
 
 
+# The key of the final summary line: "N passed, 1 stray MagicMock directory
+# (run failed)" instead of a plain "N passed" (review of PR #78, nit e).
+STRAY_SUMMARY_KEY = "stray MagicMock directory (run failed)"
+_STRAY_STASH = pytest.StashKey[list[Path]]()
+
+
+class _StrayEntry:
+    """One entry of the summary stats (counted in the final line)."""
+
+    count_towards_summary = True
+
+
+def _stray_message(stray: list[Path]) -> str:
+    return (
+        "RUN FAILED: stray directory left after the tests (a store on a mocked "
+        "hass?): "
+        + ", ".join(str(p) for p in stray)
+        + ". Remove it; the exit code is 1 even though the tests passed."
+    )
+
+
 def pytest_sessionfinish(session: Any, exitstatus: Any) -> None:
     """Fail the session when a stray directory exists after the tests."""
     stray = _stray_paths()
     if not stray:
         return
     session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    session.config.stash[_STRAY_STASH] = stray
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-    message = (
-        "stray directory after the tests (a store on a mocked hass?): "
-        + ", ".join(str(p) for p in stray)
-    )
     if reporter is not None:
-        reporter.write_line(message, red=True)
+        reporter.stats.setdefault(STRAY_SUMMARY_KEY, []).append(_StrayEntry())
+        reporter.write_line(_stray_message(stray), red=True)
     else:
-        print(message, file=sys.stderr)
+        print(_stray_message(stray), file=sys.stderr)
+
+
+def pytest_terminal_summary(
+    terminalreporter: Any, exitstatus: Any, config: Any
+) -> None:
+    """Name the stray directory in its own section above the final line."""
+    stray = config.stash.get(_STRAY_STASH, None)
+    if not stray:
+        return
+    terminalreporter.section("stray directories", sep="=", red=True, bold=True)
+    for path in stray:
+        terminalreporter.write_line(str(path), red=True)
+    terminalreporter.write_line(_stray_message(stray), red=True)

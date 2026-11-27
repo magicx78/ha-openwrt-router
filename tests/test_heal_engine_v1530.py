@@ -513,7 +513,8 @@ async def test_repeat_child_and_unclear_router_make_no_record(world: World) -> N
     world.bus.fire(EVENT_INCIDENT, payload("inc-1"))  # announced again
     world.bus.fire(EVENT_INCIDENT, payload("inc-1", "reopened"))
     assert len(world.records()) == 1
-    assert engine.counters["deduplicated"] == 2
+    # a repeat of a recorded period is not counted (package X, b)
+    assert engine.counters["deduplicated"] == 0
     # a child of a known root stays silent
     world.ni.incidents["inc-2"] = incident("inc-2", [E2], parent_id="inc-1")
     world.ni.announced["inc-2"] = 0
@@ -680,7 +681,9 @@ async def test_the_context_tells_d_everything_it_may_read(world: World) -> None:
 
 async def test_a_held_router_and_a_paused_fleet_are_respected(world: World) -> None:
     """An unknown state holds the router: its mode stays Observe, the plan
-    says so; a fleet pause turns Auto-Heal into Approval."""
+    says so. A fleet pause turns Auto-Heal into Approval in the store's
+    own reading; the engine shows the policy's mode, Observe for anything
+    of Risk 1 or more (package X)."""
     engine = await world.start()
     store = engine.store
     store.set_settings(
@@ -712,7 +715,8 @@ async def test_a_held_router_and_a_paused_fleet_are_respected(world: World) -> N
     assert first.hold is not None and first.effective_mode is hm.HealMode.OBSERVE
     assert first.configured_mode is hm.HealMode.AUTO_HEAL
     assert second.fleet_paused is True
-    assert second.effective_mode is hm.HealMode.APPROVAL
+    assert second.effective_mode is hm.HealMode.OBSERVE
+    assert engine.effective_mode(R2) is hm.HealMode.OBSERVE
     plan = engine.plan_for(held)
     assert {"router_held", "fleet_paused", "mode_observe"} <= set(plan.blockers)
     assert plan.executable is False
@@ -950,7 +954,8 @@ async def test_restart_with_open_observe_records(world: World) -> None:
     assert again.store.get(second).history[-1].reason == "incident_gone"
     # NI announces inc-1 again after its own restart: no second record
     world.bus.fire(EVENT_INCIDENT, payload("inc-1"))
-    assert len(world.records()) == 2 and again.counters["deduplicated"] == 1
+    # not counted: the period is recorded (package X, b)
+    assert len(world.records()) == 2 and again.counters["deduplicated"] == 0
 
 
 async def test_restart_before_ni_is_loaded_closes_nothing(world: World) -> None:

@@ -432,6 +432,119 @@ nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Absch
     (zweite Prüfung beim Bauen des Vorschlags, Gegenprüfung in `assess`) sind Absicherung in
     der Tiefe, die kein Test erreicht.
 
+### Self-Healing, Paket X (Policy an Engine)
+
+Die Engine aus Paket C1 entscheidet jetzt mit der Richtlinie aus Paket D. Weiterhin nur
+Observe: nichts geht über PROPOSED hinaus, nichts ist ausführbar, kein Router-Aufruf, kein
+Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung. Entwicklerdoku:
+`docs/self-healing.md`, Abschnitte 2.1, 9 und 10.
+
+- **Entscheidung über `heal_policy.gate`:** der laufende Engine-Entscheider ist
+  `PolicyDecider`. Er baut aus dem Kontext der Engine einen `DecisionInput` und fragt den Gate;
+  der Datensatz trägt die Entscheidung des Gates über seine eigene Aktion `observe.evaluate`
+  (Ergebnis, Risiko, Wert, Regeln). Scheitert die Richtlinie, bleibt es bei der
+  Observe-Empfehlung, und der Fehler wird gezählt.
+- **Fakten:** gefüllt wird nur, was die Engine selbst kennt (Router-Identität und Rolle,
+  Sperre des Routers, Flotten-Pause, Wartung, ob der Vorfall Wurzel ist, Versuche, Schutzschalter,
+  Allowlist, Sicherheitsuhr). Alles andere bleibt unbekannt und zählt damit als hohes Risiko
+  bzw. zu wenig Hinweise. Für Paket E und F gibt es die Schnittstelle `HealFactsProvider`; die
+  Voreinstellung liefert nichts, und Fakten der Engine gehen immer vor.
+- **Modus:** Engine, Panel-Schnittstelle und Diagnose zeigen den Modus der Richtlinie; ein
+  gehaltener Router und eine pausierte Flotte zeigen Observe.
+- **Sperre aus C1:** schreibende Aktionen und Risiko 1 bleiben gesperrt; nur eine lesende
+  Empfehlung mit Risiko 0 ohne geplante Änderung kommt durch.
+- **Erklärung:** `plans` zeigt je Vorschlag Aktion, geplante Änderungen und die Erklärung der
+  Entscheidung (Wertzeilen, Regeln, Codes, deutsche Texte, bekannte und unbekannte Fakten).
+  Die Erklärung wird nicht gespeichert; `executable_now` ist darin immer falsch.
+- **Speicher:** der Schritt nach EXECUTING lehnt während einer Flotten-Pause ab
+  (`fleet_paused`), in derselben Reihenfolge wie `loop_verdict`.
+- **Review-Punkte a–k:**
+  - a: ein gelöster oder ignorierter Vorfall bekommt nie einen Datensatz.
+  - b: wiederholte Ereignisse zu einem schon erfassten Vorfall zählen nicht als Doppelte;
+    ein Doppeltes, das erst der Speicher erkennt, zählt höchstens einmal je Öffnung.
+    Ereignisse mit einer Vorfall-Nummer, die Network Intelligence nicht kennt, zählen je Nummer
+    nur einmal (`incidents_seen`, `skipped_unknown_incident`), solange die Nummer unter den
+    letzten 1000 unbekannten ist; danach fällt sie heraus und zählt beim nächsten Mal wieder.
+    Erfundene Nummern treiben die Zähler also um eins je Nummer und Fenster, nicht je
+    Ereignis. Jedes Ereignis zu einem
+    bekannten Vorfall zählt weiter in `incidents_seen`, jedes fehlerhafte in
+    `skipped_bad_event`.
+  - c: zurückgestellte Vorfälle werden nicht bei jedem Takt neu gebaut; der Merkzettel ist
+    begrenzt.
+  - d: eine nach einem Neustart von Network Intelligence wiederverwendete Vorfall-Nummer ist
+    ein neuer Vorfall (späteres `first_seen`, andere Art oder anderer Router); der alte
+    Datensatz wird als verschwunden geschlossen (`incident_gone`), der neue bekommt einen
+    eigenen.
+  - e: ein übrig gebliebener `MagicMock`-Ordner macht den Testlauf rot und steht in der
+    Zusammenfassung.
+  - f: der Optionstext sagt in einfachen Worten, was das Modul tut.
+  - g: der Gate prüft seine eingefrorenen Eingaben neu und nimmt die Aktion aus seiner eigenen
+    Entscheidung.
+  - h: ein Versuch über der Grenze behält eine Abklingzeit mindestens so lang wie vorher.
+  - i: eine unbekannte letzte Ausführung sperrt eine schreibende Aktion (`interval_unknown`).
+  - j: Tests für die drei Mutationen, die das Review überlebt hatten.
+  - k: `ATTEMPT_WINDOW_S` steht nur noch im Modell.
+- Tests: `tests/test_heal_x_policy_v1530.py` (62), `tests/test_heal_x_engine_v1530.py`
+  (113) und `tests/test_heal_x_misc_v1530.py` (2).
+
+#### Nach dem Review von PR #81
+
+- **Eine Faktenquelle kann keinen Datensatz mehr verändern.** Entscheider und Faktenquelle
+  bekommen je eine tiefe Kopie des Kontexts (Datensatz, Ursache, Hold, Allowlist, Versuche und
+  Schutzschalter neu aus ihrer JSON-Form gebaut). Vorher war die Kopie flach, und über
+  `object.__setattr__` ließ sich ein gespeicherter Datensatz bis EXECUTING schieben. Dahinter
+  prüft die Engine den Datensatz nach jeder Entscheidung: hat er sich geändert, wird nichts
+  angewandt, er wird wiederhergestellt und der Fall gezählt (`decision_tampered`).
+- **Unbekannte Wartung bleibt unbekannt:** scheitert die Abfrage bei Network Intelligence oder
+  kommt kein echter Wahrheitswert zurück, gilt die Wartung als unbekannt, nicht als „nicht in
+  Wartung“.
+- **Der Datensatz trägt nur die Entscheidung über seine eigene Aktion.** Der Kandidat einer
+  Faktenquelle (etwa `service.restart`) erscheint nur in der Erklärung von `plans`, als
+  Kandidat gekennzeichnet, nie als Ergebnis, Risiko, Playbook oder geplante Änderung des
+  Datensatzes. Ein späteres Paket muss einen Kandidaten zu einem eigenen Datensatz machen,
+  damit eine Freigabe die wirklich laufende Aktion bindet.
+- **Derselbe Vorfall** heißt jetzt auch gleiche Art und gleicher Router; ein späteres
+  `first_seen` ist schon ab einer Sekunde ein anderer Vorfall (Network Intelligence verschiebt
+  die Zeit nur zurück).
+- **Schwere** kommt aus dem Vorfall von Network Intelligence, **gleichzeitige Reparatur** aus
+  dem Speicher (Reparatursperre oder ein anderer Datensatz in Ausführung); beides kann eine
+  Faktenquelle nicht mehr setzen. `diag_enabled` bleibt bei der Faktenquelle (kein
+  Eintragsschalter).
+- Unbekanntes der Engine schlägt jede Behauptung einer Faktenquelle (Rolle, Identität,
+  Schutzschalter, Wurzel, Quellenfamilien, Ursachenstatus); Tests halten das jetzt fest, ebenso
+  die Größen der Merklisten und der Erklärung als feste Zahlen.
+- Mutationsprüfung auf grünem Stand: die 61 Mutationen des Reviewers (an den geänderten
+  Stellen sinngleich übertragen, E24 durch E24b ersetzt) und 21 neue an den Änderungen dieses
+  Reviews. Im ersten Lauf überlebten 6, darunter keine der vom Review geforderten. Vier
+  bekamen eigene Tests. Einer bleibt, weil er nichts ändert: der Vorab-Check des Slots greift
+  schon vorher. Die Ablehnung des Gates (P05) hielten wir für gleichwertig; das stimmte nicht
+  (siehe unten).
+
+#### Nach dem zweiten Review von PR #81
+
+- **Hold und Allowlist sind vor einer Faktenquelle sicher.** Die tiefen Kopien von Hold und
+  Allowlist hatten keinen Test; eine geteilte Kopie hätte einer Quelle erlaubt, einen Hold zu
+  beenden oder die gespeicherte Allowlist auf `service.restart` mit Risiko 3 umzuschreiben.
+  Jetzt prüft ein Test das, und die Engine vergleicht nach jeder Entscheidung außer dem
+  Datensatz auch alle Holds und die Einstellungen; hat sich etwas geändert, wird nichts
+  angewandt, alles wird zurückgesetzt und gezählt (`decision_tampered`). Der Datensatz kommt
+  auch zurück, wenn er durch ein anderes Objekt ersetzt oder entfernt wurde, und ein Fehler
+  beim Vergleich zählt als Änderung (drittes Review). Das gilt bewusst
+  für jedes Schreiben in den Speicher während einer Entscheidung, auch ein rechtmäßiges:
+  Entscheider und Faktenquellen schreiben nie in den Speicher.
+- **Ablehnung des Gates:** ohne die Prüfung der Ablehnung bliebe die Erlaubnis gleich
+  (`none`), aber der Grund wäre ein anderer (`param_missing` statt `param_unknown` oder
+  `param_value_invalid`). Ein Test hält den Grund jetzt fest.
+- **Kandidat:** die Erklärung zeigt nur noch die vom Katalog geprüften Parameter
+  (`candidate.policy.params`), nicht mehr die rohen der Faktenquelle.
+- **Bekannte Kosten:** die Route `plans` braucht mit der Richtlinie rund 1 ms je Plan (3- bis
+  4-mal so lang wie vorher, linear); die Prüfung nach einer Entscheidung rund 0,4 ms bei 10
+  Routern und 3 ms bei 100 (linear mit Einstellungen und Holds); keine Änderung.
+- Mutationsprüfung auf grünem Stand: 93 Mutationen, 90 scheitern (darunter die geteilten
+  Kopien von Hold, Ursache und Allowlist und die Ablehnung des Gates). Drei bleiben, weil sie
+  nichts ändern (der Vorab-Check des Slots, ein Playbook, das die Entscheidung nicht liest,
+  ein zusätzliches Speichern nach dem Zurücksetzen).
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
