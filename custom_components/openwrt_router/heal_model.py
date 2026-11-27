@@ -48,9 +48,10 @@ only grows; ``interrupted`` is set only by the restart rule (docs §3.1).
 **Times.** Record times (history, ``created_at``, ``updated_at``) are UTC
 wall-clock seconds passed in by the caller, kept to the millisecond and
 recorded as given (also after a jump back). Every wait of the loop
-protection (cooldowns, attempt windows, pauses, holds, retention of safety
-state) runs on the :class:`SafetyClock`, which never runs backwards and
-never jumps ahead by more than ``CLOCK_STEP_MAX_S`` at a time (docs §5.2).
+protection (cooldowns, attempt windows, pauses, holds, retention) runs on
+the :class:`SafetyClock`, which never runs backwards, never jumps ahead by
+more than ``CLOCK_STEP_MAX_S`` at a time, follows monotonic time within a
+run and counts wall time only beyond its high-water mark (docs §5.2).
 """
 
 from __future__ import annotations
@@ -1135,6 +1136,9 @@ class Flags(_Record):
     interrupted: bool = False  # a restart interrupted it: outcome unknown
     in_maintenance: bool = False
     acknowledged_by_admin: bool = False
+    # an admin released the hold its end placed (docs §5.1): it is not
+    # placed again when the holds are rebuilt from the records
+    hold_released: bool = False
 
     def __post_init__(self) -> None:
         """Validate."""
@@ -1509,18 +1513,41 @@ class RemediationAction(_Record):
         return new
 
     def with_flags(self, **flags: Any) -> RemediationAction:
-        """A copy with ``in_maintenance`` or ``acknowledged_by_admin`` changed.
+        """A copy with ``in_maintenance``, ``acknowledged_by_admin`` or
+        ``hold_released`` changed.
 
-        ``interrupted`` is never set here (only the restart rule sets it) and
-        an admin acknowledgement cannot be taken back.
+        ``interrupted`` is never set here (only the restart rule sets it);
+        an admin acknowledgement and a released hold cannot be taken back
+        (the store sets ``hold_released`` only when an admin releases the
+        hold, ``SelfHealingStore.release_hold``).
         """
-        allowed = {"in_maintenance", "acknowledged_by_admin"}
+        allowed = {"in_maintenance", "acknowledged_by_admin", "hold_released"}
         if any(name not in allowed for name in flags):
             _fail("flags")
         new_flags = _build(Flags, {**self.flags.to_dict(), **flags}, "flags")
-        if self.flags.acknowledged_by_admin and not new_flags.acknowledged_by_admin:
-            _fail("flags.acknowledged_by_admin")
+        for name in ("acknowledged_by_admin", "hold_released"):
+            if getattr(self.flags, name) and not getattr(new_flags, name):
+                _fail(f"flags.{name}")
         return replace(self, flags=new_flags)
+
+    @property
+    def is_new(self) -> bool:
+        """The record is as :meth:`new` makes it: DETECTED with its one
+        history entry, and flags, approval, execution and verification at
+        their defaults (a record built with the constructor or
+        ``from_dict`` can carry other values; only the loader may)."""
+        first = self.history[0] if len(self.history) == 1 else None
+        return (
+            self.state is ActionState.DETECTED
+            and first is not None
+            and first.from_state is None
+            and first.to_state is ActionState.DETECTED
+            and self.updated_at == self.created_at
+            and self.flags == Flags()
+            and self.approval == Approval()
+            and self.execution == Execution()
+            and self.verification == Verification()
+        )
 
     # -- derived -----------------------------------------------------------------------
 
@@ -2033,25 +2060,44 @@ class IdempotencyRecord(_Record):
 class SafetyClock(_Record):
     """The clock every wait of the loop protection runs on (docs §5.2).
 
-    ``observe(wall)`` moves ``safe`` on by the wall-clock step since the
-    last observation, but never backwards (a jump back adds nothing) and by
-    at most ``CLOCK_STEP_MAX_S`` (a jump ahead, or a long downtime, adds
-    one step). So a wrong wall clock can only make waits longer, never
-    shorter. The engine observes it at least every few minutes.
+    ``observe(wall, elapsed)`` moves ``safe`` on by one step, never
+    backwards and never by more than ``CLOCK_STEP_MAX_S``:
+
+    * ``elapsed`` given (monotonic seconds since the previous observation
+      in the same run of HA): the step is ``elapsed``. The wall clock does
+      not move the safety clock at all, so no wall-clock change (ahead,
+      back, flapping) can make it run faster than real time.
+    * ``elapsed`` None (the first observation after a start, or no
+      monotonic source): the step is how far the wall time is beyond
+      ``high``, the highest wall time ever observed (persisted, never
+      lowered). A jump back adds nothing and the time it "gave back" is
+      never counted again; a jump ahead or a downtime adds one step.
+
+    So waits are only ever lengthened by a wrong wall clock, except once per
+    start: a wall clock wrong ahead of every wall time seen before can add
+    at most ``CLOCK_STEP_MAX_S`` that did not pass.
     """
 
     _what = "clock"
     wall: float | None = None  # the last wall time observed
     safe: float | None = None
+    high: float | None = None  # the highest wall time ever observed
     jumps_ahead: int = 0
     jumps_back: int = 0
 
     def __post_init__(self) -> None:
-        """Validate (both times set, or neither)."""
+        """Validate (all times set, or none; ``high`` not below ``wall``).
+
+        A clock written before ``high`` existed takes ``wall`` as it."""
         _set(self, "wall", _opt_ts(self.wall, "clock.wall"))
         _set(self, "safe", _opt_ts(self.safe, "clock.safe"))
+        _set(self, "high", _opt_ts(self.high, "clock.high"))
         if (self.wall is None) is not (self.safe is None):
             _fail("clock.safe")
+        if self.high is None:
+            _set(self, "high", self.wall)
+        elif self.wall is None or self.high < self.wall:
+            _fail("clock.high")
         for name in ("jumps_ahead", "jumps_back"):
             _set(
                 self,
@@ -2059,25 +2105,36 @@ class SafetyClock(_Record):
                 _int(getattr(self, name), f"clock.{name}", 0, CLOCK_JUMPS_MAX),
             )
 
-    def observe(self, now: float) -> SafetyClock:
-        """The clock after observing the wall time ``now``."""
+    def observe(self, now: float, elapsed: float | None = None) -> SafetyClock:
+        """The clock after observing the wall time ``now``; ``elapsed``:
+        monotonic seconds since the previous observation (same run)."""
         wall = _ts(now, "clock.now")
-        if self.wall is None or self.safe is None:
-            return replace(self, wall=wall, safe=wall)
+        if elapsed is not None:
+            if (
+                isinstance(elapsed, bool)
+                or not isinstance(elapsed, int | float)
+                or math.isnan(elapsed)
+            ):
+                _fail("clock.elapsed")
+            elapsed = max(0.0, float(elapsed))
+        if self.wall is None or self.safe is None or self.high is None:
+            return replace(self, wall=wall, safe=wall, high=wall)
         delta = wall - self.wall
         ahead, back = self.jumps_ahead, self.jumps_back
-        if delta < 0:
-            step = 0.0
-            if -delta > CLOCK_BACK_TOLERANCE_S:
-                back = min(back + 1, CLOCK_JUMPS_MAX)
-        elif delta > CLOCK_STEP_MAX_S:
-            step = float(CLOCK_STEP_MAX_S)
+        if delta < -CLOCK_BACK_TOLERANCE_S:
+            back = min(back + 1, CLOCK_JUMPS_MAX)
+        elif delta > CLOCK_STEP_MAX_S and (
+            elapsed is None or delta - elapsed > CLOCK_STEP_MAX_S
+        ):
             ahead = min(ahead + 1, CLOCK_JUMPS_MAX)
+        if elapsed is not None:
+            step = elapsed
         else:
-            step = delta
+            step = max(0.0, wall - self.high)
         return SafetyClock(
             wall=wall,
-            safe=min(self.safe + step, _TS_MAX),
+            safe=min(self.safe + min(step, float(CLOCK_STEP_MAX_S)), _TS_MAX),
+            high=max(self.high, wall),
             jumps_ahead=ahead,
             jumps_back=back,
         )
@@ -2180,7 +2237,9 @@ class LoopState:
     non-terminal action holding it; ``idempotency``: idempotency id ->
     action; ``locks``: the repair lock holder per router; ``holds``: held
     routers (key: router id, ``""`` for the fleet); ``clock``: the safety
-    clock; ``external_writes``: the newest writes from outside the engine
+    clock; ``terminal_at``: action id -> safety-clock time it became
+    terminal (its retention runs from there, docs §5.2);
+    ``external_writes``: the newest writes from outside the engine
     (bounded).
     """
 
@@ -2194,6 +2253,7 @@ class LoopState:
     locks: dict[str, LockRecord] = field(default_factory=dict)
     holds: dict[str, RouterHold] = field(default_factory=dict)
     clock: SafetyClock = field(default_factory=SafetyClock)
+    terminal_at: dict[str, float] = field(default_factory=dict)
     external_writes: list[ExternalWrite] = field(default_factory=list)
 
     # -- locks -------------------------------------------------------------------------
@@ -2274,6 +2334,7 @@ class LoopState:
             "locks": [v.to_dict() for _k, v in sorted(self.locks.items())],
             "holds": [v.to_dict() for _k, v in sorted(self.holds.items())],
             "clock": self.clock.to_dict(),
+            "terminal_at": dict(sorted(self.terminal_at.items())),
             "external_writes": [w.to_dict() for w in self.external_writes],
         }
 
@@ -2314,6 +2375,10 @@ class LoopState:
                 _fail("loop.holds")
             state.holds[hold.key] = hold
         state.clock = _build(SafetyClock, data.get("clock") or {}, "loop.clock")
+        for action_id, stamp in _map(data, "terminal_at").items():
+            state.terminal_at[
+                _id(action_id, REMEDIATION_ID_PREFIX, "loop.terminal_at")
+            ] = _ts(stamp, "loop.terminal_at")
         state.external_writes = [
             _build(ExternalWrite, row, "loop.external_writes")
             for row in _list(data, "external_writes")

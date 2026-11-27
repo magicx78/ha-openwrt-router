@@ -97,6 +97,25 @@ Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/
   - Wartezeiten laufen auf einer Uhr, die eine springende Wanduhr nie verkürzt.
   - Beim Ausführen gelten Abklingzeit, Versuche in 24 h und offene Schutzschalter.
   - Abgeschlossene Datensätze fallen nur, wenn das die Datei wirklich unter die Grenze bringt.
+- Nach dem zweiten Review von PR #75:
+  - Sicherheitsuhr: Während HA läuft, zählt nur die monotone Uhr; keine Änderung der Wanduhr
+    (vor, zurück, hin und her) verkürzt dann eine Wartezeit. Nach einem Start zählt die Wanduhr
+    nur, soweit sie über der höchsten je gesehenen Wanduhrzeit liegt (in der Datei), und
+    höchstens 900 s. Verkürzen kann eine Wartezeit damit nur ein Start mit einer Wanduhr über
+    dieser Marke, um höchstens 900 s je Start. Vorher lief die Uhr bei einer hin und her
+    springenden Wanduhr vielfach schneller als die echte Zeit (30 min Abklingzeit nach rund
+    16 s vorbei).
+  - Holds nach unbekanntem oder eskaliertem Ausgang setzt jedes Laden aus den Datensätzen neu,
+    ohne Ende; ein kaputter Schleifenschutz-Abschnitt macht daraus keinen 24-h-Hold mehr. Hebt
+    ein Administrator den Hold auf, wird das am Datensatz vermerkt, und der Hold kommt nicht
+    wieder.
+  - Ein kaputter Datensatz, dessen Zustand oder Verlauf noch eine Ausführung zeigt, sperrt
+    seinen Router (unlesbare Router-Kennung: die Flotte) bis ein Administrator ihn freigibt.
+  - Abgeschlossene Datensätze werden 90 Tage ab der Sicherheitszeit ihres Endes aufbewahrt,
+    nicht mehr nach ihren Wanduhr-Zeiten; ein erster Start mit falsch vorgehender Wanduhr
+    löscht keinen Verlauf mehr. Wartungsfenster fallen erst, wenn Wanduhr und Sicherheitsuhr
+    90 Tage über ihrem Ende sind.
+  - Der Speicher nimmt nur Datensätze an, wie `RemediationAction.new()` sie anlegt.
 - `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
 
 ## [1.52.3] - 2026-11-27

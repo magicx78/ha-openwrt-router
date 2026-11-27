@@ -47,22 +47,31 @@ KEY = hs.HEAL_STORE_KEY
 
 
 class Clock:
-    """Wall clock the test moves by hand."""
+    """Wall clock the test moves by hand, plus the real (monotonic) time.
+
+    Setting ``now`` is a wall-clock jump: no real time passes. Only
+    :func:`advance` (or ``real``) lets real time pass.
+    """
 
     def __init__(self, now: float = T0) -> None:
         self.now = now
+        self.real = 0.0
 
     def __call__(self) -> float:
         return self.now
 
+    def mono(self) -> float:
+        return self.real
+
 
 def advance(store: hs.SelfHealingStore, clock: Clock, seconds: float) -> None:
-    """Let ``seconds`` pass in plausible steps (the engine's tick), so the
-    safety clock follows the wall clock."""
+    """Let ``seconds`` of real time pass in plausible steps (the engine's
+    tick); the wall clock moves with it."""
     left = seconds
     while left > 0:
         step = min(600.0, left)
         clock.now += step
+        clock.real += step
         left -= step
         store.now()
 
@@ -90,6 +99,7 @@ def clock() -> Clock:
 async def open_store(
     clock: Clock, hass: Any = None, **kwargs: Any
 ) -> tuple[hs.SelfHealingStore, hs.LoadResult]:
+    kwargs.setdefault("monotonic", clock.mono)
     store = hs.SelfHealingStore(hass or make_hass(), clock=clock, **kwargs)
     return store, await store.async_load()
 

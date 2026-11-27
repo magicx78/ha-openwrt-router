@@ -119,7 +119,7 @@ die Meldung nennt nur den Feldnamen, nie den Wert.
 | `audit_refs` | höchstens 64 Audit-Kennungen (`evt_…`) |
 | `state_fingerprint` | sha256 des Zustands, an den eine Freigabe gebunden ist |
 | `idempotency_id` | `idm_` + Hash des Idempotenz-Schlüssels; der Schlüssel selbst wird **nie** gespeichert |
-| `flags` | `interrupted`, `in_maintenance`, `acknowledged_by_admin` |
+| `flags` | `interrupted`, `in_maintenance`, `acknowledged_by_admin`, `hold_released` |
 
 Abweichungen vom Entwurf (alle in Paket B):
 
@@ -148,7 +148,8 @@ Zustands-Fingerabdruck).
 Kein sicherheitsrelevantes Feld lässt sich außerhalb seines Übergangs ändern. Es gibt nur drei
 Wege, einen Datensatz zu ändern: `transition(…, changes=…)` (mit dem Zustandswechsel),
 `with_changes(**felder)` (ohne Zustandswechsel, Speicher: `update()`) und
-`with_flags(in_maintenance=…, acknowledged_by_admin=…)` (Speicher: `update_flags()`).
+`with_flags(in_maintenance=…, acknowledged_by_admin=…)` (Speicher: `update_flags()`;
+`hold_released` setzt nur `release_hold()`).
 
 **Nie änderbar** (weder `with_changes` noch `transition`): `action_id`, `router_id`, `state`,
 `history`, `created_at`, `updated_at` (diese vier setzt nur `transition` selbst),
@@ -173,9 +174,14 @@ alte wird abgebrochen).
 | `flags.interrupted` | nur die Neustartregel (Übergänge mit `interrupts`) setzt es; nichts löscht es |
 | `flags.in_maintenance` | `with_flags`, in beide Richtungen |
 | `flags.acknowledged_by_admin` | `with_flags`, nur von `false` nach `true` |
+| `flags.hold_released` | nur `SelfHealingStore.release_hold()` (Review 2, P2-2), nur von `false` nach `true`; `update_flags()` lehnt es ab |
 
 `RemediationAction.new()` nimmt `flags`, `approval`, `execution` und `verification` nicht an:
-ein neuer Datensatz beginnt mit ihren Standardwerten.
+ein neuer Datensatz beginnt mit ihren Standardwerten. **`SelfHealingStore.add()` nimmt nur
+solche Datensätze** (`is_new`: DETECTED mit genau einem Verlaufseintrag, `updated_at` =
+`created_at`, diese vier Felder auf Standard; Review 2, P3). Ein mit dem Konstruktor oder
+`from_dict` gebauter Datensatz mit anderen Werten wird abgelehnt; nur das Laden der Datei
+bringt solche Datensätze.
 
 **Stand heute:** gebaut und getestet. Niemand erzeugt bisher Datensätze außer den Tests.
 
@@ -345,7 +351,8 @@ Neustart weg; deshalb verfällt auch die Freigabe hier. **DECIDED:** PREFLIGHT w
 vor dem Neustart nicht mehr). Dass nach einer Unterbrechung der Schutzschalter des Schlüssels
 öffnet (Entwurf), kommt mit Paket I. Macht die Neustartregel eine Aktion, die schon EXECUTING
 erreicht hatte, endgültig (FAILED → ESCALATED, ROLLBACK_PENDING → MANUAL_RECOVERY_REQUIRED),
-wird ihr Router gesperrt wie in Abschnitt 5.1.
+wird ihr Router gesperrt wie in Abschnitt 5.1. Diese Holds ohne Ende setzt jedes Laden aus den
+Datensätzen neu (Abschnitt 5.1), auch wenn der Schleifenschutz in der Datei kaputt war.
 
 Sperren und Doppelt-Kennungen werden beim Laden aus den Datensätzen neu aufgebaut. **Sperren
 von Schreibzugriffen außerhalb der Engine fallen beim Laden weg** – nach einem Neustart kann
@@ -363,12 +370,23 @@ ebenfalls eine `.bak`-Kopie und die Pause (Grund `store_damaged`), und:
 - ein kaputter Datensatz oder ein kaputtes Wartungsfenster mit **lesbarer** Router-Kennung
   sperrt diesen Router für 24 h (Hold `record_unreadable`);
 - ist die Router-Kennung nicht lesbar oder der Schleifenschutz kaputt, wird die **ganze Flotte**
-  für 24 h gesperrt.
+  für 24 h gesperrt;
+- zeigt ein kaputter Datensatz in seinem rohen `state` oder Verlauf (`history[].to_state`) noch
+  EXECUTING, VERIFYING oder ROLLING_BACK (ein Router-Aufruf kann gelaufen sein), gilt der Hold
+  **ohne Ende**, nur ein Administrator hebt ihn auf (Review 2, Punkt 3) – für seinen Router,
+  bei unlesbarer Router-Kennung für die Flotte.
 
 **DECIDED (Koordinator, P2-7):** gesperrt heißt Observe, Freigabe und Auto-Heal blockiert; die
 Sperre gilt 24 h oder bis ein Administrator sie aufhebt, steht in der Datei und ist sichtbar
 (`router_hold()`, `stats()["holds"]`). Kaputte Einstellungen heißen Standardwerte, also Observe
 für jeden Router.
+
+**DECIDED (Koordinator, Review 2 Punkt 3):** ein kaputter Datensatz, der noch zeigt, dass er
+einen Router-Aufruf erreicht hat, sperrt ohne Ende; ohne diesen Hinweis bleiben es 24 h.
+**DECIDED (Unter-Sitzung):** ist dabei die Router-Kennung nicht lesbar, wird die **Flotte** ohne
+Ende gesperrt – der Ausgang ist auf irgendeinem Router unbekannt, und nur ein Administrator kann
+sagen, auf welchem. Ein beendeter Datensatz mit einem solchen Verlauf zählt ebenso (streng:
+der Verlauf allein entscheidet, nicht, ob der Ausgang bekannt war).
 
 **Grenzen** (keine davon wirft je eine laufende Aktion hinaus; alle Zeiten auf der
 Sicherheitsuhr, Abschnitt 5.2):
@@ -377,9 +395,9 @@ Sicherheitsuhr, Abschnitt 5.2):
 |---|---|---|
 | Datensätze gesamt | 500 | ein neuer verdrängt den ältesten Endzustand; gibt es keinen, wird er abgelehnt (`CapacityError`) |
 | offene je Router | 20 | darüber wird ein neuer abgelehnt |
-| Aufbewahrung Endzustände | 90 Tage | `prune()` entfernt ältere |
+| Aufbewahrung Endzustände | 90 Tage Sicherheitsuhr ab dem Ende | `prune()` entfernt ältere; gemessen ab der Sicherheitszeit, zu der der Datensatz endete (`loop.terminal_at`), nie an seinen Wanduhr-Stempeln (Review 2, P2-4) |
 | Idempotenz | 24 h, höchstens 1000 | die Kennung einer **offenen** Aktion bleibt immer; die einer beendeten ist nach 24 h vergessen (siehe unten) |
-| Wartungsfenster | höchstens 100, beendete 90 Tage | |
+| Wartungsfenster | höchstens 100, beendete 90 Tage | ein Fenster fällt erst, wenn Wanduhr **und** Sicherheitsuhr 90 Tage über seinem Ende sind (seine Zeiten sind Wanduhr-Zeiten des Administrators) |
 | Versuchszähler | 7 Tage ohne Versuch, nur außerhalb des 24-h-Fensters und ohne laufende Abklingzeit, höchstens 1000 (die Obergrenze verdrängt nur solche) | |
 | Schutzschalter | ein **offener** bleibt immer; geschlossene 90 Tage, höchstens 1000 | |
 | Holds | ohne Ende nur durch einen Administrator; mit Ende danach | |
@@ -425,7 +443,7 @@ abläuft. Solange ein Hold gilt:
 |---|---|---|
 | `outcome_unknown` | eine Aktion, die EXECUTING erreicht hatte, endet in MANUAL_RECOVERY_REQUIRED | nur Administrator |
 | `outcome_escalated` | eine solche Aktion endet in ESCALATED – außer wenn der Router den Aufruf sauber abgelehnt hat (EXECUTING → FAILED mit `call_result` `rejected`, nicht unterbrochen) | nur Administrator |
-| `record_unreadable` | kaputter Datensatz beim Laden (Router, sonst Flotte) | 24 h oder Administrator |
+| `record_unreadable` | kaputter Datensatz beim Laden (Router, sonst Flotte) | 24 h oder Administrator; **nur Administrator**, wenn sein roher Zustand oder Verlauf noch EXECUTING, VERIFYING oder ROLLING_BACK zeigt |
 | `store_lost` | Datei verloren, unlesbar oder neuer (Flotte) | 24 h oder Administrator |
 | `stuck_released` | ein Administrator beendet eine hängende Aktion (`admin_release_stuck`) | nur Administrator |
 | `lock_forced` | ein Administrator entfernt eine hängende Fremd-Sperre (`admin_force_release_lock`) | nur Administrator |
@@ -435,6 +453,15 @@ der Router-Sperre, steht in der Datei und gilt bis zur ausdrücklichen Freigabe 
 Administrator (`release_hold(router_id oder None, actor=admin, ts=…)`); lesende Diagnosen
 (Risiko 0) sind nicht blockiert. Treffen zwei Holds auf denselben Schlüssel, bleibt der, der
 länger gilt.
+
+**Holds aus den Datensätzen (Review 2, P2-2).** Die Holds `outcome_unknown` und
+`outcome_escalated` folgen aus den beendeten Datensätzen selbst (`hold_reason_for`). Jedes Laden
+setzt sie für jeden solchen Datensatz neu, ohne Ende – ein kaputter Abschnitt `loop` macht aus
+ihnen also nicht mehr einen 24-h-Hold der Flotte. Hebt ein Administrator den Hold eines Routers
+auf, markiert `release_hold()` jeden beendeten Datensatz dieses Routers, dessen Ende einen Hold
+setzt, mit `flags.hold_released`; markierte Datensätze setzen ihren Hold nicht wieder. Holds
+ohne Datensatz (`lock_forced`, `record_unreadable`, `store_lost`) kommen bei einem kaputten
+Abschnitt `loop` nicht zurück; dann gilt der 24-h-Hold der Flotte.
 
 **Auswege für den Administrator (Review P3).** `admin_release_stuck(action_id, actor=admin, ts=…)`
 führt eine Aktion, die in EXECUTING, VERIFYING oder ROLLING_BACK hängt, über die
@@ -450,24 +477,63 @@ Routen (Paket C2/F).
 
 Alle Wartezeiten des Schleifenschutzes laufen auf der **Sicherheitsuhr**
 (`heal_model.SafetyClock`, in `loop.clock`, abgefragt mit `SelfHealingStore.now()`), nicht auf
-der Wanduhr. Bei jeder Beobachtung der Wanduhr rückt sie um den Schritt seit der letzten
-Beobachtung vor, aber **nie rückwärts** und **höchstens 900 s** (`CLOCK_STEP_MAX_S`) auf
-einmal. Sprünge werden gezählt (`jumps_ahead`, `jumps_back`, in `stats()`).
+der Wanduhr. Sie geht **nie rückwärts** und je Beobachtung **höchstens 900 s**
+(`CLOCK_STEP_MAX_S`) vor. Wie weit, hängt davon ab, ob es eine Beobachtung aus demselben Lauf
+von HA gibt (Review 2, P2-1):
 
-**DECIDED (P2-9): im Zweifel länger warten.** Ein Sprung zurück lässt keine Zeit vergehen; ein
-Sprung nach vorn (oder eine lange Pause von HA) zählt als ein Schritt von 900 s. Eine falsche
-Wanduhr kann eine Wartezeit so nur verlängern, nie verkürzen. Der Preis: Zeit, in der HA aus war
-oder in der niemand die Uhr abgefragt hat, zählt höchstens 900 s – alle Wartezeiten verlängern
-sich um diese Zeit. Die Engine (Paket C1) fragt die Uhr deshalb mindestens alle 5 Minuten ab.
+- **Während HA läuft** zählt die **monotone Uhr** (Standard `time.monotonic`, im Speicher über
+  `monotonic=` einstellbar): der Schritt ist die monotone Zeit seit der letzten Beobachtung
+  (`observe(wall, elapsed=…)`). Die Wanduhr bewegt die Sicherheitsuhr dann **gar nicht**.
+- **Bei der ersten Beobachtung nach einem Start** (die monotone Uhr beginnt mit jedem Prozess
+  neu) und ohne monotone Quelle zählt die Wanduhr, aber **nur, soweit sie über der höchsten je
+  gesehenen Wanduhrzeit liegt** (`high`, steht in der Datei und sinkt nie). Ein Sprung zurück
+  zählt nichts, und die Strecke bis zur alten Höchstmarke zählt auch danach nicht noch einmal.
+
+Sprünge werden gezählt (`jumps_ahead`, `jumps_back`, in `stats()`).
+
+Vorher rückte die Uhr nach einem Sprung zurück von der niedrigeren Wanduhrzeit aus wieder vor:
+eine Wanduhr, die um 900 s hin und her sprang, ergab in rund 200 s etwa 22 h Sicherheitszeit,
+eine Abklingzeit von 30 min war nach rund 16 s vorbei, und das 24-h-Fenster der Versuche ließ
+sich genauso aushebeln (Review 2, P2-1).
+
+**Garantie.**
+
+- **Während HA läuft, verkürzt keine Änderung der Wanduhr eine Wartezeit** – weder vor noch
+  zurück noch hin und her. Die Sicherheitsuhr läuft dann nie schneller als die monotone Uhr,
+  also nie schneller als die echte Zeit.
+- **Verkürzen kann eine Wartezeit nur ein Start von HA**, bei dem die Wanduhr über jeder bisher
+  gesehenen Wanduhrzeit liegt, und zwar um **höchstens 900 s je Start** – so viel zählt auch
+  echte Ausfallzeit; beides ist von außen nicht zu unterscheiden. Eine Wanduhr, die einmal falsch
+  vorgeht und dabei bleibt, gewinnt diese 900 s nur einmal.
+- Alles andere **verlängert** Wartezeiten höchstens: Ausfallzeit über 900 s, mehr als 900 s
+  zwischen zwei Beobachtungen, eine Wanduhr, die nach einem Start unter ihrer Höchstmarke liegt
+  (sie zählt erst wieder, wenn sie die Marke überholt).
+
+**DECIDED (P2-9, Review 2 P2-1): im Zweifel länger warten** – monotone Uhr während des Laufs,
+Höchstmarke über Starts. Der Preis: ging die Wanduhr einmal weit vor und wurde dann korrigiert,
+zählt nach dem nächsten Neustart keine Ausfallzeit, bis die echte Zeit die Höchstmarke erreicht;
+während HA läuft, vergeht die Zeit normal. Die Engine (Paket C1) fragt die Uhr mindestens alle
+5 Minuten ab, sonst gehen Minuten über 900 s je Abfrage verloren (länger, nie kürzer).
+
+**Aufbewahrung (Review 2, P2-4).** Endzustände werden nicht mehr an ihrem `updated_at`
+(Wanduhr) gemessen: startete die Sicherheitsuhr bei einem ersten Start mit einer weit
+vorgehenden Wanduhr, hätte jedes `prune()` jeden später beendeten Datensatz sofort gelöscht.
+Jetzt stempelt der Speicher die Sicherheitszeit, zu der ein Datensatz endet
+(`loop.terminal_at`), und misst die 90 Tage ab dort; ein beendeter Datensatz ohne Stempel (nach
+einem kaputten Abschnitt `loop`) bekommt beim Laden die aktuelle Sicherheitszeit. Wartungsfenster
+tragen Wanduhr-Zeiten des Administrators; eins fällt erst, wenn Wanduhr **und** Sicherheitsuhr
+90 Tage über seinem Ende sind.
 
 | Wartezeit | Uhr | Sprung zurück | Sprung nach vorn |
 |---|---|---|---|
-| Abklingzeit, Backoff (`cooldown_until`) | Sicherheitsuhr | keine Zeit vergeht: länger | höchstens +900 s je Beobachtung: nie kürzer |
-| 24-h-Fenster der Versuche | Sicherheitsuhr | länger | nie kürzer |
-| Pause der Flotte (`paused_until`) | Sicherheitsuhr | länger | nie kürzer |
-| Hold mit Ende (`until`) | Sicherheitsuhr | länger | nie kürzer |
-| Idempotenz (24 h) | Sicherheitsuhr | länger behalten | nie früher vergessen |
-| Aufbewahrung Versuche (7 Tage), Schutzschalter, Endzustände, Wartungsfenster (90 Tage) | Sicherheitsuhr (Endzustände: ihr `updated_at` gegen die Sicherheitsuhr) | länger behalten | nie früher entfernt |
+| Abklingzeit, Backoff (`cooldown_until`) | Sicherheitsuhr | im Lauf: zählt nicht; beim Start: nichts unter der Höchstmarke – länger | im Lauf: zählt nicht; beim Start: höchstens +900 s über der Höchstmarke |
+| 24-h-Fenster der Versuche | Sicherheitsuhr | länger | im Lauf nie kürzer; beim Start höchstens 900 s kürzer |
+| Pause der Flotte (`paused_until`) | Sicherheitsuhr | länger | ebenso |
+| Hold mit Ende (`until`) | Sicherheitsuhr | länger | ebenso |
+| Idempotenz (24 h) | Sicherheitsuhr | länger behalten | ebenso |
+| Aufbewahrung Endzustände (90 Tage) | Sicherheitsuhr ab `loop.terminal_at` | länger behalten | ebenso; nie an Wanduhr-Stempeln gemessen |
+| Aufbewahrung Versuche (7 Tage), Schutzschalter (90 Tage) | Sicherheitsuhr | länger behalten | ebenso |
+| Aufbewahrung Wartungsfenster (90 Tage nach `end`) | Wanduhr **und** Sicherheitsuhr | länger behalten | länger behalten |
 | Wartungsfenster aktiv | Wanduhr **oder** Sicherheitsuhr | zählt, solange eine von beiden im Fenster liegt: länger | ebenso: länger |
 | Freigabe (`approval.expires_at`) | Guard des Core, nicht dieser Speicher (das Feld ist nur Auskunft) | offen für C2: ein Sprung zurück darf eine Freigabe nicht verlängern | verfällt früher (sicher) |
 | Router-Sperre (`since`) | Wanduhr, nur Auskunft | läuft nie ab | läuft nie ab |
@@ -690,14 +756,14 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Zustand ändert sich zwischen Freigabe und Ausführung | `binding_hash` mit Fingerabdruck, letzte Vorabprüfung | Funktion `binding_hash()` vorhanden; Bindung und Fingerabdruck sind nach der Planung unveränderlich |
 | Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; Öffnen der Schutzschalter fehlt (Paket I) |
 | Ergebnis unbekannt, die nächste Aktion verschlimmert es | Hold bis zur Freigabe durch einen Administrator | **gebaut** im Speicher (Abschnitt 5.1) |
-| Wanduhr springt (NTP, RTC, Hand) | Sicherheitsuhr, im Zweifel länger warten | **gebaut** (Abschnitt 5.2) |
+| Wanduhr springt (NTP, RTC, Hand) | Sicherheitsuhr: monotone Zeit im Lauf, Höchstmarke der Wanduhr über Starts, im Zweifel länger warten | **gebaut** (Abschnitt 5.2); ein Start kann höchstens 900 s gewinnen |
 | Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | Plan |
 | Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
 | Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | Sperre und Fremd-Schreibzugriff als Daten vorhanden, noch nicht benutzt |
 | Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für den Speicher; Test mit der Maskierung des Core |
-| Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers | **gebaut** |
+| Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers, ohne Ende, wenn er noch eine Ausführung zeigt; Holds aus beendeten Datensätzen werden bei jedem Laden neu gesetzt | **gebaut** |
 
 ## 15. Arbeitspakete und Releases
 
@@ -710,7 +776,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | F | Playbooks A–G | offen |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
-| I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht | offen |
+| I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
 | J | Tab im Dashboard | offen |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
@@ -722,6 +788,13 @@ Entscheidungen des Eigentümers:
   Router-Aufruf. Die erste schreibende Aktion kommt mit **1.54.0** (Paket C2).
 - Das Modul ist nach dem Update für jeden Router **an, im Modus Observe**.
 - Gemergt wird erst nach einer unabhängigen Prüfung.
+
+**DECIDED (Master, Review 2) für das Paket, das die vorhandenen Knöpfe und Schalter
+verdrahtet:** auf einem **gesperrten** Router (Hold, Abschnitt 5.1) bleiben sie erlaubt – der
+Administrator stellt dann von Hand wieder her – und schreiben einen Audit-Eintrag. Abgelehnt
+werden sie nur, solange eine Aktion der Engine die Router-Sperre hält (`try_external_lock`
+gibt dann `None`). Der Speicher setzt das heute schon so um: `try_external_lock` prüft keinen
+Hold.
 
 ## 16. Entscheidungen des Eigentümers und offene Fragen
 
@@ -758,6 +831,16 @@ Entscheidungen des Eigentümers:
   unbekanntem Ausgang, Sicherheitsuhr, Verdrängen nur wenn es hilft, Auswege des Administrators,
   schlüsselartige Namen; dazu die Breitensuche des Reviews über die Tabelle mit bis zu drei
   Neustarts.
+- `tests/test_heal_review2_v1530.py`: die Punkte des zweiten Reviews (vor der Korrektur rot):
+  Sicherheitsuhr (falsch vor und zurück, Hin-und-her-Sprünge, Abklingzeit und 24-h-Fenster bei
+  springender Wanduhr, monotone Schritte, Höchstmarke über Neustarts), kaputter Abschnitt
+  `loop` behält Holds ohne Ende, aufgehobene Holds kommen nicht wieder, kaputter Datensatz mit
+  Ausführung im Verlauf sperrt ohne Ende, Aufbewahrung ab dem Sicherheitsstempel, `add()` nur
+  für neue Datensätze. Dazu Tests für Schutzmechanismen, die schon da waren, aber ohne Test, der
+  scheitert, wenn man sie entfernt (jeder einzeln durch Entfernen geprüft): Hold-Prüfung und
+  Versuchsbuchung im dauerhaften Schritt, Sperre von Flush und Schließen, Reservierung der
+  Schreibnummer, Nummernprüfung beim Rücklesen, Idempotenz-Kennungen offener Aktionen,
+  `audit_refs` nur wachsend.
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (nichts ist verdrahtet), mit echten Plattenfehlern außer dem nachgestellten `WriteError`,
@@ -778,6 +861,11 @@ Felder bis an ihre Grenzen füllen (gemessen ist nur der Datensatz der Tests).
 - Zeit, in der HA aus war, zählt auf der Sicherheitsuhr höchstens 900 s (Abschnitt 5.2): nach
   einer langen Pause dauern Abklingzeiten und Holds entsprechend länger. Die Engine muss die Uhr
   regelmäßig abfragen (C1).
+- Ein Start mit einer Wanduhr über der Höchstmarke kann eine Wartezeit um höchstens 900 s
+  verkürzen (Abschnitt 5.2); das ist von echter Ausfallzeit nicht zu unterscheiden. Der
+  Modelltest des Reviewers `test_clock_wrong_then_corrected_gains_time` (reine Wanduhr, ohne
+  monotone Zeit) bleibt deshalb grün; im Speicher gilt dieser Weg nur für die erste Beobachtung
+  nach einem Start.
 - Die Freigabe-Frist (`approval.expires_at`) prüft der Guard des Core (Paket C2); dort muss ein
   Sprung der Wanduhr zurück eine Freigabe ebenfalls nicht verlängern.
 - Ob ein Administrator wirklich ein HA-Administrator ist, prüfen die Routen (C2); der Speicher

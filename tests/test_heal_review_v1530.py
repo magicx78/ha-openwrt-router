@@ -586,7 +586,8 @@ async def test_p2_7_damaged_in_flight_record_holds_its_router(
     assert result.bad_records == 1
     hold = again.router_hold(R1)
     assert hold is not None and hold.reason is hm.HoldReason.RECORD_UNREADABLE
-    assert hold.until == pytest.approx(again.now() + hs.UNREADABLE_HOLD_S, abs=1)
+    # its raw state still says EXECUTING: held until an admin releases it
+    assert hold.until is None
     assert again.effective_mode(R1) is hm.HealMode.OBSERVE
     assert again.effective_mode(R2) is hm.HealMode.OBSERVE  # default anyway
     assert again.router_hold(R2) is None
@@ -609,6 +610,24 @@ async def test_p2_7_damaged_in_flight_record_holds_its_router(
         third.release_hold(R1, actor=A.ENGINE, ts=T0)
     assert third.release_hold(R1, actor=A.ADMIN, ts=T0)
     assert third.router_hold(R1) is None
+    advance(again, clock, hs.UNREADABLE_HOLD_S + 600)
+    assert again.router_hold(R1) is not None  # no end: time does not free it
+
+
+async def test_p2_7_damaged_record_never_run_holds_its_router_24h(
+    disks: FakeDisks, clock: Clock
+) -> None:
+    store, _ = await open_store(clock)
+    act = store.add(new_action()).action
+    await store.async_flush()
+    disk_record(disks, act.action_id)["components"] = [
+        {"kind": "service", "name": "bad name!"}
+    ]
+    again, result = await open_store(clock)
+    assert result.bad_records == 1
+    hold = again.router_hold(R1)
+    assert hold is not None and hold.reason is hm.HoldReason.RECORD_UNREADABLE
+    assert hold.until == pytest.approx(again.now() + hs.UNREADABLE_HOLD_S, abs=1)
     advance(again, clock, hs.UNREADABLE_HOLD_S + 600)
     assert again.router_hold(R1) is None
 
@@ -766,8 +785,10 @@ def test_p2_9_safety_clock_rules() -> None:
     assert c.safe == T0 + 100
     back = c.observe(T0 - 5000)  # backwards: no time passes
     assert back.safe == T0 + 100 and back.jumps_back == 1
+    # wall time only counts beyond the highest wall time seen (review 2)
     resumed = back.observe(T0 - 4900)
-    assert resumed.safe == T0 + 200
+    assert resumed.safe == T0 + 100 and resumed.high == T0 + 100
+    assert resumed.observe(T0 + 150).safe == T0 + 150
     ahead = c.observe(T0 + 100 + 86400)  # forward: one plausible step only
     assert ahead.safe == T0 + 100 + hm.CLOCK_STEP_MAX_S and ahead.jumps_ahead == 1
     assert hm.SafetyClock.from_dict(json.loads(json.dumps(ahead.to_dict()))) == ahead

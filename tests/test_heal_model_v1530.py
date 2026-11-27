@@ -974,7 +974,10 @@ def _filled_loop() -> hm.LoopState:
             until=T0 + 86400,
         )
     )
-    loop.clock = hm.SafetyClock().observe(T0).observe(T0 + 50).observe(T0 + 10)
+    loop.clock = (
+        hm.SafetyClock().observe(T0).observe(T0 + 50).observe(T0 + 10, elapsed=4.0)
+    )
+    loop.terminal_at["rem_" + "9" * 32] = T0 + 40
     loop.record_external_write(
         hm.ExternalWrite(
             router_id=R2,

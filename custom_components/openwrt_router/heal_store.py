@@ -37,13 +37,16 @@ attempts in 24 h) and books the attempt in the same write.
 ``heal_model.apply_restart_recovery``: in-flight actions become "unknown,
 needs verification" and are never executed again; approvals and
 preflights are lost. Locks of writes from outside the engine are dropped
-(nothing can still run after a restart); dedupe ids and engine locks are
-rebuilt from the records.
+(nothing can still run after a restart); dedupe ids, engine locks, terminal
+stamps and the holds that terminal records place (unless an admin released
+them, ``flags.hold_released``) are rebuilt from the records.
 
 **Holds** (docs §5.1). An action that ran a call and ended with an unknown
 outcome or escalated holds its router until an admin releases it; an
 unreadable record holds its router (or, if its router id is unreadable,
-the fleet) for ``UNREADABLE_HOLD_S``; a lost store holds the fleet as long.
+the fleet) for ``UNREADABLE_HOLD_S``, or until an admin releases it when its
+raw state or history still shows EXECUTING, VERIFYING or ROLLING_BACK; a
+lost store holds the fleet for ``STORE_LOST_HOLD_S``.
 A held router is in Observe: no approval, no Auto-Heal, no write of Risk 1
 or more (:class:`RouterHeldError`); read-only diagnostics still run.
 
@@ -54,8 +57,12 @@ above, and pauses Auto-Heal fleet-wide for ``LoopLimits.fleet_pause_s``
 kept as ``.bak``.
 
 **Time.** Waits run on the safety clock (``heal_model.SafetyClock``,
-:meth:`SelfHealingStore.now`): a wall-clock jump never shortens a
-cooldown, a hold, a pause or the life of an attempt counter.
+:meth:`SelfHealingStore.now`). While this instance runs it follows the
+monotonic clock, so no wall-clock change shortens a cooldown, a hold, a
+pause or the life of an attempt counter; after a start it counts wall time
+only beyond the highest wall time ever seen, at most one step (900 s).
+Terminal records are kept from the safety time they ended
+(``loop.terminal_at``), never by their wall stamps.
 
 **Limits** (never a non-terminal action is evicted): at most
 ``MAX_ACTIONS`` records and ``MAX_OPEN_PER_ROUTER`` non-terminal ones per
@@ -243,6 +250,27 @@ def _in_window(att: AttemptRecord, safe: float) -> bool:
     return att.window_start is not None and safe < att.window_start + ATTEMPT_WINDOW_S
 
 
+_IN_FLIGHT_NAMES: Final = frozenset(state.value for state in IN_FLIGHT_STATES)
+
+
+def _shows_in_flight(item: Any) -> bool:
+    """A damaged raw record whose state or history still says it reached
+    EXECUTING, VERIFYING or ROLLING_BACK (a router call may have run)."""
+    if not isinstance(item, Mapping):
+        return False
+    state = item.get("state")
+    if isinstance(state, str) and state in _IN_FLIGHT_NAMES:
+        return True
+    history = item.get("history")
+    if not isinstance(history, list):
+        return False
+    for entry in history:
+        to_state = entry.get("to_state") if isinstance(entry, Mapping) else None
+        if isinstance(to_state, str) and to_state in _IN_FLIGHT_NAMES:
+            return True
+    return False
+
+
 def _record_bytes(action: RemediationAction) -> int:
     """Bytes one record adds to the file (at its nesting depth)."""
     return store_bytes({"actions": [action.to_dict()]}) - _EMPTY_ACTIONS_BYTES
@@ -312,6 +340,7 @@ def _copy_loop(loop: LoopState) -> LoopState:
         locks=dict(loop.locks),
         holds=dict(loop.holds),
         clock=loop.clock,
+        terminal_at=dict(loop.terminal_at),
         external_writes=list(loop.external_writes),
     )
 
@@ -336,11 +365,14 @@ def _book(
     new: RemediationAction,
     safe_now: float,
 ) -> bool:
-    """Keep dedupe ids, the router lock and holds in step with ``new``.
+    """Keep dedupe ids, the router lock, holds and the terminal stamp in
+    step with ``new``.
 
     False (nothing changed) when ``new`` needs the router lock and another
     holder has it. A terminal outcome that leaves the router in an unknown
-    or escalated state holds it (``heal_model.hold_reason_for``).
+    or escalated state holds it (``heal_model.hold_reason_for``). Entering
+    a terminal state stamps the safety-clock time (``loop.terminal_at``):
+    the record's retention runs from there.
     """
     if new.state in LOCKING_STATES:
         held = loop.locks.get(new.router_id)
@@ -353,6 +385,8 @@ def _book(
         if held is not None and held.action_id == new.action_id:
             del loop.locks[new.router_id]
     if new.state in TERMINAL_STATES:
+        if old is None or not old.is_terminal:
+            loop.terminal_at.setdefault(new.action_id, safe_now)
         for table, dedupe, _label in _dedupes(loop, new):
             if table.get(dedupe) == new.action_id:
                 del table[dedupe]
@@ -380,11 +414,19 @@ class SelfHealingStore:
         hass: HomeAssistant,
         *,
         clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] | None = time.monotonic,
         max_bytes: int = STORE_MAX_BYTES,
     ) -> None:
-        """Nothing opened yet."""
+        """Nothing opened yet.
+
+        ``clock``: the wall clock; ``monotonic``: a clock that never jumps
+        (seconds), used for the safety clock while this instance runs
+        (None: the wall clock's high-water mark only, docs §5.2).
+        """
         self.hass = hass
         self.clock = clock
+        self.monotonic = monotonic
+        self._mono_last: float | None = None
         self.max_bytes = max_bytes
         self.settings = HealSettings()
         self.actions: dict[str, RemediationAction] = {}
@@ -423,6 +465,7 @@ class SelfHealingStore:
     async def async_load(self) -> LoadResult:
         """Read the store once, apply the restart rule; never raises."""
         self._store = self._new_store()
+        self._mono_last = None  # the first observation of a run: wall time
         loaded = await core_store.async_load_store(
             self.hass, self._store, HEAL_STORE_KEY
         )
@@ -438,7 +481,7 @@ class SelfHealingStore:
             self.now()
             return result
         try:
-            bad, routers, fleet = self._restore(loaded.data)
+            bad, timed, no_end = self._restore(loaded.data)
         except Exception as err:  # noqa: BLE001 - a damaged file starts empty
             _LOGGER.warning(
                 "Self-healing store not restored (%s); starting empty",
@@ -463,12 +506,14 @@ class SelfHealingStore:
             self.counters["bad_records"] += bad
             await core_store.async_backup_store(self.hass, self._store, HEAL_STORE_KEY)
             result.paused = self._pause(safe, REASON_STORE_DAMAGED)
-            for router_id in sorted(routers):
+            for router_id in sorted(timed, key=lambda r: r or ""):
                 self._hold_for(router_id, HoldReason.RECORD_UNREADABLE, safe)
-            if fleet:
-                self._hold_for(None, HoldReason.RECORD_UNREADABLE, safe)
-        self._recover(wall, safe, result)
-        self._rebuild_loop(wall)
+            for router_id in sorted(no_end, key=lambda r: r or ""):
+                self._hold_for(
+                    router_id, HoldReason.RECORD_UNREADABLE, safe, no_end=True
+                )
+        self._recover(wall, result)
+        self._rebuild_loop(wall, safe)
         if result.recovered or bad:
             await self.async_flush()  # the recovery is on disk at once
         return result
@@ -480,15 +525,24 @@ class SelfHealingStore:
         self._hold_for(None, HoldReason.STORE_LOST, safe)
 
     def _hold_for(
-        self, router_id: str | None, reason: HoldReason, safe: float
+        self,
+        router_id: str | None,
+        reason: HoldReason,
+        safe: float,
+        *,
+        no_end: bool = False,
     ) -> RouterHold:
-        """Hold a router (None: the fleet) for the fixed load-damage time."""
+        """Hold a router (None: the fleet) for the fixed load-damage time,
+        or until an admin releases it (``no_end``)."""
         hold_s = (
             STORE_LOST_HOLD_S if reason is HoldReason.STORE_LOST else UNREADABLE_HOLD_S
         )
         return self.loop.place_hold(
             RouterHold(
-                router_id=router_id, reason=reason, since=safe, until=safe + hold_s
+                router_id=router_id,
+                reason=reason,
+                since=safe,
+                until=None if no_end else safe + hold_s,
             )
         )
 
@@ -499,25 +553,27 @@ class SelfHealingStore:
         self.maintenance = []
         self._sizes = {}
 
-    def _restore(self, data: Mapping[str, Any]) -> tuple[int, set[str], bool]:
+    def _restore(
+        self, data: Mapping[str, Any]
+    ) -> tuple[int, set[str | None], set[str | None]]:
         """Fill memory from ``data``.
 
-        Returns the number of damaged parts, the routers named by damaged
-        records (readable router id) and whether a damaged part could
-        concern any router (unreadable router id, damaged loop state).
+        Returns the number of damaged parts and two sets of hold keys
+        (router id; None: the fleet, for an unreadable router id or a
+        damaged loop state): held for ``UNREADABLE_HOLD_S``, and held until
+        an admin releases them (the damaged record still shows that it
+        reached EXECUTING, VERIFYING or ROLLING_BACK).
         """
         bad = 0
-        routers: set[str] = set()
-        fleet = False
+        timed: set[str | None] = set()
+        no_end: set[str | None] = set()
 
         def damaged(item: Any) -> None:
-            nonlocal bad, fleet
+            nonlocal bad
             bad += 1
             rid = item.get("router_id") if isinstance(item, Mapping) else None
-            if is_valid_id(rid, ROUTER_ID_PREFIX):
-                routers.add(str(rid))
-            else:
-                fleet = True
+            key = str(rid) if is_valid_id(rid, ROUTER_ID_PREFIX) else None
+            (no_end if _shows_in_flight(item) else timed).add(key)
 
         seq = data.get("write_seq")
         if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
@@ -554,31 +610,33 @@ class SelfHealingStore:
             except HealModelError:
                 damaged(item)
         self._last_good = dict(data)
-        return bad, routers, fleet
+        return bad, timed, no_end
 
-    def _recover(self, wall: float, safe: float, result: LoadResult) -> None:
-        """The restart rule for every record (actor ``recovery``); an
-        outcome it makes final may hold the router."""
+    def _recover(self, wall: float, result: LoadResult) -> None:
+        """The restart rule for every record (actor ``recovery``); the holds
+        an outcome it makes final places come from :meth:`_rebuild_loop`."""
         for action_id, action in list(self.actions.items()):
             after = apply_restart_recovery(action, ts=wall)
             if after is not action:
                 self.actions[action_id] = after
                 result.recovered.append((action_id, action.state, after.state))
                 self.counters["recovered"] += 1
-                reason = hold_reason_for(after) if after.is_terminal else None
-                if reason is not None:
-                    self.loop.place_hold(
-                        RouterHold(
-                            router_id=after.router_id,
-                            reason=reason,
-                            since=safe,
-                            action_id=action_id,
-                        )
-                    )
 
-    def _rebuild_loop(self, now: float) -> None:
-        """Locks and dedupe ids as the records say (after the restart rule)."""
+    def _rebuild_loop(self, now: float, safe: float) -> None:
+        """Locks, dedupe ids, terminal stamps and record holds as the
+        records say (after the restart rule).
+
+        Every terminal record whose end holds its router
+        (``hold_reason_for``) and whose hold no admin released places its
+        hold again, with no end: a hold lost with a damaged loop section
+        comes back as it was, not as a 24 h hold. A terminal record without
+        a stamp gets the current safety time (kept longer, never shorter).
+        """
         loop = self.loop
+        for action_id in list(loop.terminal_at):
+            owner = self.actions.get(action_id)
+            if owner is None or not owner.is_terminal:
+                del loop.terminal_at[action_id]
         for rid, lock in list(loop.locks.items()):
             owner = self.actions.get(lock.action_id or "")
             if (
@@ -603,6 +661,18 @@ class SelfHealingStore:
             if not action.is_terminal:
                 for table, dedupe, _label in _dedupes(loop, action):
                     table.setdefault(dedupe, action.action_id)
+                continue
+            loop.terminal_at.setdefault(action.action_id, safe)
+            reason = hold_reason_for(action)
+            if reason is not None and not action.flags.hold_released:
+                loop.place_hold(
+                    RouterHold(
+                        router_id=action.router_id,
+                        reason=reason,
+                        since=safe,
+                        action_id=action.action_id,
+                    )
+                )
 
     def _pause(self, now: float, reason: str) -> bool:
         """Pause Auto-Heal fleet-wide (attempts and breakers are unknown).
@@ -641,9 +711,21 @@ class SelfHealingStore:
 
         Every wait of the loop protection compares with this value. The
         engine calls it (or any store method that reads time) at least
-        every few minutes, so real time is followed step by step.
+        every few minutes. While this instance runs the step is the
+        monotonic time since the previous observation (capped); the first
+        observation after the load uses the wall clock's high-water mark.
         """
-        self.loop.clock = self.loop.clock.observe(self.clock())
+        return self._observe(self.clock())
+
+    def _observe(self, wall: float) -> float:
+        """Observe ``wall`` (and the monotonic clock); the safety time."""
+        elapsed: float | None = None
+        if self.monotonic is not None:
+            mono = float(self.monotonic())
+            if self._mono_last is not None:
+                elapsed = max(0.0, mono - self._mono_last)
+            self._mono_last = mono
+        self.loop.clock = self.loop.clock.observe(wall, elapsed)
         return float(self.loop.clock.safe or 0.0)
 
     def router_hold(self, router_id: str) -> RouterHold | None:
@@ -692,6 +774,10 @@ class SelfHealingStore:
         """
         if action.state is not ActionState.DETECTED:
             raise HealStoreError("a new action starts in DETECTED")
+        if not action.is_new:
+            # built with the constructor or from_dict: only the loader may
+            # bring such a record (flags, approval, execution, history)
+            raise HealStoreError("not a new record (use RemediationAction.new)")
         if action.action_id in self.actions:
             raise HealStoreError("duplicate action id")
         safe = self.now()
@@ -767,7 +853,10 @@ class SelfHealingStore:
 
     def update_flags(self, action_id: str, **flags: Any) -> RemediationAction:
         """``in_maintenance`` / ``acknowledged_by_admin`` of a record
-        (``RemediationAction.with_flags``; never ``interrupted``)."""
+        (``RemediationAction.with_flags``; never ``interrupted``, and
+        ``hold_released`` only through :meth:`release_hold`)."""
+        if "hold_released" in flags:
+            raise HealStoreError("hold_released is set by release_hold only")
         new = self._current(action_id).with_flags(**flags)
         self.actions[action_id] = new
         self.schedule()
@@ -865,7 +954,7 @@ class SelfHealingStore:
                 return DurableResult(False, current, reason_failed)
             self.actions[action_id] = new
             for gone in evicted:
-                self.actions.pop(gone, None)
+                self._forget(gone)
             self.counters["evicted_terminal"] += len(evicted)
             self.loop.attempts.update(attempts)
             _book(self.loop, current, new, safe)
@@ -1055,10 +1144,15 @@ class SelfHealingStore:
             key=lambda a: (a.updated_at, a.action_id),
         )[:count]
         for action in terminal:
-            del self.actions[action.action_id]
-            self._sizes.pop(action.action_id, None)
+            self._forget(action.action_id)
         self.counters["evicted_terminal"] += len(terminal)
         return len(terminal)
+
+    def _forget(self, action_id: str) -> None:
+        """Drop a record with its size and terminal stamp."""
+        self.actions.pop(action_id, None)
+        self._sizes.pop(action_id, None)
+        self.loop.terminal_at.pop(action_id, None)
 
     def _view(self) -> tuple[dict[str, RemediationAction], LoopState]:
         """Records and loop state to write now: memory, plus the durable step
@@ -1088,7 +1182,7 @@ class SelfHealingStore:
         seq = self._seq + 1
         payload, evicted, over = self._fit(actions, loop, seq)
         for gone in evicted:
-            self.actions.pop(gone, None)
+            self._forget(gone)
         self.counters["evicted_terminal"] += len(evicted)
         if over:
             self.counters["save_over_size"] += 1
@@ -1127,19 +1221,27 @@ class SelfHealingStore:
 
         ``now`` (wall time, default the store's clock) is observed by the
         safety clock first and every limit compares with safety-clock time,
-        so a jump ahead cannot age anything out. Never dropped: a
-        non-terminal record, the idempotency id of an open action, an
-        attempt record in its 24 h window or cooldown, an open breaker, a
-        hold in force.
+        so a jump ahead cannot age anything out: a terminal record is kept
+        ``TERMINAL_RETENTION_S`` of safety time from the safety time it
+        became terminal (``loop.terminal_at``), never from its wall stamps.
+        A maintenance window (wall times set by an admin) goes only when
+        both the wall and the safety clock are past its retention. Never
+        dropped: a non-terminal record, the idempotency id of an open
+        action, an attempt record in its 24 h window or cooldown, an open
+        breaker, a hold in force.
         """
-        self.loop.clock = self.loop.clock.observe(self.clock() if now is None else now)
-        safe = float(self.loop.clock.safe or 0.0)
+        wall = self.clock() if now is None else now
+        safe = self._observe(wall)
         removed = 0
         cutoff = safe - TERMINAL_RETENTION_S
         for action in list(self.actions.values()):
-            if action.is_terminal and action.updated_at < cutoff:
-                del self.actions[action.action_id]
-                self._sizes.pop(action.action_id, None)
+            if not action.is_terminal:
+                continue
+            ended = self.loop.terminal_at.get(action.action_id)
+            if ended is None:  # not stamped yet: its retention starts now
+                self.loop.terminal_at[action.action_id] = safe
+            elif ended < cutoff:
+                self._forget(action.action_id)
                 removed += 1
         self.counters["pruned_terminal"] += removed
         loop = self.loop
@@ -1149,11 +1251,8 @@ class SelfHealingStore:
             ):
                 del loop.idempotency[key]
                 removed += 1
-        keep = [
-            w
-            for w in self.maintenance
-            if w.end is None or w.end >= safe - MAINTENANCE_RETENTION_S
-        ]
+        window_cutoff = min(float(wall), safe) - MAINTENANCE_RETENTION_S
+        keep = [w for w in self.maintenance if w.end is None or w.end >= window_cutoff]
         removed += len(self.maintenance) - len(keep)
         self.maintenance = keep
 
@@ -1255,11 +1354,25 @@ class SelfHealingStore:
     ) -> bool:
         """An admin releases the hold of a router (None: the fleet's).
 
-        ``ts`` is the admin's wall time (for the caller's audit entry).
+        Every terminal record of the router whose end holds it is marked
+        ``hold_released``, so the hold is not placed again when the holds
+        are rebuilt from the records (a damaged loop section). ``ts`` is the
+        admin's wall time (for the caller's audit entry).
         """
         _require_admin(actor, ts)
         gone = self.loop.holds.pop(router_id or FLEET_HOLD_KEY, None)
-        if gone is not None:
+        marked = 0
+        if router_id is not None:
+            for action_id, action in list(self.actions.items()):
+                if (
+                    action.router_id == router_id
+                    and action.is_terminal
+                    and not action.flags.hold_released
+                    and hold_reason_for(action) is not None
+                ):
+                    self.actions[action_id] = action.with_flags(hold_released=True)
+                    marked += 1
+        if gone is not None or marked:
             self.schedule()
         return gone is not None
 
