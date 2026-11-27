@@ -280,6 +280,78 @@ keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwickl
   überlebt hatten) und 44 eigene an den neuen Regeln lassen jede mindestens einen Test
   scheitern.
 
+### Self-Healing, Paket E
+
+Die Vorabprüfungen (Preflight Safety Engine): was vor jeder schreibenden Aktion geprüft wird
+und woher die Fakten dafür kommen. In 1.53.0 läuft nichts davon schreibend; die Prüfungen
+sind noch nicht angebunden und sollen später nur zeigen, „was sperren würde“. Für Benutzer
+ändert sich nichts: kein Router-Aufruf, keine Route, keine Entität, keine neue unique_id,
+keine Datei, keine ACL-Änderung. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 7.1.
+
+- `heal_preflight.py`, reiner Kern: dreizehn Prüfungen in fester Reihenfolge (Router
+  erreichbar, Identität eindeutig, Aktion unterstützt, Rechte, keine gleichzeitige Reparatur,
+  Wartung, kein gefährlicher Zustand, Management-Weg, Bauteile bekannt, Konfiguration
+  erfasst, Sicherung vorhanden, Wiederherstellung geklärt, Freigabe gültig). Jede meldet
+  bestanden, gescheitert, unbekannt oder nicht zutreffend, ob sie für die Aktion kritisch ist,
+  einen Grund und die gelesenen Fakten. Eine gescheiterte **oder unbekannte** kritische
+  Prüfung sperrt.
+- Ein Ergebnis gilt nur für Router, Aktion und Parameter und nur 120 s Sicherheitszeit
+  (einstellbar 10–300 s); ein Sprung der Wanduhr verlängert es nicht. Ein grünes Ergebnis lässt
+  sich nicht von außen bauen oder nachträglich verändern: es nimmt nur Fakten, berechnet Urteil
+  und Prüfungen selbst, prüft die Aktion erneut gegen den Katalog und erkennt geänderte Felder.
+- Fingerabdruck des Zustands (sha256) über die Fakten, die zählen, ohne Adressen und
+  Geheimnisse; eine Freigabe passt nur zum Fingerabdruck, mit dem sie erteilt wurde.
+- Sammler: liest nur, was schon im Speicher liegt (letzter Poll, Router Registry,
+  Versionsindex, Network Intelligence, Security Center, Diagnose, Self-Healing-Speicher). Jeder
+  Fakt trägt Quelle und Alter; fehlende oder veraltete Daten sind „unbekannt“ mit Grund, nie
+  geraten.
+- Fakten für die Richtlinie (`RiskContext`, `IncidentFacts`) aus derselben Momentaufnahme,
+  für das Paket, das Engine und Richtlinie verbindet.
+- Heute besteht keine schreibende Aktion die Prüfungen: die Rechte für `rc/init` sind nicht
+  geprüft (ohne Root-Anmeldung fehlen sie), `odhcpd` wird nicht gepollt, alles außer
+  `service.restart` ist im Katalog gesperrt, eine Sicherung ist ohne Ausführer nicht
+  wiederherstellbar, und ob die gespeicherte Konfiguration eines Dienstes schon läuft, ist
+  noch nicht bekannt.
+- Tests: `tests/test_heal_preflight_v1530.py` (238), darunter die Auftragstests 8, 9, 26 und 27
+  und ein Test, dass der Sammler keinen Router-Aufruf macht (aufgezeichnete Aufrufliste von
+  `full_router_kit`). Mutationsprüfung: siehe Entwicklerdoku, Abschnitt 17.
+
+#### Nach dem Review von PR #80
+
+- Eine Freigabe zählt nur noch auf einem Datensatz, der freigegeben ist und auf die Ausführung
+  wartet; auf einem Vorschlag, einem abgebrochenen oder einem beendeten Datensatz nicht.
+- Eine zurückgestellte Uhr (die Uhr steht hinter der höchsten je gesehenen Zeit) lässt keine
+  abgelaufene Freigabe wieder gelten und keinen alten Poll frisch aussehen.
+- Grenzen, die nachträglich verändert wurden (auch die gemeinsamen Standardwerte), und
+  erzwungene Felder „jetzt ausführbar“ / „in diesem Release“ werden als Fälschung erkannt.
+  Die Entwicklerdoku sagt jetzt offen, was diese Erkennung nicht kann (sie hat kein Geheimnis)
+  und was das anbindende Paket deshalb selbst tun muss.
+- Der Sammler bricht nie mehr wegen ungewöhnlicher Daten ab (Wartungsfenster mit Großbuchstaben
+  oder Adressform, fehlende Methoden, ein fehlerhafter Topologie-Lauf, Prüfstatus mit
+  Leerzeichen); was er nicht lesen kann, ist „unbekannt“ mit Grund.
+- Ein Dienst-Neustart besteht Management-Weg und Wiederherstellung nicht mehr ohne Fakten; er
+  braucht die Angabe, dass die gespeicherte Konfiguration schon läuft (heute unbekannt, sperrt).
+- Nicht zutreffende Prüfungen werden nicht mehr als „bestanden“ gespeichert.
+- Flottenweite Security-Vorfälle zählen für jeden Router; neue Router mit DHCP-Lease und ein
+  geänderter Vorfall ändern den Fingerabdruck.
+
+#### Nach dem zweiten Review von PR #80
+
+- Ein kleiner Zeitabgleich der Uhr nach hinten (etwa 5 Sekunden per NTP) sperrt nicht mehr
+  bis zum nächsten Neustart. Die Prüfung rechnet jetzt mit dem Rückstand der Uhr: ein Poll
+  zählt um so viele Sekunden älter, eine Freigabe läuft so viel früher ab. Ein großer Abstand
+  sperrt weiter, etwa wenn die Uhr einmal einen Tag vorging und dann korrigiert wurde. Das
+  hält auch über einen Neustart an, bis die Zeit, in der Home Assistant aus war, den Abstand
+  aufgebraucht hat. Die Entwicklerdoku erklärt das und warum (der Speicher kennt die Zeit des
+  Sprungs nicht).
+- Ist der Router nicht erreichbar, scheitert für einen Dienst-Neustart auch die
+  Wiederherstellungs-Prüfung (vorher „unbekannt“).
+- Ein Router-Neustart verlangt wie ein Dienst-Neustart, dass die gespeicherte Konfiguration
+  schon läuft (heute unbekannt, sperrt; er bleibt ohnehin gesperrt).
+- Die Entwicklerdoku nennt neue Pflichten für das anbindende Paket: Freigaben überleben keinen
+  Neustart von Home Assistant; der Fingerabdruck beim Freigeben entsteht mit denselben Eingaben
+  wie die letzte Prüfung; die nicht zutreffenden Prüfungen werden mit dem Datensatz gespeichert.
+
 ### Self-Healing, Paket X (Policy an Engine)
 
 Die Engine aus Paket C1 entscheidet jetzt mit der Richtlinie aus Paket D. Weiterhin nur

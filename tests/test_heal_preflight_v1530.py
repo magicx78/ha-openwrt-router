@@ -1,0 +1,3214 @@
+"""Self-Healing, package E (1.53.0): the Preflight Safety Engine.
+
+Order tests (Phase 7 order §22) covered here: 8 (a failed preflight
+blocks), 9 (router offline), 26 (parallel repair requests: a second action
+on the same router, on a router behind it, fleet concurrency) and 27
+(maintenance mode). Further:
+
+* every one of the thirteen checks in pass / fail / unknown /
+  not_applicable where the catalog allows it;
+* an unknown fact never passes a critical check (property over every
+  check that passes and every fact it read);
+* a result cannot be built or mutated into "green" (no verdict input,
+  ``replace`` re-runs, ``object.__setattr__`` is caught as ``tampered``,
+  the action is validated against the catalog again);
+* the state fingerprint is stable for equal facts and changes with each
+  relevant fact (and not with ages, percentages, client counts);
+* result expiry runs on the safety clock of the real store: a wall-clock
+  jump changes nothing;
+* a held router and a paused fleet block; ``service.restart`` of a
+  service disabled on purpose; management-path loss on the access point
+  three others hang behind; a backup that exists but cannot be restored;
+* the collector makes zero router calls (the recorded call list of
+  ``full_router_kit``) and reports unknown, never a guess, for missing or
+  stale data.
+
+No router, no network.
+"""
+
+from __future__ import annotations
+
+import ast
+import dataclasses
+import math
+import pathlib
+import time
+from types import SimpleNamespace
+from typing import Any, ClassVar
+from unittest.mock import AsyncMock, patch
+
+import full_router_kit as kit
+import pytest
+from core_testkit import make_hass
+
+# ``disks`` is a fixture of the store tests (used by name only)
+from test_heal_store_v1530 import Clock, advance, disks, open_store  # noqa: F401
+
+from custom_components.openwrt_router import heal_catalog as hc
+from custom_components.openwrt_router import heal_model as hm
+from custom_components.openwrt_router import heal_policy as hpol
+from custom_components.openwrt_router import heal_preflight as hp
+from custom_components.openwrt_router.net_events import IncidentStatus
+from custom_components.openwrt_router.net_rules import Topology, Uplink
+
+CS = hp.CheckStatus
+S = hm.ActionState
+R1 = "rtr_" + "1" * 32
+R2 = "rtr_" + "2" * 32
+R3 = "rtr_" + "3" * 32
+R4 = "rtr_" + "4" * 32
+R5 = "rtr_" + "5" * 32
+T0 = 1_790_000_000.0
+SAFE0 = 5_000.0
+BKP = "bkp_" + "a" * 32
+BKP_OLD = "bkp_" + "b" * 32
+APR = "apr_" + "c" * 32
+DNSMASQ = {"service": "dnsmasq"}
+ODHCPD = {"service": "odhcpd"}
+RADIO0 = {"radio": "radio0"}
+CAPS_ALL = tuple((c, "available") for c in hp.CAPABILITIES_READ)
+
+
+def k(value: Any, source: str = "test", age: float | None = None) -> hp.Fact:
+    return hp.known(value, source, age)
+
+
+def u(reason: str = "test_unknown") -> hp.Fact:
+    return hp.unknown(reason, "test")
+
+
+GREEN: dict[str, Any] = {
+    "poll_ok": True,
+    "poll_age_s": 10.0,
+    "poll_interval_s": 60.0,
+    "wall_clock_lag_s": 0.0,
+    "record_active": True,
+    "identity_status": "confirmed",
+    "identity_bindings": 1,
+    "role": "gateway",
+    "capabilities": CAPS_ALL,
+    "login_is_root": False,
+    "acl_blocked": (),
+    "lock_holder": "none",
+    "router_repairs": 0,
+    "fleet_repairs": 0,
+    "related_repairs": 0,
+    "held": False,
+    "fleet_paused": False,
+    "loop_blocks": (),
+    "config_manager_busy": False,
+    "ni_maintenance": False,
+    "component_windows": (),
+    "run_path": "approval",
+    "memory_pressure_pct": 40.0,
+    "memory_available_bytes": 64 * 1024 * 1024,
+    "cpu_load_pct": 20.0,
+    "uptime_s": 86_400,
+    "security_findings": 0,
+    "uplink_incidents": 0,
+    "degraded_dependants": 0,
+    "dependants": 0,
+    "upstream_hops": 0,
+    "wireless_uplink": False,
+    "services": (("dnsmasq", True, True), ("odhcpd", True, True)),
+    "service_config_unapplied": False,
+    "radios": ("radio0", "radio1"),
+    "interfaces": ("lan", "wan", "wan6"),
+    "clients_on_router": 12,
+    "lease_routers": 2,
+    "lease_clients": 9,
+    "backups": ((BKP, int(T0) - 3600, "ok", "valid", True),),
+    "diag_enabled": True,
+}
+
+
+def facts(
+    *,
+    router_id: str = R1,
+    safe_at: float = SAFE0,
+    wall_at: float = T0,
+    **over: Any,
+) -> hp.PreflightFacts:
+    """Green facts of R1 with ``over`` applied (a Fact or a plain value)."""
+    values: dict[str, hp.Fact] = {}
+    for name, value in {**GREEN, **over}.items():
+        values[name] = value if isinstance(value, hp.Fact) else k(value)
+    return hp.PreflightFacts(
+        router_id=router_id, safe_at=safe_at, wall_at=wall_at, **values
+    )
+
+
+def run(action: str, params: Any = None, **kw: Any) -> hp.PreflightResult:
+    approval = kw.pop("approval", None)
+    limits = kw.pop("limits", hp.DEFAULT_PREFLIGHT_LIMITS)
+    return hp.run_preflight(
+        facts(**kw), action, params, approval=approval, limits=limits
+    )
+
+
+def chk(result: hp.PreflightResult, cid: str) -> hp.CheckResult:
+    return result.check(cid)
+
+
+def record(
+    *,
+    router_id: str = R1,
+    action_type: str = "service.restart",
+    params: Any = None,
+    incident_id: str = "inc-1",
+) -> hm.RemediationAction:
+    params = DNSMASQ if params is None and action_type == "service.restart" else params
+    va = hc.validate(action_type, params)
+    return hm.RemediationAction.new(
+        router_id=router_id,
+        action_type=action_type,
+        params=dict(va.params),
+        ts=T0,
+        incident_id=incident_id,
+        components=va.components,
+    )
+
+
+def at_state(state: S, **kw: Any) -> hm.RemediationAction:
+    a = record(**kw)
+    path = [S.ANALYZED, S.PROPOSED, S.PREFLIGHT]
+    if state is S.WAITING_APPROVAL:
+        path.append(S.WAITING_APPROVAL)
+    elif state in (S.APPROVED, S.EXECUTING):
+        path.append(S.APPROVED)
+        if state is S.EXECUTING:
+            path.append(S.EXECUTING)
+    elif state is S.PROPOSED:
+        path = [S.ANALYZED, S.PROPOSED]
+    for to in path:
+        a = hm.transition(a, to, actor=hm.Actor.ENGINE, ts=T0, reason="step")
+    assert a.state is state
+    return a
+
+
+def approved(
+    f: hp.PreflightFacts,
+    rec: hm.RemediationAction | None = None,
+    *,
+    expires_in: float = 600.0,
+    **approval: Any,
+) -> hm.RemediationAction:
+    """``rec`` (default: a record in APPROVED) with an approval bound to the
+    fingerprint of ``f``."""
+    rec = rec or at_state(S.APPROVED)
+    fp = hp.state_fingerprint(f)
+    values: dict[str, Any] = {
+        "status": hm.ApprovalStatus.APPROVED,
+        "guard_approval_id": APR,
+        "binding_hash": hp.expected_binding(rec, fp),
+        "requested_by": hm.Actor.ENGINE,
+        "decided_by": hm.Actor.ADMIN,
+        "expires_at": f.wall_at + expires_in,
+    }
+    values.update(approval)
+    return dataclasses.replace(
+        rec, state_fingerprint=fp, approval=hm.Approval(**values)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shape of the module
+# ---------------------------------------------------------------------------
+
+
+def test_the_thirteen_check_ids_in_order() -> None:
+    assert hp.PREFLIGHT_CHECK_IDS == (
+        "router_reachable",
+        "identity_unique",
+        "action_supported",
+        "permissions_present",
+        "no_concurrent_repair",
+        "maintenance_window_ok",
+        "no_critical_state",
+        "management_path_available",
+        "components_known",
+        "config_captured",
+        "backup_present",
+        "recovery_path_checked",
+        "approval_valid",
+    )
+    for action in hc.CATALOG:
+        params = _params_for(action)
+        r = run(action, params)
+        assert tuple(c.check for c in r.checks) == hp.PREFLIGHT_CHECK_IDS
+
+
+def _params_for(action: str) -> dict[str, str]:
+    return {
+        "service.restart": DNSMASQ,
+        "wifi.radio_restart": RADIO0,
+        "config.restore": {"version_id": BKP},
+        "interface.cycle": {"interface": "wan"},
+    }.get(action, {})
+
+
+_FORBIDDEN_ANYWHERE = ("homeassistant", "aiohttp", "asyncssh")
+_FORBIDDEN_MODULES = {"api", "coordinator", "time", "datetime", "socket", "subprocess"}
+_LAZY_ONLY = {
+    "heal_engine",
+    "heal_store",
+    "enterprise_core",
+    "net_engine",
+    "security_center",
+    "diag_runtime",
+    "config_api",
+}
+
+
+def test_the_core_imports_nothing_from_home_assistant_or_the_api() -> None:
+    """No HA, api, coordinator, clock or socket anywhere; the modules bound
+    to HA only inside the collector (lazy)."""
+    tree = ast.parse(pathlib.Path(hp.__file__).read_text())
+
+    def mods(node: ast.AST) -> list[str]:
+        if isinstance(node, ast.Import):
+            return [a.name for a in node.names]
+        if isinstance(node, ast.ImportFrom):
+            return [node.module or ""]
+        return []
+
+    for node in ast.walk(tree):
+        for mod in mods(node):
+            assert not mod.startswith(_FORBIDDEN_ANYWHERE), mod
+            assert mod.split(".")[0] not in _FORBIDDEN_MODULES, mod
+    for node in tree.body:
+        for mod in mods(node):
+            assert mod not in _LAZY_ONLY, mod
+
+
+# ---------------------------------------------------------------------------
+# Order test 8: a failed preflight blocks
+# ---------------------------------------------------------------------------
+
+
+def test_order_8_green_read_actions_are_clear() -> None:
+    r = run("observe.evaluate")
+    assert r.verdict is hp.Verdict.CLEAR and r.blocking == ()
+    assert r.executable_now is True  # the only action of the release
+    r = run("diag.refresh", run_path="auto")
+    assert r.verdict is hp.Verdict.CLEAR
+    assert r.in_release is False and r.executable_now is False
+
+
+@pytest.mark.parametrize(
+    ("over", "check"),
+    [
+        ({"poll_ok": False}, "router_reachable"),
+        ({"held": True}, "no_concurrent_repair"),
+        ({"fleet_paused": True}, "no_concurrent_repair"),
+        ({"ni_maintenance": True}, "maintenance_window_ok"),
+        ({"capabilities": (("transport.ubus", "unavailable"),)}, "action_supported"),
+        ({"run_path": u()}, "approval_valid"),
+    ],
+)
+def test_order_8_a_failed_critical_check_blocks(over: dict, check: str) -> None:
+    r = run("diag.refresh", run_path="auto", **({} if "run_path" in over else over))
+    if "run_path" in over:
+        r = run("diag.refresh", **over)
+    assert r.verdict is hp.Verdict.BLOCKED
+    assert check in r.blocking
+    assert r.check(check).blocks
+    assert r.executable_now is False
+    assert (
+        r.validity(router_id=R1, action_type="diag.refresh", params={}, safe_now=SAFE0)
+        is hp.Validity.BLOCKED
+    )
+
+
+def test_order_8_a_non_critical_fail_does_not_block() -> None:
+    # identity of a read-only refresh is reported, not blocking
+    r = run("diag.refresh", run_path="auto", identity_status="unverified")
+    c = r.check("identity_unique")
+    assert c.status is CS.FAIL and c.critical is False and not c.blocks
+    assert r.verdict is hp.Verdict.CLEAR
+
+
+def test_order_8_every_writing_action_is_blocked_today() -> None:
+    """Even on the greenest facts: rights are not verified, the rest is
+    disabled in the catalog."""
+    for action in hc.CATALOG:
+        entry = hc.CATALOG[action]
+        if not entry.writes:
+            continue
+        for root in (True, False):
+            f = facts(login_is_root=root, run_path="approval")
+            rec = approved(f, record(action_type=action, params=_params_for(action)))
+            r = hp.run_preflight(f, action, _params_for(action), approval=rec)
+            assert r.verdict is hp.Verdict.BLOCKED, action
+            assert (
+                "permissions_present" in r.blocking or "action_supported" in r.blocking
+            )
+
+
+# ---------------------------------------------------------------------------
+# Order test 9: router offline
+# ---------------------------------------------------------------------------
+
+
+def test_order_9_router_offline_blocks_every_router_call() -> None:
+    for action in ("diag.refresh", "service.restart", "wifi.radio_restart"):
+        r = run(action, _params_for(action), poll_ok=False, run_path="auto")
+        c = r.check("router_reachable")
+        assert c.status is CS.FAIL and c.reason == "last_poll_failed"
+        assert c.critical and "router_reachable" in r.blocking
+    # the router's own state is not read from an old poll
+    r = run("service.restart", DNSMASQ, poll_ok=False)
+    assert r.check("no_critical_state").status is CS.UNKNOWN
+    assert r.check("components_known").status is CS.UNKNOWN
+    # nothing to reach for an evaluation
+    assert run("observe.evaluate", poll_ok=False).verdict is hp.Verdict.CLEAR
+
+
+@pytest.mark.parametrize(
+    ("over", "reason"),
+    [
+        ({"poll_age_s": 121.0}, "poll_stale"),
+        ({"poll_age_s": -5.0}, "poll_time_ahead"),
+        ({"poll_age_s": u("no_successful_poll")}, "no_successful_poll"),
+        ({"poll_interval_s": u("interval_unknown")}, "interval_unknown"),
+        ({"poll_ok": u("router_not_loaded")}, "router_not_loaded"),
+    ],
+)
+def test_router_reachable_is_unknown_without_a_fresh_poll(
+    over: dict, reason: str
+) -> None:
+    r = run("diag.refresh", run_path="auto", **over)
+    c = r.check("router_reachable")
+    assert c.status is CS.UNKNOWN and c.reason == reason and c.blocks
+
+
+def test_router_reachable_pass_and_not_applicable() -> None:
+    r = run("diag.refresh", run_path="auto", poll_age_s=119.0)
+    assert r.check("router_reachable").status is CS.PASS
+    c = run("observe.evaluate").check("router_reachable")
+    assert c.status is CS.NOT_APPLICABLE and not c.critical
+    # a restore has no router call of its own but writes: reachable applies
+    r = run("config.restore", {"version_id": BKP})
+    assert r.check("router_reachable").status is CS.PASS
+
+
+# ---------------------------------------------------------------------------
+# Each check in each state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("over", "status", "reason"),
+    [
+        ({}, CS.PASS, "identity_confirmed_unique"),
+        ({"identity_status": "changed"}, CS.FAIL, "identity_changed"),
+        (
+            {"identity_status": "duplicate_suspected"},
+            CS.FAIL,
+            "identity_duplicate_suspected",
+        ),
+        ({"identity_status": "unverified"}, CS.FAIL, "identity_unverified"),
+        ({"identity_bindings": 2}, CS.FAIL, "identity_shared"),
+        ({"identity_bindings": 0}, CS.FAIL, "identity_unbound"),
+        ({"record_active": False}, CS.FAIL, "record_not_active"),
+        ({"identity_status": u("core_not_running")}, CS.UNKNOWN, "core_not_running"),
+        ({"identity_bindings": u()}, CS.UNKNOWN, "test_unknown"),
+    ],
+)
+def test_identity_unique(over: dict, status: CS, reason: str) -> None:
+    c = run("service.restart", DNSMASQ, **over).check("identity_unique")
+    assert (c.status, c.reason, c.critical) == (status, reason, True)
+
+
+def test_identity_not_applicable_without_router_call() -> None:
+    c = run("observe.evaluate", identity_status="changed").check("identity_unique")
+    assert c.status is CS.NOT_APPLICABLE
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "over", "status", "reason"),
+    [
+        ("diag.refresh", {}, {}, CS.PASS, "catalog_ready_capabilities_present"),
+        ("observe.evaluate", {}, {"capabilities": u()}, CS.PASS, None),
+        ("router.reboot", {}, {}, CS.FAIL, "action_disabled"),
+        ("wifi.radio_restart", RADIO0, {}, CS.FAIL, "action_disabled"),
+        ("diag.ha_probes", {}, {"diag_enabled": False}, CS.FAIL, "diagnostics_off"),
+        ("diag.ha_probes", {}, {"diag_enabled": u()}, CS.UNKNOWN, "test_unknown"),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"capabilities": (("transport.ubus", "available"),)},
+            CS.UNKNOWN,
+            "capability_unknown:data.services",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {
+                "capabilities": (
+                    ("transport.ubus", "unavailable"),
+                    ("data.services", "available"),
+                )
+            },
+            CS.FAIL,
+            "capability_unavailable:transport.ubus",
+        ),
+        ("service.restart", DNSMASQ, {"capabilities": u()}, CS.UNKNOWN, None),
+        ("service.restart", {"service": "wpad"}, {}, CS.FAIL, "param_value_invalid"),
+        ("client.kick", {}, {}, CS.FAIL, None),
+    ],
+)
+def test_action_supported(
+    action: str, params: dict, over: dict, status: CS, reason: str | None
+) -> None:
+    c = run(action, params, **over).check("action_supported")
+    assert c.status is status and c.critical is True
+    if reason is not None:
+        assert c.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "over", "status", "reason"),
+    [
+        ("diag.refresh", {}, {}, CS.PASS, "poll_reads_work"),
+        ("diag.refresh", {}, {"poll_ok": False}, CS.UNKNOWN, "poll_rights_not_shown"),
+        ("diag.refresh", {}, {"poll_age_s": 500.0}, CS.UNKNOWN, "poll_stale"),
+        ("service.restart", DNSMASQ, {}, CS.FAIL, "acl_does_not_grant"),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"login_is_root": True},
+            CS.UNKNOWN,
+            "root_rights_not_verified",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"login_is_root": u()},
+            CS.UNKNOWN,
+            "test_unknown",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"login_is_root": True, "acl_blocked": ("rc/init",)},
+            CS.FAIL,
+            "method_acl_blocked",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"login_is_root": True, "acl_blocked": u()},
+            CS.UNKNOWN,
+            "test_unknown",
+        ),
+        ("wifi.radio_restart", RADIO0, {}, CS.UNKNOWN, "deployed_acl_not_verified"),
+        (
+            "wifi.radio_restart",
+            RADIO0,
+            {"acl_blocked": ("network.wireless/down",)},
+            CS.FAIL,
+            "method_acl_blocked",
+        ),
+        ("config.restore", {"version_id": BKP}, {}, CS.FAIL, "no_router_method"),
+        ("observe.evaluate", {}, {}, CS.NOT_APPLICABLE, "no_router_call"),
+        ("diag.ha_probes", {}, {}, CS.NOT_APPLICABLE, "no_router_rights_needed"),
+    ],
+)
+def test_permissions_present(
+    action: str, params: dict, over: dict, status: CS, reason: str
+) -> None:
+    c = run(action, params, **over).check("permissions_present")
+    assert (c.status, c.reason) == (status, reason)
+    assert c.critical is (status is not CS.NOT_APPLICABLE and hc.CATALOG[action].writes)
+
+
+@pytest.mark.parametrize(
+    ("over", "status", "reason"),
+    [
+        ({}, CS.PASS, "no_other_repair"),
+        ({"held": True}, CS.FAIL, "router_held"),
+        ({"fleet_paused": True}, CS.FAIL, "fleet_paused"),
+        ({"lock_holder": "engine"}, CS.FAIL, "repair_running"),
+        ({"lock_holder": "external"}, CS.FAIL, "external_write_running"),
+        ({"router_repairs": 1}, CS.FAIL, "repair_running"),
+        ({"related_repairs": 1}, CS.FAIL, "repair_on_related_router"),
+        ({"fleet_repairs": 1}, CS.FAIL, "fleet_concurrency_reached"),
+        (
+            {"loop_blocks": ("service.restart|service:dnsmasq|breaker_open",)},
+            CS.FAIL,
+            "breaker_open",
+        ),
+        (
+            {"loop_blocks": ("service.restart|service:dnsmasq|cooling_down",)},
+            CS.FAIL,
+            "cooling_down",
+        ),
+        (
+            {"loop_blocks": ("service.restart|service:odhcpd|breaker_open",)},
+            CS.PASS,
+            "no_other_repair",
+        ),
+        ({"lock_holder": u()}, CS.UNKNOWN, "test_unknown"),
+        ({"related_repairs": u("topology_unknown")}, CS.UNKNOWN, "topology_unknown"),
+        ({"held": u()}, CS.UNKNOWN, "test_unknown"),
+        ({"loop_blocks": u()}, CS.UNKNOWN, "test_unknown"),
+    ],
+)
+def test_no_concurrent_repair(over: dict, status: CS, reason: str) -> None:
+    c = run("service.restart", DNSMASQ, **over).check("no_concurrent_repair")
+    assert (c.status, c.reason, c.critical) == (status, reason, True)
+
+
+def test_no_concurrent_repair_for_reads_and_evaluations() -> None:
+    c = run("observe.evaluate", held=True).check("no_concurrent_repair")
+    assert c.status is CS.NOT_APPLICABLE
+    # a refresh (Risk 1) respects a hold, but no lock or repair count
+    c = run("diag.refresh", held=True).check("no_concurrent_repair")
+    assert c.status is CS.FAIL and c.blocks
+    c = run("diag.refresh", lock_holder="engine", fleet_repairs=3).check(
+        "no_concurrent_repair"
+    )
+    assert c.status is CS.PASS
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "over", "status", "critical", "reason"),
+    [
+        ("service.restart", DNSMASQ, {}, CS.PASS, False, "no_maintenance"),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"run_path": "auto", "ni_maintenance": True},
+            CS.FAIL,
+            True,
+            "in_maintenance",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"ni_maintenance": True},
+            CS.FAIL,
+            False,
+            "in_maintenance",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"run_path": "auto", "component_windows": ("service:dnsmasq",)},
+            CS.FAIL,
+            True,
+            "component_in_maintenance",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"run_path": "auto", "component_windows": ("service:odhcpd",)},
+            CS.PASS,
+            True,
+            "no_maintenance",
+        ),
+        (
+            "router.reboot",
+            {},
+            {"run_path": "auto", "component_windows": ("service:odhcpd",)},
+            CS.FAIL,
+            True,
+            "component_in_maintenance",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"run_path": u("mode_unknown")},
+            CS.UNKNOWN,
+            True,
+            "mode_unknown",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"run_path": "auto", "ni_maintenance": u("ni_not_loaded")},
+            CS.UNKNOWN,
+            True,
+            "ni_not_loaded",
+        ),
+        (
+            "observe.evaluate",
+            {},
+            {"ni_maintenance": True},
+            CS.NOT_APPLICABLE,
+            False,
+            None,
+        ),
+    ],
+)
+def test_maintenance_window_ok(
+    action: str, params: dict, over: dict, status: CS, critical: bool, reason: Any
+) -> None:
+    c = run(action, params, **over).check("maintenance_window_ok")
+    assert (c.status, c.critical) == (status, critical)
+    if reason is not None:
+        assert c.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("over", "status", "reason"),
+    [
+        ({}, CS.PASS, "no_dangerous_state"),
+        ({"memory_pressure_pct": 90.0}, CS.FAIL, "memory_pressure_high"),
+        ({"memory_available_bytes": 8 * 1024 * 1024}, CS.FAIL, "memory_pressure_high"),
+        ({"cpu_load_pct": 150.0}, CS.FAIL, "router_overloaded"),
+        ({"uptime_s": 120}, CS.FAIL, "recent_reboot"),
+        ({"security_findings": 1}, CS.FAIL, "open_security_finding"),
+        ({"uplink_incidents": 1}, CS.FAIL, "incident_on_uplink"),
+        ({"degraded_dependants": 2}, CS.FAIL, "dependants_degraded"),
+        ({"config_manager_busy": True}, CS.FAIL, "config_operation_running"),
+        (
+            {"security_findings": u("security_center_off")},
+            CS.UNKNOWN,
+            "security_center_off",
+        ),
+        ({"memory_pressure_pct": u()}, CS.UNKNOWN, "memory_unknown"),
+        ({"cpu_load_pct": u()}, CS.UNKNOWN, "cpu_load_unknown"),
+        ({"poll_age_s": 1000.0}, CS.UNKNOWN, "poll_stale"),
+        ({"poll_ok": False}, CS.UNKNOWN, "router_state_unknown"),
+    ],
+)
+def test_no_critical_state(over: dict, status: CS, reason: str) -> None:
+    c = run("service.restart", DNSMASQ, **over).check("no_critical_state")
+    assert (c.status, c.reason, c.critical) == (status, reason, True)
+
+
+def test_no_critical_state_not_applicable_for_reads() -> None:
+    c = run("diag.refresh", memory_pressure_pct=99.0).check("no_critical_state")
+    assert c.status is CS.NOT_APPLICABLE and not c.blocks
+
+
+def test_recent_reboot_limit_is_configurable() -> None:
+    limits = hp.PreflightLimits(recent_reboot_s=3600)
+    c = run("service.restart", DNSMASQ, uptime_s=1800, limits=limits)
+    assert c.check("no_critical_state").reason == "recent_reboot"
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightLimits(recent_reboot_s=10)
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightLimits(valid_for_s=3600)
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightLimits(valid_for_s=True)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "over", "status", "reason"),
+    [
+        (
+            "service.restart",
+            DNSMASQ,
+            {"dependants": 3},
+            CS.PASS,
+            "service_restart_keeps_paths",
+        ),
+        ("router.reboot", {}, {}, CS.FAIL, "cuts_own_management_path"),
+        ("wifi.radio_restart", RADIO0, {}, CS.PASS, "radio_carries_no_path"),
+        (
+            "wifi.radio_restart",
+            RADIO0,
+            {"wireless_uplink": True},
+            CS.FAIL,
+            "own_uplink_wireless",
+        ),
+        (
+            "wifi.radio_restart",
+            RADIO0,
+            {"wireless_uplink": u("sta_detection_inconclusive")},
+            CS.UNKNOWN,
+            "sta_detection_inconclusive",
+        ),
+        (
+            "wifi.radio_restart",
+            RADIO0,
+            {"dependants": 1},
+            CS.UNKNOWN,
+            "dependant_uplink_medium_unknown",
+        ),
+        (
+            "interface.cycle",
+            {"interface": "lan"},
+            {},
+            CS.FAIL,
+            "interface_carries_management_path",
+        ),
+        (
+            "interface.cycle",
+            {"interface": "wan"},
+            {},
+            CS.UNKNOWN,
+            "interface_path_unknown",
+        ),
+        ("observe.evaluate", {}, {}, CS.NOT_APPLICABLE, "no_disruption"),
+        ("diag.refresh", {}, {}, CS.NOT_APPLICABLE, "no_disruption"),
+    ],
+)
+def test_management_path_available(
+    action: str, params: dict, over: dict, status: CS, reason: str
+) -> None:
+    c = run(action, params, **over).check("management_path_available")
+    assert (c.status, c.reason) == (status, reason)
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "over", "status", "reason"),
+    [
+        ("service.restart", DNSMASQ, {}, CS.PASS, "service_known_enabled"),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"services": (("dnsmasq", False, False),)},
+            CS.FAIL,
+            "service_disabled_on_purpose",
+        ),
+        (
+            "service.restart",
+            ODHCPD,
+            {"services": (("dnsmasq", True, True),)},
+            CS.UNKNOWN,
+            "service_not_in_poll",
+        ),
+        (
+            "service.restart",
+            DNSMASQ,
+            {"services": (("dnsmasq", True, None),)},
+            CS.UNKNOWN,
+            "service_enabled_unknown",
+        ),
+        ("service.restart", DNSMASQ, {"services": u()}, CS.UNKNOWN, "test_unknown"),
+        ("service.restart", DNSMASQ, {"poll_age_s": 999.0}, CS.UNKNOWN, "poll_stale"),
+        ("wifi.radio_restart", RADIO0, {}, CS.PASS, "radio_known"),
+        (
+            "wifi.radio_restart",
+            {"radio": "radio3"},
+            {},
+            CS.UNKNOWN,
+            "radio_not_identified",
+        ),
+        ("interface.cycle", {"interface": "wan"}, {}, CS.PASS, "interface_known"),
+        (
+            "interface.cycle",
+            {"interface": "wan6"},
+            {"interfaces": ("lan", "wan")},
+            CS.FAIL,
+            "interface_absent",
+        ),
+        ("config.restore", {"version_id": BKP}, {}, CS.PASS, "version_known"),
+        ("config.restore", {"version_id": BKP_OLD}, {}, CS.FAIL, "backup_not_found"),
+        ("router.reboot", {}, {}, CS.PASS, "router_is_component"),
+        ("router.reboot", {}, {"record_active": False}, CS.FAIL, "record_not_active"),
+        ("observe.evaluate", {}, {}, CS.NOT_APPLICABLE, "no_component"),
+    ],
+)
+def test_components_known(
+    action: str, params: dict, over: dict, status: CS, reason: str
+) -> None:
+    c = run(action, params, **over).check("components_known")
+    assert (c.status, c.reason) == (status, reason)
+
+
+def _bk(
+    age_s: float, status: str = "ok", validation: str = "valid", sha: bool = True
+) -> tuple:
+    return (BKP, int(T0 - age_s), status, validation, sha)
+
+
+@pytest.mark.parametrize(
+    ("backups", "captured", "present"),
+    [
+        ((_bk(3600),), (CS.PASS, "current_snapshot"), (CS.PASS, "validated_backup")),
+        ((), (CS.FAIL, "no_snapshot"), (CS.FAIL, "no_backup")),
+        (
+            (_bk(2 * 86400),),
+            (CS.FAIL, "snapshot_outdated"),
+            (CS.FAIL, "backup_outdated"),
+        ),
+        (
+            (_bk(60, validation="unverified"),),
+            (CS.PASS, "current_snapshot"),
+            (CS.FAIL, "backup_not_validated"),
+        ),
+        (
+            (_bk(60, status="partial"),),
+            (CS.PASS, "current_snapshot"),
+            (CS.FAIL, "no_backup"),
+        ),
+        ((_bk(60, sha=False),), (CS.PASS, "current_snapshot"), (CS.FAIL, "no_backup")),
+        ((_bk(60, status="failed"),), (CS.FAIL, "no_snapshot"), (CS.FAIL, "no_backup")),
+        (
+            (_bk(-600),),
+            (CS.UNKNOWN, "snapshot_time_ahead"),
+            (CS.UNKNOWN, "backup_time_ahead"),
+        ),
+        (
+            u("core_not_running"),
+            (CS.UNKNOWN, "core_not_running"),
+            (CS.UNKNOWN, "core_not_running"),
+        ),
+    ],
+)
+def test_config_captured_and_backup_present(
+    backups: Any, captured: tuple, present: tuple
+) -> None:
+    r = run("config.restore", {"version_id": BKP}, backups=backups)
+    c1, c2 = r.check("config_captured"), r.check("backup_present")
+    assert (c1.status, c1.reason) == captured and c1.critical
+    assert (c2.status, c2.reason) == present and c2.critical
+
+
+def test_config_checks_not_applicable_for_actions_without_config_change() -> None:
+    for action in hc.CATALOG:
+        if action in hp.CONFIG_CHANGING:
+            continue
+        r = run(action, _params_for(action), backups=())
+        for cid in ("config_captured", "backup_present"):
+            if cid == "config_captured" and action in hp.CONFIG_APPLYING:
+                continue  # test_a_service_restart_needs_the_saved_config_running
+            c = r.check(cid)
+            assert c.status is CS.NOT_APPLICABLE, (action, cid)
+            assert c.reason == "action_changes_no_config"
+
+
+def test_recovery_path_checked() -> None:
+    c = run("service.restart", DNSMASQ).check("recovery_path_checked")
+    assert (c.status, c.reason) == (CS.PASS, "manual_recovery_statement")
+    assert c.detail == ("applies_saved_config_no_undo_manual_if_not_back",)
+    for action in ("router.reboot", "interface.cycle"):
+        c = run(action, _params_for(action)).check("recovery_path_checked")
+        assert (c.status, c.reason) == (CS.FAIL, "no_recovery_mechanism"), action
+    c = run("wifi.radio_restart", RADIO0).check("recovery_path_checked")
+    assert (c.status, c.reason) == (CS.PASS, "second_call_while_path_holds")
+    c = run("wifi.radio_restart", RADIO0, wireless_uplink=True).check(
+        "recovery_path_checked"
+    )
+    assert (c.status, c.reason) == (CS.FAIL, "second_call_needs_path")
+    c = run("wifi.radio_restart", RADIO0, dependants=2).check("recovery_path_checked")
+    assert c.status is CS.UNKNOWN and c.blocks
+    for action in ("observe.evaluate", "diag.refresh", "diag.ha_probes"):
+        c = run(action).check("recovery_path_checked")
+        assert c.status is CS.NOT_APPLICABLE
+
+
+def test_backup_present_but_restore_unavailable_fails_recovery() -> None:
+    caps = tuple(
+        (c, "unavailable" if c == "config.restore" else "available")
+        for c in hp.CAPABILITIES_READ
+    )
+    r = run("config.restore", {"version_id": BKP}, capabilities=caps)
+    assert r.check("backup_present").status is CS.PASS
+    c = r.check("recovery_path_checked")
+    assert c.status is CS.FAIL and c.blocks
+    assert c.reason == "restore_unavailable_dry_run_only"
+    assert "backup_present_not_restorable" in c.detail
+    # capability unknown is no better
+    caps_unknown = tuple(p for p in caps if p[0] != "config.restore")
+    c = run("config.restore", {"version_id": BKP}, capabilities=caps_unknown).check(
+        "recovery_path_checked"
+    )
+    assert c.status is CS.FAIL
+    # a restore that could run, with a validated backup: the recovery is known
+    c = run("config.restore", {"version_id": BKP}).check("recovery_path_checked")
+    assert (c.status, c.reason) == (CS.PASS, "restore_verified")
+    c = run(
+        "config.restore",
+        {"version_id": BKP},
+        backups=(_bk(60, validation="unverified"),),
+    ).check("recovery_path_checked")
+    assert (c.status, c.reason) == (CS.FAIL, "backup_not_validated")
+
+
+# -- approval ---------------------------------------------------------------------------
+
+
+def test_approval_valid_pass_and_not_applicable() -> None:
+    f = facts()
+    r = hp.run_preflight(f, "service.restart", DNSMASQ, approval=approved(f))
+    c = r.check("approval_valid")
+    assert (c.status, c.reason) == (CS.PASS, "approval_bound_and_current")
+    c = run("diag.refresh", run_path="auto").check("approval_valid")
+    assert c.status is CS.NOT_APPLICABLE
+    c = run("observe.evaluate").check("approval_valid")
+    assert c.status is CS.NOT_APPLICABLE
+    # a Risk-1 read outside Auto-Heal needs the person
+    c = run("diag.refresh", run_path="approval").check("approval_valid")
+    assert (c.status, c.reason) == (CS.FAIL, "no_approval")
+
+
+def test_a_write_needs_an_approval_also_in_auto_heal() -> None:
+    """Risk 2 and up never runs on its own: the approval is required whatever
+    the mode (Auto-Heal ends at Risk 1)."""
+    for action in ("service.restart", "wifi.radio_restart", "router.reboot"):
+        c = run(action, _params_for(action), run_path="auto").check("approval_valid")
+        assert (c.status, c.reason, c.critical) == (CS.FAIL, "no_approval", True), (
+            action
+        )
+    c = run("service.restart", DNSMASQ, run_path=u("mode_unknown")).check(
+        "approval_valid"
+    )
+    assert c.status is CS.FAIL and c.blocks
+
+
+def _approval_case(name: str) -> tuple[hp.PreflightFacts, Any]:
+    f = facts()
+    if name == "none":
+        return f, None
+    if name == "pending":
+        return f, approved(f, status=hm.ApprovalStatus.PENDING)
+    if name == "expired_status":
+        return f, approved(f, status=hm.ApprovalStatus.EXPIRED)
+    if name == "no_guard":
+        return f, approved(f, guard_approval_id=None)
+    if name == "other_router":
+        return f, approved(f, record(router_id=R2))
+    if name == "other_params":
+        return f, approved(f, record(params=ODHCPD))
+    if name == "other_action":
+        return f, approved(f, record(action_type="diag.refresh", params={}))
+    if name == "state_changed":
+        return facts(fleet_repairs=0, loop_blocks=("x|y|cooling_down",)), approved(f)
+    if name == "expired":
+        return f, approved(f, expires_in=-1.0)
+    if name == "too_long":
+        return f, approved(f, expires_in=hp.APPROVAL_TTL_MAX_S + 60)
+    if name == "no_expiry":
+        return f, approved(f, expires_at=None)
+    if name == "no_binding":
+        return f, approved(f, binding_hash=None)
+    raise AssertionError(name)
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("none", "no_approval"),
+        ("pending", "approval_not_granted"),
+        ("expired_status", "approval_expired"),
+        ("no_guard", "approval_not_from_guard"),
+        ("other_router", "approval_for_other_action"),
+        ("other_params", "approval_for_other_action"),
+        ("other_action", "approval_for_other_action"),
+        ("state_changed", "approval_bound_to_other_state"),
+        ("expired", "approval_expired"),
+        ("too_long", "approval_expiry_implausible"),
+        ("no_expiry", "approval_without_expiry"),
+        ("no_binding", "approval_bound_to_other_state"),
+    ],
+)
+def test_approval_valid_fails(case: str, reason: str) -> None:
+    f, rec = _approval_case(case)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason, c.critical) == (CS.FAIL, reason, True)
+
+
+def test_an_approval_is_only_a_remediation_action() -> None:
+    f = facts()
+    rec = approved(f)
+    fake = SimpleNamespace(
+        **{
+            n: getattr(rec, n)
+            for n in ("router_id", "action_type", "params", "approval")
+        }
+    )
+    with pytest.raises(hp.PreflightError):
+        hp.run_preflight(f, "service.restart", DNSMASQ, approval=fake)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Unknown never passes a critical check
+# ---------------------------------------------------------------------------
+
+
+def _green_variants() -> list[tuple[str, dict, hp.PreflightFacts, Any]]:
+    """Actions on facts where as many checks as possible pass."""
+    out = []
+    restore_caps = CAPS_ALL
+    for action in hc.CATALOG:
+        params = _params_for(action)
+        f = facts(login_is_root=True, capabilities=restore_caps)
+        rec = None
+        if hc.CATALOG[action].writes:
+            rec = approved(f, at_state(S.APPROVED, action_type=action, params=params))
+        out.append((action, params, f, rec))
+    out.append(("diag.refresh", {}, facts(run_path="auto"), None))
+    out.append(("diag.ha_probes", {}, facts(run_path="auto"), None))
+    return out
+
+
+def test_unknown_never_passes_a_critical_check() -> None:
+    """For every check that passes and every fact it read: with that fact
+    unknown, the check no longer passes, and a clear verdict turns blocked."""
+    tried = 0
+    for action, params, f, rec in _green_variants():
+        base = hp.run_preflight(f, action, params, approval=rec)
+        for c in base.checks:
+            if c.status is not CS.PASS or not c.critical:
+                continue
+            for name in c.facts_used:
+                g = dataclasses.replace(f, **{name: u("forced")})
+                r = hp.run_preflight(g, action, params, approval=rec)
+                after = r.check(c.check)
+                assert after.status in (CS.UNKNOWN, CS.FAIL), (action, c.check, name)
+                assert after.blocks and r.verdict is hp.Verdict.BLOCKED
+                tried += 1
+    assert tried > 60
+
+
+def test_making_any_fact_unknown_never_unblocks() -> None:
+    for action, params, f, rec in _green_variants():
+        base = hp.run_preflight(f, action, params, approval=rec)
+        passed = {c.check for c in base.checks if c.critical and c.status is CS.PASS}
+        for name, _fact in f.fact_items():
+            g = dataclasses.replace(f, **{name: u("forced")})
+            r = hp.run_preflight(g, action, params, approval=rec)
+            now = {c.check for c in r.checks if c.critical and c.status is CS.PASS}
+            assert now <= passed, (action, name, now - passed)
+            if base.verdict is hp.Verdict.BLOCKED:
+                assert r.verdict is hp.Verdict.BLOCKED, (action, name)
+
+
+def test_all_unknown_blocks_every_action_but_the_evaluation() -> None:
+    blank = hp.PreflightFacts(router_id=R1, safe_at=SAFE0, wall_at=T0)
+    for _name, fact in blank.fact_items():
+        assert fact.value is None and fact.reason == "not_collected"
+    for action in hc.CATALOG:
+        r = hp.run_preflight(blank, action, _params_for(action))
+        expected = (
+            hp.Verdict.CLEAR if action == "observe.evaluate" else hp.Verdict.BLOCKED
+        )
+        assert r.verdict is expected, action
+
+
+# ---------------------------------------------------------------------------
+# A result cannot be forged
+# ---------------------------------------------------------------------------
+
+
+def test_no_verdict_or_check_can_be_handed_in() -> None:
+    f = facts()
+    for name in (
+        "verdict",
+        "checks",
+        "blocking",
+        "fingerprint",
+        "valid_until",
+        "executable_now",
+        "in_release",
+        "router_id",
+        "safe_at",
+    ):
+        with pytest.raises(TypeError):
+            hp.PreflightResult(  # type: ignore[call-arg]
+                facts=f, action_type="service.restart", params=DNSMASQ, **{name: None}
+            )
+    r = hp.run_preflight(f, "service.restart", DNSMASQ)
+    with pytest.raises((TypeError, ValueError)):
+        dataclasses.replace(r, verdict=hp.Verdict.CLEAR)  # type: ignore[call-arg]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        r.verdict = hp.Verdict.CLEAR  # type: ignore[misc]
+
+
+def test_replace_re_runs_every_check() -> None:
+    f = facts(run_path="auto")
+    r = hp.run_preflight(f, "diag.refresh", {})
+    assert r.clear
+    r2 = dataclasses.replace(r, facts=dataclasses.replace(f, held=k(True)))
+    assert r2.verdict is hp.Verdict.BLOCKED and "no_concurrent_repair" in r2.blocking
+    r3 = dataclasses.replace(r, action_type="router.reboot")
+    assert r3.verdict is hp.Verdict.BLOCKED
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("verdict", hp.Verdict.CLEAR),
+        ("blocking", ()),
+        ("checks", ()),
+        ("valid_until", 1e10),
+        ("safe_at", 1e10),
+        ("fingerprint", "0" * 64),
+        ("router_id", R2),
+        ("executable_now", True),
+    ],
+)
+def test_a_mutated_result_is_tampered(field_name: str, value: Any) -> None:
+    r = hp.run_preflight(facts(), "service.restart", DNSMASQ)
+    assert r.verdict is hp.Verdict.BLOCKED
+    object.__setattr__(r, field_name, value)
+    if field_name == "executable_now":
+        # executable_now is not trusted by validity: the verdict still is
+        assert r.validity(
+            router_id=R1, action_type="service.restart", params=DNSMASQ, safe_now=SAFE0
+        ) in (hp.Validity.TAMPERED, hp.Validity.BLOCKED)
+        return
+    assert (
+        r.validity(
+            router_id=R1 if field_name != "router_id" else R2,
+            action_type="service.restart",
+            params=DNSMASQ,
+            safe_now=SAFE0,
+        )
+        is hp.Validity.TAMPERED
+    )
+
+
+def test_swapping_the_facts_behind_the_back_is_tampered() -> None:
+    green = facts(run_path="auto")
+    r = hp.run_preflight(facts(run_path="auto", held=True), "diag.refresh", {})
+    assert not r.clear
+    object.__setattr__(r, "facts", green)
+    assert (
+        r.validity(router_id=R1, action_type="diag.refresh", params={}, safe_now=SAFE0)
+        is hp.Validity.TAMPERED
+    )
+
+
+def test_inputs_are_typed_exactly() -> None:
+    f = facts()
+
+    class SubFacts(hp.PreflightFacts):  # type: ignore[misc]
+        pass
+
+    with pytest.raises(hp.PreflightError):
+        hp.run_preflight(
+            SimpleNamespace(
+                **{n: getattr(f, n) for n in ("router_id", "safe_at", "wall_at")}
+            ),
+            "observe.evaluate",
+        )  # type: ignore[arg-type]
+    with pytest.raises(hp.PreflightError):
+        hp.run_preflight(
+            f, "observe.evaluate", limits=SimpleNamespace(valid_for_s=10_000)
+        )  # type: ignore[arg-type]
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightFacts(
+            router_id=R1, safe_at=SAFE0, wall_at=T0, held=SimpleNamespace(value=False)
+        )  # type: ignore[arg-type]
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightFacts(router_id="router-1", safe_at=SAFE0, wall_at=T0)
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightFacts(router_id=R1, safe_at=math.nan, wall_at=T0)
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightFacts(router_id=R1, safe_at=SAFE0, wall_at=T0, held=k(3))
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightFacts(router_id=R1, safe_at=SAFE0, wall_at=T0, dependants=k(-1))
+    with pytest.raises(hp.PreflightError):
+        hp.PreflightFacts(
+            router_id=R1,
+            safe_at=SAFE0,
+            wall_at=T0,
+            services=k((("dnsmasq", "yes", True),)),
+        )
+
+
+def test_the_action_is_validated_against_the_catalog_again() -> None:
+    f = facts(run_path="auto")
+    for action, params in (
+        ("diag.refresh", {"extra": "1"}),
+        ("Diag.refresh", {}),
+        ("service.restart", {"service": "wpad"}),
+        ("client.block", {}),
+        (None, None),
+        ("config.restore", {"version_id": "bkp_xyz"}),
+    ):
+        r = hp.run_preflight(f, action, params)
+        assert r.verdict is hp.Verdict.BLOCKED, action
+        assert r.catalog_refusal is not None
+        assert r.check("action_supported").status is CS.FAIL
+        assert r.executable_now is False
+        assert (
+            r.validity(
+                router_id=R1, action_type="diag.refresh", params={}, safe_now=SAFE0
+            )
+            is hp.Validity.OTHER_ACTION
+        )
+
+
+def test_params_are_read_once_and_frozen() -> None:
+    params = {"service": "dnsmasq"}
+    r = hp.run_preflight(facts(), "service.restart", params)
+    params["service"] = "odhcpd"
+    assert dict(r.params) == {"service": "dnsmasq"}
+    with pytest.raises(TypeError):
+        r.params["service"] = "odhcpd"  # type: ignore[index]
+
+
+def test_facts_reject_addresses_and_secrets_shapes() -> None:
+    for bad in ("192.168.1.1", "02:00:00:00:0a:0a", "fe80::1", "two words", "pw=x y"):
+        with pytest.raises(hp.PreflightError):
+            hp.known(bad, "test")
+    with pytest.raises(hp.PreflightError):
+        hp.Fact(value=None, source="test")  # unknown without a reason
+    with pytest.raises(hp.PreflightError):
+        hp.known(math.inf, "test")
+    with pytest.raises(hp.PreflightError):
+        hp.Fact(value=object(), source="test")
+    with pytest.raises(hp.PreflightError):
+        hp.unknown("Not A Code")
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint
+# ---------------------------------------------------------------------------
+
+
+def _other_value(name: str, value: Any) -> Any:
+    alt = {
+        "identity_status": "changed",
+        "role": "access_point",
+        "capabilities": (("transport.ubus", "unavailable"),),
+        "acl_blocked": ("rc/init",),
+        "lock_holder": "engine",
+        "loop_blocks": ("service.restart|service:dnsmasq|breaker_open",),
+        "component_windows": ("service:dnsmasq",),
+        "run_path": "auto",
+        "services": (("dnsmasq", False, True),),
+        "radios": ("radio0",),
+        "interfaces": ("lan",),
+        "backups": (),
+    }
+    if name in alt:
+        return alt[name]
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    raise AssertionError(name)
+
+
+# Pinned literally (review of PR #80): a test that iterates the module's own
+# list cannot see a fact dropped from it.
+EXPECTED_FINGERPRINT_FACTS = (
+    "poll_ok",
+    "record_active",
+    "identity_status",
+    "identity_bindings",
+    "role",
+    "capabilities",
+    "login_is_root",
+    "acl_blocked",
+    "lock_holder",
+    "router_repairs",
+    "fleet_repairs",
+    "related_repairs",
+    "held",
+    "fleet_paused",
+    "loop_blocks",
+    "config_manager_busy",
+    "ni_maintenance",
+    "component_windows",
+    "run_path",
+    "security_findings",
+    "uplink_incidents",
+    "degraded_dependants",
+    "dependants",
+    "upstream_hops",
+    "wireless_uplink",
+    "services",
+    "service_config_unapplied",
+    "radios",
+    "interfaces",
+    "lease_routers",
+    "backups",
+    "diag_enabled",
+    "incident_type",
+    "incident_status",
+    "incident_severity",
+    "incident_is_root",
+    "incident_cause_status",
+    "incident_cause_level",
+)
+# values for the incident facts (unknown in the green facts)
+_INCIDENT_VALUES = {
+    "incident_type": "dhcp_down",
+    "incident_status": "active",
+    "incident_severity": "critical",
+    "incident_is_root": True,
+    "incident_cause_status": "confirmed",
+    "incident_cause_level": "likely",
+}
+
+
+def test_the_fingerprint_is_stable_and_follows_each_relevant_fact() -> None:
+    assert hp.state_fingerprint(facts()) == hp.state_fingerprint(facts())
+    assert len(hp.state_fingerprint(facts())) == 64
+    assert hp.FINGERPRINT_FACTS == EXPECTED_FINGERPRINT_FACTS
+    view = hp._fingerprint_view(facts(), hp.DEFAULT_PREFLIGHT_LIMITS)
+    assert tuple(view) == (
+        "router_id",
+        *EXPECTED_FINGERPRINT_FACTS,
+        "poll_fresh",
+        "memory_high",
+        "cpu_overloaded",
+        "recent_reboot",
+    )
+    base = hp.state_fingerprint(facts())
+    seen = set()
+    for name in EXPECTED_FINGERPRINT_FACTS:
+        if name in _INCIDENT_VALUES:
+            fp = hp.state_fingerprint(facts(**{name: _INCIDENT_VALUES[name]}))
+            assert fp != base, name
+        else:
+            fp = hp.state_fingerprint(facts(**{name: _other_value(name, GREEN[name])}))
+            assert fp != base, name
+            assert hp.state_fingerprint(facts(**{name: u()})) != base, name
+        seen.add(fp)
+    assert len(seen) == len(EXPECTED_FINGERPRINT_FACTS)
+    # another router
+    assert hp.state_fingerprint(facts(router_id=R2)) != base
+
+
+def test_the_fingerprint_follows_lease_routers_and_the_incident() -> None:
+    """Review of PR #80: a new router taking leases (it now depends on the
+    service) and a resolved incident are other states than the approved."""
+    assert hp.state_fingerprint(facts(lease_routers=0)) != hp.state_fingerprint(
+        facts(lease_routers=5)
+    )
+    open_ = facts(incident_type=k("dhcp_down"), incident_status=k("active"))
+    assert hp.state_fingerprint(open_) != hp.state_fingerprint(facts())
+    resolved = dataclasses.replace(open_, incident_status=k("resolved"))
+    assert hp.state_fingerprint(open_) != hp.state_fingerprint(resolved)
+    # an approval bound to the open incident no longer matches
+    rec = approved(open_)
+    c = hp.run_preflight(resolved, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert c.reason == "approval_bound_to_other_state"
+
+
+def test_the_fingerprint_ignores_noise_but_not_thresholds() -> None:
+    base = hp.state_fingerprint(facts())
+    for over in (
+        {"poll_age_s": 50.0},
+        {"memory_pressure_pct": 60.0},
+        {"memory_available_bytes": 32 * 1024 * 1024},
+        {"cpu_load_pct": 80.0},
+        {"uptime_s": 100_000},
+        {"clients_on_router": 40},
+        {"lease_clients": 1},
+        {"incident_confidence": 0.4},
+        {"incident_families": 3},
+        {"safe_at": SAFE0 + 50},
+        {"wall_at": T0 + 50},
+    ):
+        assert hp.state_fingerprint(facts(**over)) == base, over
+    for over in (
+        {"poll_age_s": 500.0},
+        {"poll_ok": False},
+        {"wall_clock_lag_s": 500.0},  # through the poll freshness
+        {"memory_pressure_pct": 90.0},
+        {"cpu_load_pct": 150.0},
+        {"uptime_s": 60},
+    ):
+        assert hp.state_fingerprint(facts(**over)) != base, over
+
+
+def test_the_fingerprint_carries_no_address_or_secret() -> None:
+    view = hp._fingerprint_view(facts(), hp.DEFAULT_PREFLIGHT_LIMITS)
+    text = repr(view)
+    assert "192." not in text and "pw" not in text
+    r = hp.run_preflight(facts(), "service.restart", DNSMASQ)
+    blob = repr(r.to_dict())
+    assert kit.CLIENT_MAC not in blob
+
+
+# ---------------------------------------------------------------------------
+# Binding and expiry on the safety clock
+# ---------------------------------------------------------------------------
+
+
+def test_a_result_is_bound_to_router_action_and_params() -> None:
+    r = run("diag.refresh", {}, run_path="auto")
+    v = hp.Validity
+    assert (
+        r.validity(router_id=R1, action_type="diag.refresh", params={}, safe_now=SAFE0)
+        is v.VALID
+    )
+    assert (
+        r.validity(router_id=R2, action_type="diag.refresh", params={}, safe_now=SAFE0)
+        is v.OTHER_ROUTER
+    )
+    assert (
+        r.validity(
+            router_id=R1, action_type="diag.ha_probes", params={}, safe_now=SAFE0
+        )
+        is v.OTHER_ACTION
+    )
+    assert (
+        r.validity(
+            router_id=R1, action_type="diag.refresh", params={"x": "y"}, safe_now=SAFE0
+        )
+        is v.OTHER_ACTION
+    )
+    r = hp.run_preflight(facts(), "service.restart", DNSMASQ)
+    assert (
+        r.validity(
+            router_id=R1, action_type="service.restart", params=ODHCPD, safe_now=SAFE0
+        )
+        is v.OTHER_ACTION
+    )
+
+
+def test_a_result_expires_on_the_safety_clock() -> None:
+    r = run("diag.refresh", {}, run_path="auto")
+    v = hp.Validity
+
+    def at(safe: Any) -> hp.Validity:
+        return r.validity(
+            router_id=R1, action_type="diag.refresh", params={}, safe_now=safe
+        )
+
+    assert r.valid_until == SAFE0 + hp.VALID_FOR_DEFAULT_S
+    assert at(SAFE0 + 119.9) is v.VALID
+    assert at(SAFE0 + 120) is v.EXPIRED
+    assert at(SAFE0 - 1) is v.NOT_YET
+    assert (
+        at(math.nan) is v.EXPIRED and at(True) is v.EXPIRED and at("now") is v.EXPIRED
+    )
+    short = run(
+        "diag.refresh", {}, run_path="auto", limits=hp.PreflightLimits(valid_for_s=10)
+    )
+    assert (
+        short.validity(
+            router_id=R1, action_type="diag.refresh", params={}, safe_now=SAFE0 + 10
+        )
+        is v.EXPIRED
+    )
+
+
+@pytest.mark.usefixtures("disks")
+async def test_a_wall_clock_jump_does_not_extend_or_end_a_result() -> None:
+    """Expiry runs on the store's safety clock: a jump of the wall clock
+    (forward a day, back a day) changes nothing; real time does."""
+    clock = Clock()
+    store, _ = await open_store(clock)
+    f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
+    g = dataclasses.replace(
+        facts(safe_at=f.safe_at, wall_at=f.wall_at, run_path="auto"),
+    )
+    r = hp.run_preflight(g, "diag.refresh", {})
+    assert r.clear
+
+    def validity() -> hp.Validity:
+        return r.validity(
+            router_id=R1, action_type="diag.refresh", params={}, safe_now=store.now()
+        )
+
+    assert validity() is hp.Validity.VALID
+    clock.now += 86_400  # wall clock jumps forward a day, no real time
+    assert validity() is hp.Validity.VALID
+    clock.now -= 2 * 86_400  # and back two days
+    assert validity() is hp.Validity.VALID
+    advance(store, clock, 119)
+    assert validity() is hp.Validity.VALID
+    advance(store, clock, 2)
+    assert validity() is hp.Validity.EXPIRED
+
+
+# ---------------------------------------------------------------------------
+# Held router, paused fleet (real store)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("disks")
+async def test_a_held_router_and_a_paused_fleet_block() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    src = hp.FactSources(store=store)
+    f = hp.facts_from_sources(src, R1, wall_now=clock())
+    assert f.held.value is False and f.fleet_paused.value is False
+    safe = store.now()
+    store.loop.place_hold(
+        hm.RouterHold(router_id=R1, reason=hm.HoldReason.OUTCOME_UNKNOWN, since=safe)
+    )
+    f = hp.facts_from_sources(src, R1, wall_now=clock())
+    assert f.held.value is True and f.held.source == "heal_store.loop.holds"
+    assert f.run_path.value == "observe"  # a held router is observed only
+    for action in ("diag.refresh", "service.restart"):
+        r = hp.run_preflight(
+            dataclasses.replace(facts(run_path="auto"), held=f.held),
+            action,
+            _params_for(action),
+        )
+        c = r.check("no_concurrent_repair")
+        assert c.status is CS.FAIL and c.reason == "router_held" and c.blocks
+    # the other router is not held, the fleet pauses
+    f2 = hp.facts_from_sources(src, R2, wall_now=clock())
+    assert f2.held.value is False
+    store.loop.fleet = hm.FleetPause(
+        paused_until=safe + 3600, since=safe, reason="fleet_breaker"
+    )
+    f2 = hp.facts_from_sources(src, R2, wall_now=clock())
+    assert f2.fleet_paused.value is True
+    r = hp.run_preflight(
+        dataclasses.replace(facts(run_path="auto"), fleet_paused=f2.fleet_paused),
+        "diag.refresh",
+        {},
+    )
+    assert r.check("no_concurrent_repair").reason == "fleet_paused"
+    assert r.verdict is hp.Verdict.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Order test 26: parallel repair requests (collector on the real store)
+# ---------------------------------------------------------------------------
+
+
+class FakeRegistry:
+    """The core's Router Registry (read side): entry id <-> router id."""
+
+    def __init__(self, routers: dict[str, str], role: str = "gateway") -> None:
+        self.routers = routers
+        self.flags: dict[str, tuple[Any, ...]] = {}
+        self.role = role
+        self.caps: dict[str, Any] = {
+            c: SimpleNamespace(state="available") for c in hp.CAPABILITIES_READ
+        }
+        self.macs: dict[str, frozenset[str]] = {}
+
+    def _record(self, entry_id: str, rid: str) -> Any:
+        return SimpleNamespace(
+            router_id=rid,
+            state="active",
+            identity=SimpleNamespace(
+                entry_id=entry_id,
+                identity_flags=self.flags.get(entry_id, ()),
+                role=self.role,
+                mac_addresses=self.macs.get(entry_id, frozenset()),
+            ),
+            capabilities=self.caps,
+        )
+
+    def find(self, router_id: str) -> Any:
+        for e, rid in self.routers.items():
+            if rid == router_id:
+                return self._record(e, rid)
+        return None
+
+    def list(self, **_kw: Any) -> tuple[Any, ...]:
+        return tuple(self._record(e, rid) for e, rid in self.routers.items())
+
+
+class FakeNI:
+    def __init__(self, topology: Topology) -> None:
+        self.loaded = True
+        self.topology = topology
+        self.maintenance: set[str] = set()
+        self.incidents: list[Any] = []
+        self.ring: list[Any] = []
+        self.machine = SimpleNamespace(peek=lambda: list(self.incidents), last_now=T0)
+
+    def in_maintenance(self, entry_id: str) -> bool:
+        return entry_id in self.maintenance
+
+
+ROUTERS = {"e1": R1, "e2": R2, "e3": R3, "e4": R4, "e5": R5}
+
+
+def mesh() -> Topology:
+    """e1 gateway; e2 hangs on e1; e3, e4, e5 hang on e2 (an AP with three
+    behind it)."""
+    return Topology(
+        uplinks={
+            "e2": Uplink(parent="e1"),
+            "e3": Uplink(parent="e2"),
+            "e4": Uplink(parent="e2"),
+            "e5": Uplink(parent="e2"),
+        },
+        gateways=frozenset({"e1"}),
+    )
+
+
+def sources(store: Any, entry_id: str, **kw: Any) -> hp.FactSources:
+    kw.setdefault("registry", FakeRegistry(ROUTERS))
+    kw.setdefault("ni", FakeNI(mesh()))
+    return hp.FactSources(store=store, entry_id=entry_id, **kw)
+
+
+def _with(
+    f: hp.PreflightFacts, *names: str, base: hp.PreflightFacts | None = None
+) -> hp.PreflightFacts:
+    """Green facts with the named facts taken from the collected ``f``."""
+    base = base or facts()
+    return dataclasses.replace(base, **{n: getattr(f, n) for n in names})
+
+
+_CONC = (
+    "lock_holder",
+    "router_repairs",
+    "related_repairs",
+    "fleet_repairs",
+    "held",
+    "fleet_paused",
+    "loop_blocks",
+)
+
+
+@pytest.mark.usefixtures("disks")
+async def test_order_26_second_action_on_the_same_router() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    first = at_state(S.WAITING_APPROVAL)
+    store.actions[first.action_id] = first
+    second = record(params=ODHCPD, incident_id="inc-2")
+    f = hp.facts_from_sources(
+        sources(store, "e1"), R1, wall_now=clock(), exclude_action_id=second.action_id
+    )
+    assert f.router_repairs.value == 1
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", ODHCPD)
+    c = r.check("no_concurrent_repair")
+    assert c.status is CS.FAIL and c.reason == "repair_running" and c.blocks
+    # its own record does not count against itself
+    f = hp.facts_from_sources(
+        sources(store, "e1"), R1, wall_now=clock(), exclude_action_id=first.action_id
+    )
+    assert f.router_repairs.value == 0
+    # a proposal still being planned is no repair yet
+    del store.actions[first.action_id]
+    planned = at_state(S.PROPOSED)
+    store.actions[planned.action_id] = planned
+    f = hp.facts_from_sources(sources(store, "e1"), R1, wall_now=clock())
+    assert f.router_repairs.value == 0
+    # an external write (a button) holds the router lock
+    lock_id = store.try_external_lock(R1, "button.reboot", clock())
+    assert lock_id is not None
+    f = hp.facts_from_sources(sources(store, "e1"), R1, wall_now=clock())
+    assert f.lock_holder.value == "external"
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", DNSMASQ)
+    assert r.check("no_concurrent_repair").reason == "external_write_running"
+
+
+@pytest.mark.usefixtures("disks")
+async def test_order_26_a_repair_on_a_router_behind_or_above() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    busy = at_state(S.EXECUTING, router_id=R4)  # e4 hangs on e2
+    store.actions[busy.action_id] = busy
+    # e2: e4 is behind it
+    f = hp.facts_from_sources(sources(store, "e2"), R2, wall_now=clock())
+    assert f.related_repairs.value == 1 and f.dependants.value == 3
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", DNSMASQ)
+    c = r.check("no_concurrent_repair")
+    assert c.status is CS.FAIL and "repair_on_related_router" in c.detail
+    # e1: e4 is behind it too (two hops)
+    f = hp.facts_from_sources(sources(store, "e1"), R1, wall_now=clock())
+    assert f.related_repairs.value == 1
+    # e3 hangs on e2 next to e4: not related, but the fleet limit of one holds
+    f = hp.facts_from_sources(sources(store, "e3"), R3, wall_now=clock())
+    assert f.related_repairs.value == 0 and f.fleet_repairs.value == 1
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", DNSMASQ)
+    c = r.check("no_concurrent_repair")
+    assert c.status is CS.FAIL and c.reason == "fleet_concurrency_reached"
+    # without topology: related repairs are unknown, never zero
+    f = hp.facts_from_sources(sources(store, "e3", ni=None), R3, wall_now=clock())
+    assert (
+        f.related_repairs.value is None
+        and f.related_repairs.reason == "topology_unknown"
+    )
+
+
+@pytest.mark.usefixtures("disks")
+async def test_order_26_fleet_concurrency() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    f = hp.facts_from_sources(sources(store, "e5"), R5, wall_now=clock())
+    assert f.fleet_repairs.value == 0
+    other = at_state(S.APPROVED, router_id=R1)
+    store.actions[other.action_id] = other
+    f = hp.facts_from_sources(sources(store, "e5"), R5, wall_now=clock())
+    assert f.fleet_repairs.value == hm.FLEET_CONCURRENCY_DEFAULT
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", DNSMASQ)
+    assert "fleet_concurrency_reached" in r.check("no_concurrent_repair").detail
+    # a read-only refresh is not held back by repairs elsewhere
+    r = hp.run_preflight(
+        _with(f, *_CONC, base=facts(run_path="auto")), "diag.refresh", {}
+    )
+    assert r.check("no_concurrent_repair").status is CS.PASS
+
+
+@pytest.mark.usefixtures("disks")
+async def test_loop_protection_of_the_store_reaches_the_check() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    safe = store.now()
+    key = (R1, "service.restart", "service:dnsmasq")
+    store.loop.breakers[key] = hm.BreakerRecord(
+        state=hm.BreakerState.OPEN, opened_at=safe
+    )
+    f = hp.facts_from_sources(sources(store, "e1"), R1, wall_now=clock())
+    assert f.loop_blocks.value == ("service.restart|service:dnsmasq|breaker_open",)
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", DNSMASQ)
+    assert r.check("no_concurrent_repair").reason == "breaker_open"
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", ODHCPD)
+    assert r.check("no_concurrent_repair").status is CS.PASS
+
+
+# ---------------------------------------------------------------------------
+# Order test 27: maintenance mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("disks")
+async def test_order_27_maintenance() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    ni = FakeNI(mesh())
+    ni.maintenance.add("e2")
+    f = hp.facts_from_sources(sources(store, "e2", ni=ni), R2, wall_now=clock())
+    assert f.ni_maintenance.value is True
+    auto = _with(f, "ni_maintenance", "component_windows", base=facts(run_path="auto"))
+    r = hp.run_preflight(auto, "service.restart", DNSMASQ)
+    c = r.check("maintenance_window_ok")
+    assert c.status is CS.FAIL and c.blocks and c.reason == "in_maintenance"
+    # the read-only refresh in Auto-Heal waits for the window too
+    assert (
+        "maintenance_window_ok" in hp.run_preflight(auto, "diag.refresh", {}).blocking
+    )
+    # with a person deciding, maintenance is shown, not blocking
+    appr = _with(
+        f, "ni_maintenance", "component_windows", base=facts(run_path="approval")
+    )
+    c = hp.run_preflight(appr, "service.restart", DNSMASQ).check(
+        "maintenance_window_ok"
+    )
+    assert c.status is CS.FAIL and not c.critical and not c.blocks
+    # a service window of the store, wall clock or safety clock
+    safe = store.now()
+    store.add_maintenance(
+        hm.MaintenanceWindow(
+            window_id="mtw_" + "d" * 32,
+            scope=hm.MaintenanceScope.SERVICE,
+            router_id=R1,
+            target="dnsmasq",
+            start=clock() - 60,
+            end=clock() + 600,
+            reason="admin",
+            created_by=hm.Actor.ADMIN,
+        )
+    )
+    f = hp.facts_from_sources(sources(store, "e1"), R1, wall_now=clock())
+    assert f.component_windows.value == ("service:dnsmasq",)
+    auto = _with(f, "ni_maintenance", "component_windows", base=facts(run_path="auto"))
+    assert (
+        hp.run_preflight(auto, "service.restart", DNSMASQ)
+        .check("maintenance_window_ok")
+        .reason
+        == "component_in_maintenance"
+    )
+    assert (
+        hp.run_preflight(auto, "service.restart", ODHCPD)
+        .check("maintenance_window_ok")
+        .status
+        is CS.PASS
+    )
+    del safe
+
+
+# ---------------------------------------------------------------------------
+# service.restart of a service disabled on purpose
+# ---------------------------------------------------------------------------
+
+
+def test_service_restart_of_a_service_disabled_on_purpose() -> None:
+    f = facts(services=(("dnsmasq", False, False), ("odhcpd", True, True)))
+    r = hp.run_preflight(f, "service.restart", DNSMASQ, approval=approved(f))
+    c = r.check("components_known")
+    assert (
+        c.status is CS.FAIL and c.reason == "service_disabled_on_purpose" and c.blocks
+    )
+    ctx = hp.risk_context_for(f, "service.restart", DNSMASQ)
+    assert ctx.service_enabled is False
+    f2 = dataclasses.replace(
+        f, incident_type=k("dns_failure"), incident_severity=k("warning")
+    )
+    inc = hp.incident_facts_for(f2, "service.restart", DNSMASQ)
+    assert inc is not None and inc.target_fact is None  # "not running" is no fault
+    # the policy says Not Safe for the same facts
+    d = hpol.decide(
+        hpol.DecisionInput(
+            action_type="service.restart", params=DNSMASQ, incident=inc, context=ctx
+        )
+    )
+    assert d.outcome is hm.DecisionOutcome.NOT_SAFE
+
+
+# ---------------------------------------------------------------------------
+# Management-path loss on the AP three others hang behind
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("disks")
+async def test_management_path_of_the_ap_with_three_behind() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    f = hp.facts_from_sources(
+        sources(store, "e2", registry=FakeRegistry(ROUTERS, role="access_point")),
+        R2,
+        wall_now=clock(),
+    )
+    assert f.dependants.value == 3 and f.upstream_hops.value == 1
+    assert f.role.value == "access_point"
+    g = _with(f, "dependants", "upstream_hops", "role")
+    r = hp.run_preflight(g, "router.reboot", {})
+    c = r.check("management_path_available")
+    assert c.status is CS.FAIL and "cuts_dependants_path" in c.detail and c.blocks
+    r = hp.run_preflight(g, "wifi.radio_restart", RADIO0)
+    c = r.check("management_path_available")
+    assert c.status is CS.UNKNOWN and c.reason == "dependant_uplink_medium_unknown"
+    assert c.blocks
+    assert r.check("recovery_path_checked").blocks
+    r = hp.run_preflight(g, "interface.cycle", {"interface": "lan"})
+    assert r.check("management_path_available").status is CS.FAIL
+    # the service restart keeps every path: the check passes, others block
+    r = hp.run_preflight(g, "service.restart", DNSMASQ)
+    assert r.check("management_path_available").status is CS.PASS
+    ctx = hp.risk_context_for(g, "wifi.radio_restart", RADIO0)
+    assert ctx.dependants == 3 and ctx.role == "access_point"
+    assert ctx.target_carries_dependants is None and ctx.target_on_mgmt_path is None
+    va = hc.validate("wifi.radio_restart", RADIO0)
+    assert hpol.classify_risk(va, ctx).risk_class is hm.RiskClass.HIGH
+
+
+# ---------------------------------------------------------------------------
+# The collector: zero router calls, unknown instead of guesses
+# ---------------------------------------------------------------------------
+
+
+async def _polled() -> tuple[Any, list[Any]]:
+    calls: list[Any] = []
+    coordinator = kit.make_coordinator(make_hass(), kit.make_api(calls))
+    await kit.full_polls(coordinator)
+    return coordinator, calls
+
+
+@pytest.mark.usefixtures("disks")
+async def test_the_collector_makes_zero_router_calls() -> None:
+    """After two polls of the real api and coordinator: collecting (also
+    through ``collect_preflight_facts`` and ``preflight_for``) adds no call
+    to the recorded list and never refreshes."""
+    coordinator, calls = await _polled()
+    recorded = list(calls)
+    assert len(recorded) > 0
+    coordinator.async_request_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
+    clock = Clock(time.time())
+    store, _ = await open_store(clock)
+    api = coordinator.api
+    src = sources(store, "e1", coordinator=coordinator, api=api)
+    f = hp.facts_from_sources(src, R1, wall_now=time.time())
+    assert calls == recorded
+    coordinator.async_request_refresh.assert_not_awaited()
+    coordinator.async_refresh.assert_not_awaited()
+    # what the poll holds is known, with source and age
+    assert (
+        f.poll_ok.value is True
+        and f.poll_ok.source == "coordinator.last_update_success"
+    )
+    assert f.poll_interval_s.value == 60.0
+    assert 0 <= f.poll_age_s.value < 60
+    services = {n: (run_, en) for n, run_, en in f.services.value}
+    assert services["dnsmasq"] == (True, True)
+    assert "odhcpd" not in services  # not polled: unknown for its restart
+    assert f.services.source == "coordinator.data.services"
+    assert f.services.age_s == f.poll_age_s.value
+    assert f.login_is_root.value is True and f.acl_blocked.value == ()
+    assert f.interfaces.known and "wan" in f.interfaces.value
+    assert f.radios.known
+    assert f.uptime_s.known and f.memory_pressure_pct.known
+    assert f.clients_on_router.value == coordinator.data.client_count
+    r = hp.run_preflight(f, "service.restart", ODHCPD)
+    assert r.check("components_known").reason == "service_not_in_poll"
+    assert r.check("permissions_present").reason == "root_rights_not_verified"
+    assert repr(f.to_dict()).count("192.0.2.1") == 0
+    assert kit.CLIENT_MAC not in repr(f.to_dict())
+
+    # the hass-side entry point, wired to the same objects
+    entry = SimpleNamespace(
+        entry_id="e1", runtime_data=SimpleNamespace(coordinator=coordinator, api=api)
+    )
+    hass = make_hass([entry])
+    engine = SimpleNamespace(loaded=True, closed=False, store=store, clock=time.time)
+    core = SimpleNamespace(
+        loaded=True,
+        closed=False,
+        registry=FakeRegistry(ROUTERS),
+        versions=SimpleNamespace(loaded=True, records=lambda rid: ()),
+        manager=SimpleNamespace(locked=lambda rid: False),
+    )
+    with (
+        patch(
+            "custom_components.openwrt_router.heal_engine.async_get_self_healing",
+            return_value=engine,
+        ),
+        patch(
+            "custom_components.openwrt_router.enterprise_core.async_get_core",
+            return_value=core,
+        ),
+        patch(
+            "custom_components.openwrt_router.net_engine.async_get_engine",
+            return_value=FakeNI(mesh()),
+        ),
+        patch(
+            "custom_components.openwrt_router.security_center.async_get_security_center",
+            return_value=None,
+        ),
+        patch(
+            "custom_components.openwrt_router.diag_runtime.async_get_net_diagnostics",
+            return_value=None,
+        ),
+    ):
+        g = hp.collect_preflight_facts(hass, R1)
+        res = hp.preflight_for(hass, R1, "service.restart", DNSMASQ)
+    assert calls == recorded
+    coordinator.async_request_refresh.assert_not_awaited()
+    coordinator.async_refresh.assert_not_awaited()
+    assert g.services.value == f.services.value
+    assert g.config_manager_busy.value is False and g.backups.value == ()
+    assert g.security_findings.reason == "security_center_not_running"
+    assert g.diag_enabled.reason == "diagnostics_not_running"
+    assert res.verdict is hp.Verdict.BLOCKED
+    assert res.check("no_critical_state").status is CS.UNKNOWN  # Security Center
+
+
+@pytest.mark.usefixtures("disks")
+async def test_stale_or_missing_poll_data_is_unknown() -> None:
+    coordinator, calls = await _polled()
+    recorded = list(calls)
+    clock = Clock(time.time())
+    store, _ = await open_store(clock)
+    # the last poll is an hour old: nothing of it is used
+    later = time.time() + 3600
+    f = hp.facts_from_sources(
+        sources(store, "e1", coordinator=coordinator, api=coordinator.api),
+        R1,
+        wall_now=later,
+    )
+    for name in (
+        "services",
+        "radios",
+        "interfaces",
+        "memory_pressure_pct",
+        "cpu_load_pct",
+        "uptime_s",
+        "clients_on_router",
+        "lease_clients",
+    ):
+        fact = getattr(f, name)
+        assert fact.value is None and fact.reason in ("poll_stale", "poll_not_fresh"), (
+            name
+        )
+    r = hp.run_preflight(f, "diag.refresh", {})
+    assert r.check("router_reachable").reason == "poll_stale"
+    # the last poll failed: nothing of the old data is used either
+    coordinator.last_update_success = False
+    f = hp.facts_from_sources(
+        sources(store, "e1", coordinator=coordinator, api=coordinator.api),
+        R1,
+        wall_now=time.time(),
+    )
+    assert f.poll_ok.value is False and f.services.reason == "poll_failed"
+    # no router entry loaded at all
+    f = hp.facts_from_sources(sources(store, "e1"), R1, wall_now=time.time())
+    assert f.poll_ok.reason == "router_not_loaded"
+    assert f.login_is_root.reason == "router_not_loaded"
+    # nothing of the core, NI, Security Center or diagnostics
+    f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=time.time())
+    assert f.identity_status.reason == "core_not_running"
+    assert f.capabilities.reason == "core_not_running"
+    assert f.dependants.reason == "ni_not_loaded"
+    assert f.related_repairs.reason == "topology_unknown"
+    assert f.security_findings.reason == "security_center_not_running"
+    assert f.backups.reason == "core_not_running"
+    assert f.config_manager_busy.reason == "core_not_running"
+    assert f.diag_enabled.reason == "diagnostics_not_running"
+    assert f.incident_type.reason == "no_incident"
+    assert calls == recorded
+
+
+@pytest.mark.usefixtures("disks")
+async def test_the_collector_reads_cpu_and_sta_honestly() -> None:
+    coordinator, _calls = await _polled()
+    clock = Clock(time.time())
+    store, _ = await open_store(clock)
+    data = coordinator.data
+    data.load_average = []
+    data.sta_interfaces = []
+    f = hp.facts_from_sources(
+        sources(store, "e1", coordinator=coordinator, api=coordinator.api),
+        R1,
+        wall_now=time.time(),
+    )
+    assert f.cpu_load_pct.reason == "cpu_load_not_measured"
+    assert f.wireless_uplink.reason == "sta_detection_inconclusive"
+    data.sta_interfaces = [
+        {"ifname": "wlan0", "mode": "sta", "bssid": "aa", "signal": -60}
+    ]
+    f = hp.facts_from_sources(
+        sources(store, "e1", coordinator=coordinator, api=coordinator.api),
+        R1,
+        wall_now=time.time(),
+    )
+    assert f.wireless_uplink.value is True
+
+
+async def test_the_collector_without_store_or_engine() -> None:
+    with pytest.raises(hp.PreflightError):
+        hp.facts_from_sources(hp.FactSources(store=None), R1, wall_now=T0)
+    hass = make_hass()
+    with (
+        patch(
+            "custom_components.openwrt_router.heal_engine.async_get_self_healing",
+            return_value=None,
+        ),
+        pytest.raises(hp.PreflightError),
+    ):
+        hp.collect_preflight_facts(hass, R1)
+
+
+@pytest.mark.usefixtures("disks")
+async def test_the_collector_reads_security_center_identity_and_backups() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    reg = FakeRegistry(ROUTERS)
+    from custom_components.openwrt_router.core_models import IdentityFlag
+
+    reg.flags["e1"] = (IdentityFlag.DUPLICATE_SUSPECTED,)
+    sc = SimpleNamespace(
+        enabled=True,
+        incidents={
+            "a": {"router_id": R1, "status": "open"},
+            "b": {"router_id": R1, "status": "resolved"},
+            "c": {"router_id": R2, "status": "open"},
+        },
+    )
+    created = SimpleNamespace(tzinfo=1, timestamp=lambda: T0 - 600)
+    versions = SimpleNamespace(
+        loaded=True,
+        records=lambda rid: (
+            SimpleNamespace(
+                backup_id=BKP,
+                created_at=created,
+                status=SimpleNamespace(value="ok"),
+                validation=SimpleNamespace(status=SimpleNamespace(value="valid")),
+                sha256="f" * 64,
+            ),
+        ),
+    )
+    f = hp.facts_from_sources(
+        sources(
+            store,
+            "e1",
+            registry=reg,
+            security=sc,
+            versions=versions,
+            config_locked=lambda r: True,
+        ),
+        R1,
+        wall_now=T0,
+    )
+    assert f.identity_status.value == "duplicate_suspected"
+    assert f.identity_bindings.value == 1
+    assert f.security_findings.value == 1
+    assert f.backups.value == ((BKP, int(T0 - 600), "ok", "valid", True),)
+    assert f.config_manager_busy.value is True
+    sc.enabled = False
+    f = hp.facts_from_sources(sources(store, "e1", security=sc), R1, wall_now=T0)
+    assert (
+        f.security_findings.value is None
+        and f.security_findings.reason == "security_center_off"
+    )
+
+
+@pytest.mark.usefixtures("disks")
+async def test_the_collector_reads_the_incident() -> None:
+    clock = Clock()
+    store, _ = await open_store(clock)
+    ni = FakeNI(mesh())
+    ni.incidents.append(
+        SimpleNamespace(
+            id="inc-9",
+            type="dns_failure",
+            status=IncidentStatus.ACTIVE,
+            severity=SimpleNamespace(value="warning"),
+            confidence=0.8,
+            parent_id=None,
+            cause_status=None,
+            evidence=[],
+            routers=["e1"],
+            last_seen=T0 - 30,
+        )
+    )
+    f = hp.facts_from_sources(
+        sources(store, "e3", ni=ni), R3, wall_now=T0, incident_id="inc-9"
+    )
+    assert f.incident_type.value == "dns_failure"
+    assert f.incident_severity.value == "warning"
+    assert f.incident_is_root.value is True
+    # e3 hangs on e2 on e1: the incident on e1 is on its uplink
+    assert f.uplink_incidents.value == 1
+    f1 = hp.facts_from_sources(sources(store, "e1", ni=ni), R1, wall_now=T0)
+    assert f1.uplink_incidents.value == 0 and f1.degraded_dependants.value == 0
+    f2 = hp.facts_from_sources(sources(store, "e2", ni=ni), R2, wall_now=T0)
+    assert f2.uplink_incidents.value == 1
+    g = dataclasses.replace(
+        facts(),
+        **{n: getattr(f, n) for n, _ in f.fact_items() if n.startswith("incident_")},
+    )
+    inc = hp.incident_facts_for(g, "service.restart", DNSMASQ)
+    assert inc is not None
+    assert inc.incident_type == "dns_failure" and inc.severity == "warning"
+    assert inc.temporal_only is None and inc.cause_outside_router is None
+    assert inc.target_fact is None  # dnsmasq runs
+    assert hp.incident_facts_for(facts()) is None
+
+
+# ---------------------------------------------------------------------------
+# Facts for the policy
+# ---------------------------------------------------------------------------
+
+
+def test_risk_context_from_green_facts() -> None:
+    ctx = hp.risk_context_for(facts(), "service.restart", DNSMASQ)
+    assert type(ctx) is hpol.RiskContext
+    assert ctx.reachable is True and ctx.identity_confirmed is True
+    assert ctx.role == "gateway" and ctx.dependants == 0
+    assert ctx.service_enabled is True
+    assert ctx.service_dependant_routers == 2 and ctx.service_dependant_clients == 9
+    # carried from the snapshot (the collector reports it unknown until G)
+    assert ctx.service_config_unapplied is False
+    blank = hp.risk_context_for(
+        facts(service_config_unapplied=u()), "service.restart", DNSMASQ
+    )
+    assert blank.service_config_unapplied is None
+    assert ctx.clients_on_router == 12 and ctx.clients_on_target is None
+    assert ctx.open_security_findings == 0
+    assert ctx.in_maintenance is False and ctx.concurrent_repair is False
+    assert ctx.breaker_open is False and ctx.diag_enabled is True
+    inp = hpol.DecisionInput(action_type="service.restart", params=DNSMASQ, context=ctx)
+    assert hpol.decide(inp).outcome is not None
+
+
+def test_risk_context_keeps_unknown_unknown() -> None:
+    blank = hp.PreflightFacts(router_id=R1, safe_at=SAFE0, wall_at=T0)
+    ctx = hp.risk_context_for(blank, "service.restart", DNSMASQ)
+    for name in (
+        "role",
+        "identity_confirmed",
+        "reachable",
+        "dependants",
+        "service_enabled",
+        "service_dependant_routers",
+        "service_dependant_clients",
+        "clients_on_router",
+        "open_security_findings",
+        "in_maintenance",
+        "concurrent_repair",
+        "breaker_open",
+        "diag_enabled",
+    ):
+        assert getattr(ctx, name) is None, name
+    ctx = hp.risk_context_for(facts(poll_ok=False), "service.restart", DNSMASQ)
+    assert ctx.reachable is False and ctx.service_enabled is None
+    assert ctx.clients_on_router is None
+    # zero leases seen is no proof that nothing depends on the service
+    ctx = hp.risk_context_for(
+        facts(lease_routers=0, lease_clients=0), "service.restart", DNSMASQ
+    )
+    assert (
+        ctx.service_dependant_routers is None and ctx.service_dependant_clients is None
+    )
+
+
+def test_risk_context_maps_the_facts() -> None:
+    f = facts(
+        identity_status="changed",
+        held=False,
+        router_repairs=1,
+        ni_maintenance=False,
+        component_windows=("service:dnsmasq",),
+        loop_blocks=("service.restart|service:dnsmasq|breaker_open",),
+        security_findings=2,
+    )
+    ctx = hp.risk_context_for(f, "service.restart", DNSMASQ)
+    assert ctx.identity_confirmed is False
+    assert ctx.concurrent_repair is True and ctx.in_maintenance is True
+    assert ctx.breaker_open is True and ctx.open_security_findings == 2
+    ctx = hp.risk_context_for(facts(), "interface.cycle", {"interface": "lan"})
+    assert ctx.target_on_mgmt_path is True
+    ctx = hp.risk_context_for(facts(), "wifi.radio_restart", RADIO0)
+    assert ctx.target_on_mgmt_path is False and ctx.target_is_wireless_uplink is False
+    with pytest.raises(hc.CatalogError):
+        hp.risk_context_for(facts(), "client.kick", {})
+    with pytest.raises(hp.PreflightError):
+        hp.risk_context_for(SimpleNamespace(), "observe.evaluate", {})  # type: ignore[arg-type]
+
+
+def test_a_running_but_down_service_is_a_direct_target_fact() -> None:
+    f = facts(
+        services=(("dnsmasq", False, True),),
+        incident_type="dns_failure",
+        incident_severity="critical",
+        incident_confidence=0.9,
+        incident_is_root=True,
+        incident_cause_status="confirmed",
+        incident_cause_level="likely",
+        incident_families=2,
+        incident_fresh=True,
+    )
+    inc = hp.incident_facts_for(f, "service.restart", DNSMASQ)
+    assert inc is not None and inc.target_fact is hpol.TargetFact.DIRECT
+    assert inc.cause_level is hm.CauseLevel.LIKELY
+    assert inc.cause_status is hm.CauseStatus.CONFIRMED
+    assert inc.source_families == 2 and inc.evidence_fresh is True
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+
+def test_model_checks_and_json() -> None:
+    r = run("service.restart", DNSMASQ)
+    checks = r.to_model_checks()
+    # a not-applicable check is never stored as a pass: it is left out
+    assert r.not_applicable == ("backup_present",)
+    assert [c.check for c in checks] == [
+        c for c in hp.PREFLIGHT_CHECK_IDS if c not in r.not_applicable
+    ]
+    by_id = {c.check: c for c in checks}
+    assert by_id["config_captured"].outcome is hm.CheckOutcome.PASS
+    assert by_id["config_captured"].reason == "saved_config_is_running"
+    assert by_id["permissions_present"].outcome is hm.CheckOutcome.FAIL
+    d = r.to_dict()
+    assert d["not_applicable"] == ["backup_present"]
+    assert d["verdict"] == "blocked" and d["executable_now"] is False
+    assert [c["check"] for c in d["checks"]] == list(hp.PREFLIGHT_CHECK_IDS)
+    assert d["facts"]["services"]["source"] == "test"
+    assert set(hp.FINGERPRINT_FACTS).isdisjoint(hp.VOLATILE_FACTS)
+
+
+# ---------------------------------------------------------------------------
+# Review of PR #80: every finding has a test that failed before the fix
+# ---------------------------------------------------------------------------
+
+
+def _forced(rec: hm.RemediationAction, state: S) -> hm.RemediationAction:
+    """``rec`` moved into ``state`` by one history step (any state, also one
+    the transition table would not allow from here)."""
+    entry = hm.HistoryEntry(
+        from_state=rec.state, to_state=state, ts=T0, actor=hm.Actor.ADMIN, reason="step"
+    )
+    return dataclasses.replace(rec, state=state, history=(*rec.history, entry))
+
+
+def _approval_on(state: S) -> tuple[hp.PreflightFacts, hm.RemediationAction]:
+    f = facts()
+    base = at_state(S.APPROVED)
+    rec = base if state is S.APPROVED else _forced(base, state)
+    return f, approved(f, rec)
+
+
+@pytest.mark.parametrize(
+    "state",
+    sorted(
+        {S.DETECTED, S.PROPOSED, S.PREFLIGHT, S.WAITING_APPROVAL, S.EXECUTING}
+        | set(hm.TERMINAL_STATES)
+        | {S.FAILED, S.VERIFYING, S.ROLLBACK_PENDING, S.ROLLING_BACK},
+        key=lambda s: s.value,
+    ),
+)
+def test_review_1_an_approval_counts_only_on_an_approved_record(state: S) -> None:
+    f, rec = _approval_on(state)
+    assert rec.state is state
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason, c.blocks) == (CS.FAIL, "approval_record_state", True)
+
+
+def test_review_1_the_execution_start_state_is_approved() -> None:
+    assert hp.EXECUTION_START_STATE is S.APPROVED
+    f, rec = _approval_on(S.APPROVED)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert c.status is CS.PASS
+    # an approved record cancelled through the transition table
+    dead = hm.transition(rec, S.CANCELLED, actor=hm.Actor.ADMIN, ts=T0, reason="step")
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=dead).check(
+        "approval_valid"
+    )
+    assert c.reason == "approval_record_state"
+    # never asked: an approval written onto a proposal
+    prop = approved(f, at_state(S.PROPOSED))
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=prop).check(
+        "approval_valid"
+    )
+    assert c.reason == "approval_record_state"
+
+
+def _diag_ok() -> hp.PreflightResult:
+    r = run("diag.refresh", None, run_path="auto")
+    assert r.clear
+    return r
+
+
+def _valid_at(r: hp.PreflightResult, safe_now: float) -> hp.Validity:
+    return r.validity(
+        router_id=R1, action_type="diag.refresh", params=None, safe_now=safe_now
+    )
+
+
+def test_review_2_limits_changed_behind_the_back_are_tampered() -> None:
+    lim = hp.PreflightLimits()
+    r = hp.run_preflight(facts(run_path="auto"), "diag.refresh", None, limits=lim)
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.VALID
+    object.__setattr__(lim, "valid_for_s", 10**9)  # bounds 10..300
+    assert _valid_at(r, SAFE0 + 10**8) is hp.Validity.TAMPERED
+    with pytest.raises(hp.PreflightError):
+        hp.run_preflight(facts(), "diag.refresh", None, limits=lim)
+    # in bounds, with valid_until moved along: the validated span differs
+    lim2 = hp.PreflightLimits()
+    r = hp.run_preflight(facts(run_path="auto"), "diag.refresh", None, limits=lim2)
+    object.__setattr__(lim2, "valid_for_s", 300)
+    object.__setattr__(r, "valid_until", r.safe_at + 300)
+    assert _valid_at(r, SAFE0 + 200) is hp.Validity.TAMPERED
+    # the recent-reboot bound is held too
+    lim3 = hp.PreflightLimits()
+    r = hp.run_preflight(facts(run_path="auto"), "diag.refresh", None, limits=lim3)
+    object.__setattr__(lim3, "recent_reboot_s", 1)
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.TAMPERED
+
+
+def test_review_2_the_shared_default_limits_changed_in_place() -> None:
+    r = _diag_ok()
+    old = hp.DEFAULT_PREFLIGHT_LIMITS.valid_for_s
+    try:
+        for value in (10**9, 300):  # out of bounds, and in bounds
+            object.__setattr__(hp.DEFAULT_PREFLIGHT_LIMITS, "valid_for_s", value)
+            assert _valid_at(r, SAFE0 + 200) is hp.Validity.TAMPERED
+            with pytest.raises(hp.PreflightError):
+                hp.run_preflight(facts(), "observe.evaluate", None)
+    finally:
+        object.__setattr__(hp.DEFAULT_PREFLIGHT_LIMITS, "valid_for_s", old)
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.VALID
+
+
+def test_review_2_moving_safe_at_forward() -> None:
+    """What tamper detection catches of a forward move of the binding time,
+    and its honest limit (docs §7.1: no secret; consistent edits pass)."""
+    for names in (
+        ("facts",),
+        ("facts", "safe_at"),
+        ("facts", "valid_until"),
+        ("safe_at", "valid_until"),
+    ):
+        r = _diag_ok()
+        later = SAFE0 + 10_000
+        if "facts" in names:
+            object.__setattr__(r.facts, "safe_at", later)
+        if "safe_at" in names:
+            object.__setattr__(r, "safe_at", later)
+        if "valid_until" in names:
+            object.__setattr__(r, "valid_until", later + hp.VALID_FOR_DEFAULT_S)
+        assert _valid_at(r, later + 1) is hp.Validity.TAMPERED, names
+    # the result holds its own PreflightFacts object (a shallow copy; the
+    # Fact objects are shared, see test_review2_4_…): a later change of the
+    # caller's facts object itself does not reach it
+    f = facts(run_path="auto")
+    r = hp.run_preflight(f, "diag.refresh", None)
+    object.__setattr__(f, "safe_at", SAFE0 + 10_000)
+    assert r.facts.safe_at == SAFE0 and r.facts is not f
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.VALID
+    # the limit: all three moved alike is consistent and not seen. C2 must
+    # collect and run again right before the router call (docs §7.1).
+    r = _diag_ok()
+    later = SAFE0 + 10_000
+    object.__setattr__(r.facts, "safe_at", later)
+    object.__setattr__(r, "safe_at", later)
+    object.__setattr__(r, "valid_until", later + hp.VALID_FOR_DEFAULT_S)
+    assert _valid_at(r, later + 1) is hp.Validity.VALID
+
+
+@pytest.mark.parametrize(
+    "names", [("executable_now",), ("in_release",), ("executable_now", "in_release")]
+)
+def test_review_3_forced_executable_now_or_in_release_is_tampered(
+    names: tuple[str, ...],
+) -> None:
+    r = _diag_ok()
+    assert not r.executable_now and not r.in_release
+    for name in names:
+        object.__setattr__(r, name, True)
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.TAMPERED
+
+
+def test_review_4_an_expired_approval_does_not_revive_with_the_wall_clock() -> None:
+    f_then = facts(wall_at=T0)
+    rec = approved(f_then, expires_in=60.0)  # decided at T0, expires T0 + 60
+    later = facts(wall_at=T0 + 3600.0)
+    c = hp.run_preflight(later, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert c.reason == "approval_expired"
+    # the wall clock set back by an hour: the store sees it behind its mark
+    # (the fingerprint changes with it; even an approval bound to that state
+    # does not pass)
+    back = facts(wall_at=T0 + 10.0, safe_at=SAFE0 + 3600.0, wall_clock_lag_s=3590.0)
+    c = hp.run_preflight(back, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert c.status is CS.FAIL and c.blocks
+    rec_b = approved(back, expires_at=T0 + 60.0)
+    c = hp.run_preflight(back, "service.restart", DNSMASQ, approval=rec_b).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason, c.blocks) == (CS.FAIL, "wall_clock_set_back", True)
+    # not known whether it was set back: no pass either
+    blind = facts(wall_at=T0 + 10.0, wall_clock_lag_s=u("safety_clock_unknown"))
+    rec_u = approved(blind, expires_at=T0 + 60.0)
+    c = hp.run_preflight(blind, "service.restart", DNSMASQ, approval=rec_u).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason, c.blocks) == (CS.UNKNOWN, "safety_clock_unknown", True)
+    assert c.facts_used == ("wall_clock_lag_s",)
+    # a wall time before the decision itself
+    early = facts(wall_at=T0 - 100.0)
+    rec_early = approved(early, at_state(S.APPROVED), expires_in=600.0)
+    c = hp.run_preflight(early, "service.restart", DNSMASQ, approval=rec_early).check(
+        "approval_valid"
+    )
+    assert c.reason == "wall_clock_before_decision"
+    # an expiry further from the decision than the Guard's TTL
+    rec_long = dataclasses.replace(
+        rec,
+        approval=dataclasses.replace(
+            rec.approval, expires_at=T0 + hp.APPROVAL_TTL_MAX_S + 60
+        ),
+    )
+    f_late = facts(wall_at=T0 + 120.0)
+    rec_long = approved(f_late, rec_long, expires_at=T0 + hp.APPROVAL_TTL_MAX_S + 60)
+    c = hp.run_preflight(f_late, "service.restart", DNSMASQ, approval=rec_long).check(
+        "approval_valid"
+    )
+    assert c.reason == "approval_expiry_implausible"
+
+
+@pytest.mark.usefixtures("disks")
+async def test_review_4_6_the_store_shows_a_wall_clock_set_back() -> None:
+    clock = Clock(T0 + 3600)
+    store, _ = await open_store(clock)
+    f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
+    assert f.wall_clock_lag_s.value == 0.0
+    assert f.wall_clock_lag_s.source == "heal_store.loop.clock"
+    clock.now = T0 + 10  # set back by almost an hour, no real time passes
+    f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
+    assert f.wall_clock_lag_s.value == 3590.0
+    # within the model's tolerance it is no set-back
+    clock.now = T0 + 3600 - 0.5
+    f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
+    assert f.wall_clock_lag_s.value == 0.0
+    # real time catches up past the mark: no lag again
+    clock.now = T0 + 3601
+    f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
+    assert f.wall_clock_lag_s.value == 0.0
+
+
+@pytest.mark.usefixtures("disks")
+async def test_review_6_stale_poll_data_stays_stale_after_a_set_back() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    clock = Clock(T0)
+    store, _ = await open_store(clock)
+    coord = SimpleNamespace(
+        last_update_success=True,
+        data=SimpleNamespace(last_seen=datetime.fromtimestamp(T0 - 600, UTC)),
+        update_interval=timedelta(seconds=60),
+    )
+    src = hp.FactSources(store=store, coordinator=coord)
+    f = hp.facts_from_sources(src, R1, wall_now=clock())
+    assert hp._poll_fresh(f) == (None, "poll_stale")
+    clock.now = T0 - 540  # the data now looks 60 s old
+    f = hp.facts_from_sources(src, R1, wall_now=clock())
+    assert f.poll_age_s.value == 60.0
+    assert hp._poll_fresh(f) == (None, "wall_clock_set_back")
+    r = hp.run_preflight(f, "diag.refresh", None)
+    assert r.check("router_reachable").reason == "wall_clock_set_back"
+    assert f.services.value is None  # nothing of the old data is used
+    # pure facts: set back is never fresh, unknown neither
+    assert hp._poll_fresh(facts(wall_clock_lag_s=600.0))[0] is None
+    assert hp._poll_fresh(facts(wall_clock_lag_s=u()))[0] is None
+
+
+class _Loop:
+    def __init__(self) -> None:
+        self.attempts: dict[Any, Any] = {}
+        self.breakers: dict[Any, Any] = {}
+        self.fleet = SimpleNamespace(paused=lambda safe: False)
+        self.clock = SimpleNamespace(high=T0)
+
+    def lock_holder(self, rid: str) -> None:
+        return None
+
+    def hold_on(self, rid: str, safe: float) -> None:
+        return None
+
+
+def _mini_store(windows: list[Any] | None = None) -> Any:
+    return SimpleNamespace(
+        loop=_Loop(),
+        actions={},
+        settings=SimpleNamespace(limits=None),
+        maintenance=windows or [],
+        now=lambda: SAFE0,
+        effective_mode=lambda rid: hm.HealMode.AUTO_HEAL,
+    )
+
+
+@pytest.mark.parametrize("target", ["LAN", "eth0@br", "10.0.0.1"])
+def test_review_5_a_window_target_the_model_accepts_is_unknown(target: str) -> None:
+    assert hm._TOKEN_RE.fullmatch(target)  # the model takes it
+    window = SimpleNamespace(
+        scope=hm.MaintenanceScope.INTERFACE,
+        target=target,
+        router_id=R1,
+        active=lambda wall, safe: True,
+    )
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store([window])), R1, wall_now=T0
+    )
+    assert f.component_windows.value is None
+    assert f.component_windows.reason == "window_target_unreadable"
+    c = hp.run_preflight(
+        _with(f, "component_windows", base=facts(run_path="auto")),
+        "interface.cycle",
+        {"interface": "wan"},
+    ).check("maintenance_window_ok")
+    assert c.status is CS.UNKNOWN and c.blocks
+    # a readable window of another router does not matter
+    window.router_id = R2
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store([window])), R1, wall_now=T0
+    )
+    assert f.component_windows.value == ()
+
+
+def test_review_5_an_api_without_the_root_method_is_unknown() -> None:
+    api = SimpleNamespace(_acl_blocked=set())
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store(), api=api), R1, wall_now=T0
+    )
+    assert f.login_is_root.value is None and f.login_is_root.reason == "source_error"
+    assert f.acl_blocked.value == ()
+    c = hp.run_preflight(
+        _with(f, "login_is_root", "acl_blocked"), "router.reboot", {}
+    ).check("permissions_present")
+    assert c.status is not CS.PASS and c.blocks
+
+
+def test_review_5_a_topology_walk_that_raises_is_unknown() -> None:
+    class Topo:
+        gateways = frozenset({"e1"})
+        uplinks: ClassVar[dict[str, Any]] = {}
+
+        def behind(self, r: str) -> list[str]:
+            raise RuntimeError("walk failed")
+
+        def chain(self, r: str) -> list[str]:
+            return []
+
+    ni = FakeNI(mesh())
+    ni.topology = Topo()
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store(), ni=ni, entry_id="e1"), R1, wall_now=T0
+    )
+    for name in (
+        "dependants",
+        "upstream_hops",
+        "uplink_incidents",
+        "degraded_dependants",
+    ):
+        fact = getattr(f, name)
+        assert fact.value is None and fact.reason == "source_error", name
+    assert f.related_repairs.reason == "topology_unknown"
+    assert f.ni_maintenance.value is False  # what could be read is kept
+    r = hp.run_preflight(
+        _with(f, "dependants", "related_repairs"), "service.restart", DNSMASQ
+    )
+    assert r.check("management_path_available").status is CS.UNKNOWN
+    assert r.check("no_concurrent_repair").status is CS.UNKNOWN
+    # a walk that yields something else than entry ids
+    Topo.behind = lambda self, r: [1, 2]  # type: ignore[method-assign]
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store(), ni=ni, entry_id="e1"), R1, wall_now=T0
+    )
+    assert f.dependants.reason == "topology_unreadable"
+
+
+def test_review_5_a_backup_status_that_is_no_code_is_unknown() -> None:
+    versions = SimpleNamespace(
+        loaded=True,
+        records=lambda rid: [
+            SimpleNamespace(
+                backup_id=BKP,
+                created_at=T0 - 60,
+                status=SimpleNamespace(value="ok"),
+                validation=SimpleNamespace(status="not checked"),
+                sha256="a" * 64,
+            )
+        ],
+    )
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store(), versions=versions), R1, wall_now=T0
+    )
+    assert f.backups.value == ((BKP, int(T0 - 60), "ok", "unknown", True),)
+    r = hp.run_preflight(_with(f, "backups"), "config.restore", {"version_id": BKP})
+    assert (
+        r.check("backup_present").status is CS.FAIL and r.check("backup_present").blocks
+    )
+
+
+class _Boom:
+    """A source where every attribute read raises."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(name)
+
+    def __call__(self, *a: Any, **kw: Any) -> Any:
+        raise RuntimeError("call")
+
+
+def test_review_5_the_collector_never_raises_on_broken_sources() -> None:
+    boom = _Boom()
+    src = hp.FactSources(
+        store=_mini_store(),
+        entry_id="e1",
+        coordinator=boom,
+        api=boom,
+        registry=boom,
+        versions=boom,
+        config_locked=boom,
+        ni=boom,
+        security=boom,
+        diag=boom,
+    )
+    f = hp.facts_from_sources(src, R1, wall_now=T0, incident_id="inc-1")
+    for name in (
+        "poll_ok",
+        "login_is_root",
+        "acl_blocked",
+        "identity_status",
+        "dependants",
+        "security_findings",
+        "backups",
+        "config_manager_busy",
+        "diag_enabled",
+        "incident_type",
+    ):
+        assert getattr(f, name).value is None, name
+    for action in hc.CATALOG:
+        r = hp.run_preflight(f, action, _params_for(action))
+        if action != "observe.evaluate":
+            assert r.verdict is hp.Verdict.BLOCKED, action
+
+
+def test_review_8_service_restart_never_passes_path_or_recovery_on_nothing() -> None:
+    blank = hp.PreflightFacts(router_id=R1, safe_at=SAFE0, wall_at=T0)
+    r = hp.run_preflight(blank, "service.restart", DNSMASQ)
+    mgmt, rec = r.check("management_path_available"), r.check("recovery_path_checked")
+    assert mgmt.status is CS.UNKNOWN and mgmt.blocks
+    assert rec.status is CS.UNKNOWN and rec.blocks
+    assert rec.reason == "manual_recovery_needs_path"
+    assert set(mgmt.facts_used) >= {"poll_ok", "dependants", "wall_clock_lag_s"}
+    assert rec.facts_used == mgmt.facts_used
+    # the router not reachable: the path fails
+    r = run("service.restart", DNSMASQ, poll_ok=False)
+    assert r.check("management_path_available").reason == "router_unreachable"
+    rec = r.check("recovery_path_checked")
+    # second review of PR #80: a known-unreachable router fails the
+    # recovery too, like the path check (was unknown)
+    assert (rec.status, rec.reason, rec.blocks) == (
+        CS.FAIL,
+        "router_unreachable",
+        True,
+    )
+    # green: both pass (path holds, a person approves)
+    r = run("service.restart", DNSMASQ)
+    assert r.check("management_path_available").status is CS.PASS
+    assert r.check("recovery_path_checked").status is CS.PASS
+
+
+def test_review_8_manual_recovery_needs_an_approval(monkeypatch: Any) -> None:
+    monkeypatch.setattr(hp, "_needs_approval", lambda ctx: False)
+    c = run("service.restart", DNSMASQ).check("recovery_path_checked")
+    assert (c.status, c.reason) == (CS.UNKNOWN, "manual_recovery_needs_approval")
+
+
+def test_review_8_the_property_test_reaches_every_check() -> None:
+    """Every check passes critically in some green variant and declares the
+    facts it read (else "unknown never passes" could not reach it)."""
+    reached: set[str] = set()
+    for action, params, f, rec in _green_variants():
+        r = hp.run_preflight(f, action, params, approval=rec)
+        for c in r.checks:
+            if c.status is CS.PASS and c.critical:
+                if (
+                    c.check == "action_supported"
+                    and not hp.ACTION_CAPABILITIES[action]
+                    and ("diag_enabled" not in hc.CATALOG[action].needs_facts)
+                ):
+                    # the catalog alone decides here: no fact to read
+                    assert c.facts_used == (), action
+                    continue
+                assert c.facts_used, (action, c.check)
+                reached.add(c.check)
+    # permissions_present cannot pass a write today: whether the integration's
+    # ACL file is deployed (or root's ACL holds) is never known in memory
+    assert reached == set(hp.PREFLIGHT_CHECK_IDS) - {"permissions_present"}
+    for action, params, f, rec in _green_variants():
+        c = hp.run_preflight(f, action, params, approval=rec).check(
+            "permissions_present"
+        )
+        assert not (c.critical and c.status is CS.PASS), action
+
+
+def test_review_9_not_applicable_is_never_stored_as_a_pass() -> None:
+    for action in hc.CATALOG:
+        r = run(action, _params_for(action))
+        stored = {c.check for c in r.to_model_checks()}
+        for c in r.checks:
+            if c.status is CS.NOT_APPLICABLE:
+                assert c.check not in stored and c.check in r.not_applicable
+                with pytest.raises(hp.PreflightError):
+                    c.to_model()
+            else:
+                assert c.check in stored
+    r = run("service.restart", DNSMASQ)
+    assert "backup_present" in r.not_applicable
+    assert "backup_present" not in {c.check for c in r.to_model_checks()}
+
+
+@pytest.mark.parametrize(
+    ("value", "status", "reason"),
+    [
+        (False, CS.PASS, "saved_config_is_running"),
+        (True, CS.FAIL, "saved_config_not_running"),
+        (u("config_drift_not_tracked"), CS.UNKNOWN, "config_drift_not_tracked"),
+    ],
+)
+def test_review_10_a_service_restart_needs_the_saved_config_running(
+    value: Any, status: CS, reason: str
+) -> None:
+    c = run("service.restart", DNSMASQ, service_config_unapplied=value).check(
+        "config_captured"
+    )
+    assert (c.status, c.reason, c.critical) == (status, reason, True)
+    assert c.blocks is (status is not CS.PASS)
+
+
+def test_review_10_the_collector_reports_the_drift_unknown() -> None:
+    f = hp.facts_from_sources(hp.FactSources(store=_mini_store()), R1, wall_now=T0)
+    assert f.service_config_unapplied.value is None
+    assert f.service_config_unapplied.reason == "config_drift_not_tracked"
+    r = hp.run_preflight(
+        _with(f, "service_config_unapplied"), "service.restart", DNSMASQ
+    )
+    assert "config_captured" in r.blocking
+
+
+def test_review_11_fleet_wide_security_incidents_count() -> None:
+    sc = SimpleNamespace(
+        enabled=True,
+        ready=True,
+        incidents={
+            "i1": {"router_id": None, "status": "open"},
+            "i2": {"router_id": R2, "status": "open"},
+            "i3": {"router_id": R1, "status": "resolved"},
+        },
+    )
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store(), security=sc), R1, wall_now=T0
+    )
+    assert f.security_findings.value == 1
+    sc.incidents["i4"] = {"router_id": R1, "status": "confirmed"}
+    f = hp.facts_from_sources(
+        hp.FactSources(store=_mini_store(), security=sc), R1, wall_now=T0
+    )
+    assert f.security_findings.value == 2
+    r = hp.run_preflight(_with(f, "security_findings"), "service.restart", DNSMASQ)
+    assert "open_security_finding" in r.check("no_critical_state").detail
+
+
+@pytest.mark.usefixtures("disks")
+async def test_review_12_a_related_router_without_id_is_unknown() -> None:
+    """M31: e2 has e3, e4, e5 behind it; e4 is not in the registry."""
+    clock = Clock()
+    store, _ = await open_store(clock)
+    reg = FakeRegistry({e: r for e, r in ROUTERS.items() if e != "e4"})
+    f = hp.facts_from_sources(sources(store, "e2", registry=reg), R2, wall_now=clock())
+    assert f.dependants.value == 3
+    assert f.related_repairs.value is None
+    assert f.related_repairs.reason == "topology_unknown"
+    r = hp.run_preflight(_with(f, *_CONC), "service.restart", DNSMASQ)
+    assert r.check("no_concurrent_repair").status is CS.UNKNOWN
+
+
+@pytest.mark.usefixtures("disks")
+async def test_review_12_stale_vlans_and_uptime_zero_are_unknown() -> None:
+    """M32: interfaces of a stale VLAN read; M29: an uptime of 0 is the
+    coordinator's default before any read, not a measurement."""
+    coordinator, _calls = await _polled()
+    clock = Clock(time.time())
+    store, _ = await open_store(clock)
+
+    def collect() -> hp.PreflightFacts:
+        return hp.facts_from_sources(
+            sources(store, "e1", coordinator=coordinator, api=coordinator.api),
+            R1,
+            wall_now=time.time(),
+        )
+
+    f = collect()
+    assert f.interfaces.known and f.uptime_s.known
+    coordinator.data.vlans_stale = True
+    coordinator.data.uptime = 0
+    f = collect()
+    assert f.interfaces.value is None and f.interfaces.reason == "interfaces_not_polled"
+    assert f.uptime_s.value is None and f.uptime_s.reason == "uptime_missing"
+    coordinator.data.uptime = 1
+    assert collect().uptime_s.value == 1
+
+
+def test_review_12_14_the_acl_cache_maps_hits_and_checks_its_shape() -> None:
+    """M33 and finding 14: no public accessor exists in api.py; the private
+    set is read guarded, a changed shape is unknown, never "none blocked"."""
+
+    def acl(blocked: Any) -> hp.Fact:
+        api = SimpleNamespace(
+            config_ssh_user_is_root=lambda: False, _acl_blocked=blocked
+        )
+        return hp.facts_from_sources(
+            hp.FactSources(store=_mini_store(), api=api), R1, wall_now=T0
+        ).acl_blocked
+
+    assert acl({("rc", "init"), ("other", "thing")}).value == ("rc/init",)
+    assert acl({("system", "reboot"), ("rc", "init")}).value == (
+        "rc/init",
+        "system/reboot",
+    )
+    assert acl(frozenset()).value == ()
+    assert acl({"rc/init"}).reason == "acl_cache_shape_changed"
+    assert acl({("rc", 1)}).reason == "acl_cache_shape_changed"
+    assert acl(None).reason == "acl_cache_unknown"
+    f = facts(acl_blocked=acl({("rc", "init")}))
+    c = hp.run_preflight(f, "service.restart", DNSMASQ).check("permissions_present")
+    assert (c.status, c.reason) == (CS.FAIL, "method_acl_blocked")
+
+
+@pytest.mark.parametrize(
+    ("pct", "avail", "status"),
+    [
+        (float(hp.RAM_PRESSURE_HIGH_PCT), hp.RAM_AVAILABLE_MIN_BYTES, CS.PASS),
+        (hp.RAM_PRESSURE_HIGH_PCT + 0.5, hp.RAM_AVAILABLE_MIN_BYTES, CS.FAIL),
+        (40.0, hp.RAM_AVAILABLE_MIN_BYTES - 1, CS.FAIL),
+    ],
+)
+def test_review_12_the_memory_threshold_boundary(
+    pct: float, avail: int, status: CS
+) -> None:
+    """M10: above the threshold is high; at it, not (the coordinator's own
+    rule, ``const.RAM_PRESSURE_HIGH_PCT``)."""
+    c = run(
+        "service.restart",
+        DNSMASQ,
+        memory_pressure_pct=pct,
+        memory_available_bytes=avail,
+    ).check("no_critical_state")
+    assert c.status is status
+    if status is CS.FAIL:
+        assert c.reason == "memory_pressure_high"
+
+
+def test_review_12_an_approval_expiring_this_second_is_expired() -> None:
+    """M20: ``left == 0`` is expired (the Guard's expiry is exclusive)."""
+    f = facts()
+    c = hp.run_preflight(
+        f, "service.restart", DNSMASQ, approval=approved(f, expires_in=0.0)
+    ).check("approval_valid")
+    assert c.reason == "approval_expired"
+    c = hp.run_preflight(
+        f, "service.restart", DNSMASQ, approval=approved(f, expires_in=0.5)
+    ).check("approval_valid")
+    assert c.status is CS.PASS
+
+
+def test_review_13_incident_families_are_clamped() -> None:
+    f = facts(incident_type=k("dhcp_down"), incident_families=k(500))
+    inc = hp.incident_facts_for(f, "service.restart", DNSMASQ)
+    assert inc is not None and inc.source_families == 64
+
+
+# --- second review of PR #80 -------------------------------------------------
+
+
+def _clock_store(clock: hm.SafetyClock) -> Any:
+    """A store whose safety clock is ``clock`` (``now`` does not observe)."""
+    loop = _Loop()
+    loop.clock = clock
+    return SimpleNamespace(
+        loop=loop,
+        actions={},
+        settings=SimpleNamespace(limits=None),
+        maintenance=[],
+        now=lambda: float(clock.safe or 0.0),
+        effective_mode=lambda rid: hm.HealMode.APPROVAL,
+    )
+
+
+def _coord_at(last_wall: float) -> Any:
+    from datetime import UTC, datetime, timedelta
+
+    return SimpleNamespace(
+        last_update_success=True,
+        data=SimpleNamespace(last_seen=datetime.fromtimestamp(last_wall, UTC)),
+        update_interval=timedelta(seconds=60),
+    )
+
+
+def _collect(clock: hm.SafetyClock, wall: float, last_poll: float) -> hp.PreflightFacts:
+    src = hp.FactSources(store=_clock_store(clock), coordinator=_coord_at(last_poll))
+    return hp.facts_from_sources(src, R1, wall_now=wall)
+
+
+def test_review2_1_an_ntp_step_back_before_the_poll_costs_only_its_size() -> None:
+    """Reviewer: one NTP step back of 5 s kept every poll stale for the whole
+    run. Now the lag (5 s) is added to the age: fresh polls stay fresh."""
+    c = hm.SafetyClock().observe(T0)
+    wall = T0
+    for _ in range(3):
+        wall += 60
+        c = c.observe(wall, 60.0)
+    wall -= 5.0  # NTP step back
+    seen = []
+    for i in range(24 * 60):  # one day, one observation a minute
+        wall += 60
+        c = c.observe(wall, 60.0)
+        if i in (0, 60, 24 * 60 - 1):
+            f = _collect(c, wall, wall - 10)
+            seen.append((f.wall_clock_lag_s.value, hp._poll_fresh(f)))
+    assert seen == [(5.0, (True, "last_poll_ok"))] * 3
+    # the lag still counts: a poll whose age plus lag passes the limit
+    f = _collect(c, wall, wall - (hp.STALE_POLLS * 60 - 4))
+    assert hp._poll_fresh(f) == (None, "wall_clock_set_back")
+
+
+def test_review2_1_known_strict_a_clock_once_far_ahead_still_blocks() -> None:
+    """Pins today's STRICT behaviour, not a wish (docs §7.1): the store keeps
+    no time of a step, so a wall clock that was a day ahead once (persisted
+    high-water mark) and then corrected looks set back by a day. Every
+    wall age is too old until the gap is gone - in-run never, the mark runs
+    on with the monotonic clock; only Home Assistant downtime shrinks it."""
+    c = hm.SafetyClock().observe(T0 + 86_400)  # wrong, one day ahead
+    c = c.observe(T0)  # corrected (first observation after a restart)
+    f = _collect(c, T0, T0 - 10)
+    assert f.wall_clock_lag_s.value == 86_400.0
+    r = hp.run_preflight(f, "diag.refresh", None)
+    assert r.check("router_reachable").reason == "wall_clock_set_back"
+    for _ in range(10):  # an hour later in the same run: unchanged
+        c = c.observe(T0 + 360.0 * (_ + 1), 360.0)
+    assert c.high - (T0 + 3600.0) == 86_400.0
+
+
+def test_review2_1_a_step_back_after_the_poll_still_blocks() -> None:
+    """The poll is 500 s old in real time (stale); the clock is set back by
+    400 s after it, so the wall age is 100 s. Lag + age: still stale."""
+    c = hm.SafetyClock().observe(T0)
+    poll_wall = T0
+    wall = T0
+    for _ in range(5):
+        wall += 60
+        c = c.observe(wall, 60.0)
+    wall -= 400.0  # set back after the poll
+    for _ in range(3):
+        wall += 60
+        c = c.observe(wall, 60.0)
+    f = _collect(c, wall, poll_wall)
+    assert f.poll_age_s.value == 80.0  # looks fresh on the wall clock alone
+    assert f.wall_clock_lag_s.value == 400.0
+    assert hp._poll_fresh(f) == (None, "wall_clock_set_back")
+    r = hp.run_preflight(f, "diag.refresh", None)
+    c_r = r.check("router_reachable")
+    assert (c_r.status, c_r.reason, c_r.blocks) == (
+        CS.UNKNOWN,
+        "wall_clock_set_back",
+        True,
+    )
+    # the same facts with the lag unknown: never fresh (fail-closed)
+    blind = dataclasses.replace(f, wall_clock_lag_s=u("safety_clock_unknown"))
+    assert hp._poll_fresh(blind) == (None, "safety_clock_unknown")
+
+
+def test_review2_1_a_step_back_after_the_decision_still_blocks() -> None:
+    """Decided at T0 for 600 s; 700 s of real time later (expired) the
+    clock was set back by 300 s: the wall says 400 s. Lag + wall: expired."""
+    f = facts(wall_at=T0 + 400.0, wall_clock_lag_s=300.0)
+    rec = approved(f, expires_at=T0 + 600.0)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason, c.blocks) == (CS.FAIL, "wall_clock_set_back", True)
+    # a small NTP step (5 s) does not cost the approval
+    f = facts(wall_at=T0 + 400.0, wall_clock_lag_s=5.0)
+    rec = approved(f, expires_at=T0 + 600.0)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason) == (CS.PASS, "approval_bound_and_current")
+    # exactly used up by the lag: expired (exclusive, like ``left == 0``)
+    f = facts(wall_at=T0 + 400.0, wall_clock_lag_s=200.0)
+    rec = approved(f, expires_at=T0 + 600.0)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert c.reason == "wall_clock_set_back"
+
+
+@pytest.mark.parametrize("bad", [-1.0, -0.001, True])
+def test_review2_1_a_negative_lag_is_refused(bad: Any) -> None:
+    with pytest.raises(hp.PreflightError):
+        facts(wall_clock_lag_s=bad)
+
+
+def test_known_gap_c2_duty_7_approval_survives_restart_clock_set_back() -> None:
+    """NOT a guarantee - it documents a gap C2 must close (docs §7.1, duty 7).
+
+    Decided at T0 for 600 s; right after, the wall clock is set back by an
+    hour; Home Assistant restarts after 1 h 30 s of downtime. The store's
+    first observation after the load does not advance the mark during the
+    downtime, so the collector sees no lag, and wall and safety clock both
+    show 50 s since the decision: the long-expired approval PASSES here.
+    C2 must treat every approval decided before the current start as
+    expired."""
+    c = hm.SafetyClock().observe(T0)  # the decision
+    c = c.observe(T0 - 3600.0, 1.0)  # set back by an hour, same run
+    c_restart = c.observe(T0 + 50.0)  # after 1 h + 30 s down (+ 20 s run)
+    f = _collect(c_restart, T0 + 50.0, T0 + 40.0)
+    assert f.wall_clock_lag_s.value == 0.0
+    assert c_restart.safe - c.safe <= 50.0
+    rec = approved(f, expires_at=T0 + 600.0)
+    check = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert check.status is CS.PASS  # the gap: C2 duty 7 expires it
+
+
+def test_review2_4_shared_fact_objects_are_caught_as_tampered() -> None:
+    """The result's copy of the facts is shallow: the Fact objects are the
+    caller's. A forced change of one is not kept out, it is TAMPERED."""
+    f = facts(run_path="auto")
+    r = hp.run_preflight(f, "diag.refresh", None)
+    assert r.facts is not f
+    assert r.facts.poll_ok is f.poll_ok
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.VALID
+    object.__setattr__(f.poll_ok, "value", False)
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.TAMPERED
+
+
+def test_review2_3_the_view_form_carries_the_not_applicable_ids() -> None:
+    """``to_model_checks`` leaves them out; ``to_dict`` keeps them (C2 duty 9:
+    store them or the mode with the record)."""
+    for path in ("auto", "approval"):
+        r = run("diag.refresh", None, run_path=path)
+        stored = {c.check for c in r.to_model_checks()}
+        d = r.to_dict()
+        assert set(d["not_applicable"]) == set(r.not_applicable)
+        assert stored | set(d["not_applicable"]) == {c.check for c in r.checks}
+        assert not stored & set(d["not_applicable"])
+
+
+@pytest.mark.parametrize(
+    ("drift", "status", "reason"),
+    [
+        (False, CS.PASS, "saved_config_is_running"),
+        (True, CS.FAIL, "saved_config_not_running"),
+        (None, CS.UNKNOWN, "config_drift_unknown"),
+    ],
+)
+def test_review2_a_reboot_applies_the_saved_config_too(
+    drift: bool | None, status: CS, reason: str
+) -> None:
+    """Coordinator answer: ``router.reboot`` is in ``CONFIG_APPLYING``."""
+    assert "router.reboot" in hp.CONFIG_APPLYING
+    value: Any = u("config_drift_unknown") if drift is None else drift
+    c = run("router.reboot", {}, service_config_unapplied=value).check(
+        "config_captured"
+    )
+    assert (c.status, c.reason, c.critical) == (status, reason, True)
+    assert c.facts_used == ("service_config_unapplied",)
+    # still blocked as a whole (catalog v1: no recovery mechanism)
+    r = run("router.reboot", {}, service_config_unapplied=value)
+    assert "recovery_path_checked" in r.blocking
+
+
+def test_review2_6_an_unreachable_router_fails_the_manual_recovery() -> None:
+    r = run("service.restart", DNSMASQ, poll_ok=False)
+    mgmt = r.check("management_path_available")
+    rec = r.check("recovery_path_checked")
+    assert (mgmt.status, mgmt.reason) == (CS.FAIL, "router_unreachable")
+    assert (rec.status, rec.reason, rec.blocks) == (CS.FAIL, "router_unreachable", True)
+    assert rec.facts_used == mgmt.facts_used
+    # stale (unknown) stays unknown
+    r = run("service.restart", DNSMASQ, poll_age_s=10_000.0)
+    rec = r.check("recovery_path_checked")
+    assert (rec.status, rec.reason) == (CS.UNKNOWN, "manual_recovery_needs_path")
+
+
+def test_review2_n06_a_record_without_its_decision_step_is_refused() -> None:
+    """Reviewer mutant N06 (``decided is None`` passes) is equivalent: the
+    model ends every history in the record's state, so only a forced record
+    lacks the step into APPROVED, and the binding check rebuilds the record
+    (``replace``), which the model refuses before the decision is read.
+    Pinned: such a record never yields a result."""
+    f = facts()
+    rec = approved(f)
+    object.__setattr__(
+        rec, "history", tuple(h for h in rec.history if h.to_state is not S.APPROVED)
+    )
+    with pytest.raises(hm.HealModelError):
+        hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec)
+
+
+def test_review2_n11_a_stretched_validity_without_the_limits_is_tampered() -> None:
+    """Reviewer mutant N11: ``_valid_for_s`` and ``valid_until`` moved alike,
+    the limits left at 120 s: the private copy no longer matches them."""
+    r = run("diag.refresh", None, run_path="auto")
+    assert r.limits.valid_for_s == 120
+    object.__setattr__(r, "_valid_for_s", 300)
+    object.__setattr__(r, "valid_until", r.safe_at + 300)
+    assert _valid_at(r, SAFE0 + 200) is hp.Validity.TAMPERED
+
+
+def test_review2_n20_a_collected_fact_of_the_wrong_shape_is_unreadable() -> None:
+    """Reviewer mutant N20: a fact in the wrong shape is kept as unknown with
+    ``value_unreadable`` (not dropped to ``not_collected``)."""
+    out = hp._sane(
+        {
+            "poll_ok": k("yes", "coordinator"),
+            "dependants": k(-1, "registry"),
+            "wall_clock_lag_s": k(-5.0, "heal_store.loop.clock"),
+            "role": k("gateway", "registry"),
+        }
+    )
+    for name, source in (
+        ("poll_ok", "coordinator"),
+        ("dependants", "registry"),
+        ("wall_clock_lag_s", "heal_store.loop.clock"),
+    ):
+        assert out[name].value is None, name
+        assert (out[name].reason, out[name].source) == ("value_unreadable", source)
+    assert out["role"].value == "gateway"
