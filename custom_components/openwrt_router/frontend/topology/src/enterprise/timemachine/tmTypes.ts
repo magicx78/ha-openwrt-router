@@ -226,6 +226,8 @@ export interface UtilizationRadio {
 export interface RouterState {
   routerId: string;
   routerName: string | null;
+  /** 1.52.2: the config entry now (`enabled` / `disabled`); null without one or in an older answer. */
+  entry: string | null;
   reachable: Known<boolean>;
   role: Known<string>;
   uplink: Known<UplinkValue>;

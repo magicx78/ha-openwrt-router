@@ -514,6 +514,23 @@ export const PART_STATE_TEXT: Record<string, string> = {
   'unreadable': 'nicht lesbar',
 };
 
+/**
+ * 1.52.2: the config entry of a router now (`entry` of a router in /state and
+ * in the blocks of /compare, tm_sources.ENTRY_*; checked by
+ * tests/test_tm_panel_texts_v1520.py).
+ */
+export const ENTRY_TEXT: Record<string, string> = {
+  'enabled': 'aktiv',
+  'disabled': 'deaktiviert',
+};
+
+/** 1.52.2: a disabled router with nothing known at the moment (one line instead of four unknown rows). */
+export const DISABLED_NOTE = 'in Home Assistant ausgeschaltet, zu diesem Zeitpunkt nichts bekannt';
+/** 1.52.2: a disabled router whose values of the moment are known (it was enabled then). */
+export const DISABLED_NOW = 'derzeit deaktiviert';
+/** 1.52.2: a radio of the comparison that one side's complete list does not have. */
+export const RADIO_NOT_SEEN = 'zu diesem Zeitpunkt nicht gesehen';
+
 /** Role of a router in the mesh (`role.value`). */
 export const ROLE_TEXT: Record<string, string> = {
   'gateway': 'Gateway',

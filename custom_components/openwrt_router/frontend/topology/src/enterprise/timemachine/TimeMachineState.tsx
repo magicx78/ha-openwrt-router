@@ -26,12 +26,14 @@ import {
   COMPARE_INIT, COMPARE_LOADING_TEXT, COMPARE_PICKS, COMPARE_PICK_TEXT, SECTION_CLIENTS, SECTION_COMPARE_CONFIG,
   SECTION_COMPARE_INCIDENTS, SECTION_CONFIG, SECTION_EVENTS, SECTION_INCIDENTS, SECTION_INTERVALS, SECTION_TRAFFIC,
   STATE_INIT, STATE_LOADING_TEXT, STATE_PICK_TEXT, STATE_STEPS, STATE_UNAVAILABLE_TEXT, UNKNOWN, UNKNOWN_TITLE,
-  clientRowText, compareReducer, compareRows, compareSummary, configTitle, deltaText, fromLocalInput, globalReasonText,
+  clientRowText, compareReducer, compareRouters, compareRows, compareSummary, configTitle, deltaText, disabledNow, disabledText,
+  disabledView, fromLocalInput, globalReasonText,
   hourText, incidentTitle, moreClientsQuery, otherSourcesText, parseLocalInput, partStateText, radioBandText, radioView,
   radiosView, reachableView, roleView, routerName, sinceText, stateLoadAt, stateReasonText, stateReducer, toLocalInput, uplinkView,
   loadDelay, utilizationText, waitingBody, wanText,
-  type CompareRow, type CompareView, type StateView, type ValueView,
+  type CompareView, type StateView, type ValueView,
 } from './tmState.ts';
+import { DISABLED_NOTE, DISABLED_NOW, ENTRY_TEXT } from './tmTexts.ts';
 import type {
   CompareAnswer, ConfigItem, CustomWindow, IncidentItem, Part, RouterChange, RouterState, StateAnswer, TmApi,
 } from './tmTypes';
@@ -134,12 +136,29 @@ function ConfigRow({ c }: { c: ConfigItem }) {
 
 // ── "Zustand" (pure: everything from props) ──────────────────────────────
 
+/** "derzeit deaktiviert" next to the name of a disabled router whose values are shown (1.52.2). */
+function DisabledBadge() {
+  return <span className="cfg-badge cfg-badge--muted tm-disabled-now">{DISABLED_NOW}</span>;
+}
+
 function RouterCard({ r }: { r: RouterState }) {
   const radios = r.radios;
   const rv = radiosView(radios);
+  const disabled = disabledView(r);
+  if (disabled === 'only') {
+    // 1.52.2: a disabled router with nothing known: one line instead of four unknown rows
+    return (
+      <section className="tm-card" aria-label={routerName(r)}>
+        <h4 className="tm-card__title">{routerName(r)}</h4>
+        <p className="tm-value tm-value--unknown tm-disabled">
+          {ENTRY_TEXT.disabled}<span className="tm-reason"> · {DISABLED_NOTE}</span>
+        </p>
+      </section>
+    );
+  }
   return (
     <section className="tm-card" aria-label={routerName(r)}>
-      <h4 className="tm-card__title">{routerName(r)}</h4>
+      <h4 className="tm-card__title">{routerName(r)}{disabled === 'now' && <> <DisabledBadge /></>}</h4>
       <dl className="tm-facts">
         <div className="tm-fact"><dt>Erreichbar</dt><dd><Value v={reachableView(r.reachable)} /></dd></div>
         <div className="tm-fact"><dt>Rolle</dt><dd><Value v={roleView(r.role)} /></dd></div>
@@ -219,6 +238,8 @@ export function StateScreen({
   const a = state.answer;
   const atError = fieldError(state.error, 'state', ['at']);
   const body = (() => {
+    // 1.52.2 (owner's decision): a field emptied after an answer shows the hint, never the old moment
+    if (a !== null && waitingBody(live ? [] : [input], false) === 'pick') return <div className="cfg-hint">{STATE_PICK_TEXT}</div>;
     if (a === null) {
       if (state.error !== null && !atError) return <ErrorBox of="state" error={state.error} onRetry={onRefresh} />;
       if (atError) return null;
@@ -380,11 +401,12 @@ export function StateScreen({
 
 // ── "Vergleich" (pure) ───────────────────────────────────────────────────
 
-function CompareCell({ text, row }: { text: string; row: CompareRow }) {
+/** One side of a row: its value, or "unbekannt" muted with this side's own reason (1.52.2). */
+function CompareCell({ text, reason }: { text: string; reason: string | null }) {
   const unknown = text === UNKNOWN;
   return (
     <span className={`tm-crow__v${unknown ? ' tm-value--unknown' : ''}`}>
-      {text}{unknown && row.reason && <span className="tm-reason"> · {row.reason}</span>}
+      {text}{unknown && reason && <span className="tm-reason"> · {reason}</span>}
     </span>
   );
 }
@@ -397,7 +419,7 @@ function CompareTable({ r, a, isAdmin, showSame, onToggleSame }: {
   const shown = rows.filter(x => x.state !== 'same' || showSame);
   return (
     <section className="tm-card tm-ccard" aria-label={routerName(r)}>
-      <h4 className="tm-card__title">{routerName(r)}</h4>
+      <h4 className="tm-card__title">{routerName(r)}{disabledNow(r, a) && <> <DisabledBadge /></>}</h4>
       <div className="tm-ctable" role="table" aria-label={`Vergleich ${routerName(r)}`}>
         <div className="tm-crow tm-crow--head" role="row">
           <span role="columnheader">Merkmal</span><span role="columnheader">Vorher</span>
@@ -406,8 +428,8 @@ function CompareTable({ r, a, isAdmin, showSame, onToggleSame }: {
         {shown.map(x => (
           <div key={x.key} className={`tm-crow tm-crow--${x.state}`} role="row">
             <span className="tm-crow__label" role="rowheader">{x.label}</span>
-            <span role="cell"><span className="tm-crow__k">Vorher: </span><CompareCell text={x.before} row={x} /></span>
-            <span role="cell"><span className="tm-crow__k">Nachher: </span><CompareCell text={x.after} row={x} /></span>
+            <span role="cell"><span className="tm-crow__k">Vorher: </span><CompareCell text={x.before} reason={x.beforeReason} /></span>
+            <span role="cell"><span className="tm-crow__k">Nachher: </span><CompareCell text={x.after} reason={x.afterReason} /></span>
             <span role="cell" className="tm-crow__badge">
               {x.state === 'changed' && <span className="cfg-badge cfg-badge--warn tm-changed">geändert</span>}
               {x.key === 'clients' && r.clients && x.state === 'changed' && <span className="tm-delta"> {deltaText(r.clients)}</span>}
@@ -461,6 +483,8 @@ export function CompareScreen({
       ? <span className="tm-field__error" role="alert">{info.message}</span> : null;
   })();
   const body = (() => {
+    // 1.52.2 (owner's decision): "Von" or "Bis" emptied after an answer shows the hint, never the old table
+    if (a !== null && waitingBody([from, until], false) === 'pick') return <div className="cfg-hint">{COMPARE_PICK_TEXT}</div>;
     if (a === null) {
       if (state.error !== null && !fieldErr) return <ErrorBox of="compare" error={state.error} onRetry={onRefresh} />;
       if (fieldErr) return null;
@@ -478,6 +502,9 @@ export function CompareScreen({
     const win = a.t1 !== null && a.t2 !== null ? customWindow(a.t1, a.t2, nowMs) : null;
     const listed = new Set(a.routers.map(r => r.routerId));
     const quiet = (a.after?.routers ?? a.before?.routers ?? []).filter(r => !listed.has(r.routerId)).length;
+    // 1.52.2: a disabled router unknown at both moments is no difference (one line, not counted)
+    const tables = compareRouters(a);
+    const disabledLine = disabledText(tables.disabled);
     const groups = Object.entries(a.marks.byGroup).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]));
     const others = otherSourcesText(a.otherSources);
     return (
@@ -493,11 +520,12 @@ export function CompareScreen({
         {a.status === 'partial' && <div className="cfg-notice cfg-notice--warn" role="note">Mindestens ein Teil war nicht lesbar; der Vergleich ist unvollständig.</div>}
         <div className="cfg-hint tm-summary" role="status">{compareSummary(a, isAdmin)}</div>
         <div className="tm-compare">
-          {a.routers.map(r => (
+          {tables.shown.map(r => (
             <CompareTable key={r.routerId} r={r} a={a} isAdmin={isAdmin} showSame={!!showSame[r.routerId]}
               onToggleSame={() => onToggleSame(r.routerId)} />
           ))}
           {quiet > 0 && <div className="cfg-hint">{quiet === 1 ? '1 Router ohne Unterschied ist' : `${quiet} Router ohne Unterschied sind`} nicht aufgeführt.</div>}
+          {disabledLine && <div className="cfg-hint tm-disabled-routers">{disabledLine}</div>}
         </div>
         <Section title={SECTION_EVENTS}>
           <div className="tm-events">
@@ -647,7 +675,12 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
     // "Jetzt" asks for the server's now (no future moment by a clock difference),
     // and the field follows it (browser review: back in the view, the field kept the old time)
     const { at, input: shown } = stateLoadAt(r.live, r.input, Date.now() / 1000);
-    if (at === null) return;
+    if (at === null) {
+      // 1.52.2: an empty field (or a skipped hour) holds no moment: the old result goes,
+      // an answer still on its way is dropped
+      dispatch({ type: 'clear', seq: ++seq.current });
+      return;
+    }
     if (shown !== r.input) {
       ref.current = { ...r, input: shown };
       setInput(shown);
@@ -737,7 +770,11 @@ export function CompareContainer({ api, active, viewSwitch, isAdmin = false, onS
     if (!api.compare) return;
     const t1 = fromLocalInput(ref.current.from);
     const t2 = fromLocalInput(ref.current.until);
-    if (t1 === null || t2 === null) return;
+    if (t1 === null || t2 === null) {
+      // 1.52.2: "Von" or "Bis" holds no moment: the old table goes, a late answer is dropped
+      dispatch({ type: 'clear', seq: ++seq.current });
+      return;
+    }
     const n = ++seq.current;
     dispatch({ type: 'start', seq: n });
     api.compare({ t1, t2, routerId: ref.current.routerId }).then(
