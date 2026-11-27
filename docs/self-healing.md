@@ -1,4 +1,4 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine; Paket G: Anbindung Configuration Manager)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
      Paket X (Branch feature/self-healing-x, 2026-11-27, auf B, C1, D, E und F). Gebaut sind heal_model.py
@@ -8,8 +8,9 @@
      heal_catalog.py und heal_policy.py (reine Logik), seit Paket E heal_preflight.py
      (Vorabprüfungen und Sammler, nicht angebunden), seit Paket F heal_playbooks.py (reine
      Logik, noch nicht aufgerufen), seit Paket X (Branch feature/self-healing-x) entscheidet
-     die Engine über heal_policy.gate (PolicyDecider).
-     Aussagen zu B, C1, D, E, F und X sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     die Engine über heal_policy.gate (PolicyDecider), seit Paket G (Branch
+     feature/self-healing-g) liest heal_config_link.py den Configuration Manager (nicht angebunden).
+     Aussagen zu B, C1, D, E, F, X und G sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
      tests/full_router_kit.py); nicht auf Routern,
@@ -100,6 +101,12 @@ einen Dienst-Neustart (dnsmasq, odhcpd) zur Freigabe vor; alles andere ist eine 
 Reine Logik, kein Router-Aufruf, von der Engine noch nicht aufgerufen; für Benutzer ändert
 sich nichts.
 
+**Stand heute (Paket G):** Dazu kommt die Anbindung an den Configuration Manager
+(`heal_config_link.py`, Abschnitt 7.2). Sie liest den Versionsindex des Core im Speicher und den
+Vergleich zweier **gespeicherter** Versionen und liefert daraus die Fakten für Playbook F (belegte
+Änderung, Bereiche, Zeit, Sicherung für den Plan) und die Sicherungsfakten der Vorabprüfungen.
+Kein Router-Aufruf, kein Wiederherstellen, kein Probelauf; die Engine ruft sie noch nicht auf.
+
 ## 2. Modulaufbau
 
 Geplant ist **eine** Instanz für die ganze Flotte je HA-Installation, verdrahtet wie Security
@@ -114,7 +121,8 @@ frei).
 | `heal_catalog.py` | rein | geschlossene Liste typisierter Aktionen, Parameterprüfung, Rollback-Aussage je Aktion | **gebaut** (Paket D) |
 | `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); seit Paket X ruft die Engine `gate` und `effective_mode` über `PolicyDecider` (Abschnitt 2.1); `record_outcome` ruft später I |
 | `heal_preflight.py` | rein + Sammler | dreizehn Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf**; Fakten für `RiskContext`/`IncidentFacts` | **gebaut** (Paket E, Abschnitt 7.1); Engine und Routen rufen sie noch nicht auf |
-| `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten, Matcher (Vorfall → höchstens ein Playbook), Analyse je Playbook, `cause_outside_router`, deutsche Texte | **gebaut** (Paket F, Abschnitt 8); die Engine ruft es noch nicht auf; die tiefe Anbindung an den Configuration Manager (F-Plan) ist Paket G |
+| `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten, Matcher (Vorfall → höchstens ein Playbook), Analyse je Playbook, `cause_outside_router`, deutsche Texte | **gebaut** (Paket F, Abschnitt 8); die Engine ruft es noch nicht auf; seit Paket G nennt der F-Plan alle geänderten Bereiche und `restore_executable: false` und wird bei jeder Änderung neu geprüft |
+| `heal_config_link.py` | rein + Sammler | Versionsindex und Vergleich zweier gespeicherter Versionen → `ConfigFact` für Playbook F, Sicherungsfakten und `service_config_unapplied` für die Vorabprüfungen, `config_change_24h`; **kein Router-Aufruf** | **gebaut** (Paket G, Abschnitt 7.2); nicht an die Engine angebunden |
 | `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
 | `heal_engine.py` | async | Ablauf, Sperren, Warteschlange, Zeitgeber, Neustart | **gebaut** bis PROPOSED (C1, Abschnitt 2.1); Ausführen, Sperren, Warteschlange Plan (C2, I) |
 | `heal_views.py` | HTTP | Routen (Abschnitt 11) | **gebaut**: fünf lesende Routen (C1); schreibende Plan (C2) |
@@ -1080,7 +1088,7 @@ nicht lesbar.
 | `no_critical_state` | schreibende | frischer Poll: Speicherdruck (> 85 % oder < 16 MiB frei), CPU-Last (> 100 % der Kerne, nur mit gemessenem Load-Average), Laufzeit (< 600 s, einstellbar 300–3600 s; 0 ist der Vorgabewert vor dem ersten Lesen → `unknown`); Sperre des Configuration Managers; offene Security-Funde (auch flottenweite ohne Router-Kennung); Vorfälle auf dem Uplink und hinter dem Router (Network Intelligence) | Security Center aus → `unknown security_center_off` (ein ausgeschaltetes Modul sagt nicht „nichts gefunden“) |
 | `management_path_available` | schreibende mit Unterbrechung | Katalog (`disruption`), frischer Poll, abhängige Router (Topologie), Funk-Uplink (`sta_interfaces`) | Dienst-Neustart `pass` (kein Link, keine Route, keine Adresse fällt weg) nur mit frischem Poll und bekannter Topologie, sonst `unknown`, Router nicht erreichbar `fail router_unreachable`; Router-Neustart `fail cuts_own_management_path`; Funk mit Routern dahinter `unknown` (deren Uplink-Medium ist nicht bekannt); `lan` `fail`, `wan`/`wan6` `unknown`; leere STA-Liste heißt „keine“ **oder** „Erkennung gescheitert“ → `unknown` |
 | `components_known` | schreibende | frischer Poll: `services` (`enabled`), Funk (`wifi_radios.phy`), Schnittstellen (`logical_name`); Versionsindex; Registry | **`odhcpd` wird nicht gepollt** (`DEFAULT_SERVICES`) → `unknown service_not_in_poll`; Funk über den iwinfo-Weg trägt andere Namen → `unknown radio_not_identified`; ein absichtlich abgeschalteter Dienst `fail service_disabled_on_purpose` |
-| `config_captured` | Konfiguration ändernde Aktionen (Katalog v1: `config.restore`) und gespeicherte Konfiguration anwendende (`CONFIG_APPLYING`: `service.restart`, `router.reboot`), sonst `n/a` | Restore: Versionsindex des Core (Speicher), neueste `ok`/`partial`-Sicherung jünger als 24 h; Dienst- und Router-Neustart: `service_config_unapplied` | **Dienst- und Router-Neustart heute immer `unknown config_drift_not_tracked`** (die Abweichung verfolgt erst Paket G; unbekannt sperrt) |
+| `config_captured` | Konfiguration ändernde Aktionen (Katalog v1: `config.restore`) und gespeicherte Konfiguration anwendende (`CONFIG_APPLYING`: `service.restart`, `router.reboot`), sonst `n/a` | Restore: Versionsindex des Core (Speicher), neueste `ok`/`partial`-Sicherung jünger als 24 h; Dienst- und Router-Neustart: `service_config_unapplied` | **Dienst- und Router-Neustart heute immer `unknown config_drift_not_tracked`**; auch mit der Anbindung aus Paket G bleibt es unbekannt (`running_config_not_tracked`, Abschnitt 7.2: der Configuration Manager kennt die laufende Konfiguration nicht); unbekannt sperrt |
 | `backup_present` | wie oben | Versionsindex: `ok`, Prüfstatus `valid`, Prüfsumme vorhanden, jünger als 24 h | `unverified` → `fail backup_not_validated` |
 | `recovery_path_checked` | schreibende | Katalog (Rollback-Art, Grundrisiko), Fähigkeit `config.restore`, Sicherungen, Ergebnis von `management_path_available` | Wiederherstellen ist ein Probelauf: **Sicherung vorhanden, aber nicht wiederherstellbar → `fail restore_unavailable_dry_run_only`** (Detail `backup_present_not_restorable`); Risiko 3 → `fail no_recovery_mechanism`; Funk: zweiter Aufruf nur, solange der Weg hält; Dienst-Neustart `pass manual_recovery_statement` (die ehrliche Aussage des Katalogs) **nur, wenn `management_path_available` bestand und eine Freigabe nötig ist**; Router nicht erreichbar (Weg-Prüfung `fail`) → `fail router_unreachable` wie dort; sonst `unknown`; liest dann die Fakten der Weg-Prüfung |
 | `approval_valid` | schreibende ab Risiko 2; Risiko 1 außerhalb von Auto-Heal; sonst `n/a` | der übergebene `RemediationAction`-Datensatz: gleicher Router, Aktion, Parameter; **Datensatz im Zustand `approved`** (`EXECUTION_START_STATE`, von dort beginnt die Ausführung; sonst `fail approval_record_state`); Freigabe `approved`; Guard-Kennung; `binding_hash` = `binding_hash(Datensatz mit diesem Fingerabdruck)`; Rückstand der Wanduhr bekannt (`wall_clock_lag_s`, unbekannt → `unknown`), Wanduhr nicht vor der Entscheidung (Zeit des Schritts nach `approved` in der Historie); Frist gegen die Wanduhr der Momentaufnahme (`approval_expired`) **und** gegen Wanduhr plus Rückstand (`wall_clock_set_back`), höchstens 15 min voraus und höchstens 15 min nach der Entscheidung | die Freigabe des Guard selbst prüft C2; über einen Neustart sieht E ein Zurückstellen nicht (Pflichten 4 und 7 unten) |
@@ -1176,13 +1184,14 @@ params)` → `heal_policy.RiskContext`, `incident_facts_for(facts, aktion, param
 `service_dependant_routers`/`_clients` sind Untergrenzen aus den DHCP-Leases dieses Routers
 (Router über die MACs der Registry); 0 gesehene Leases heißt `None`, nicht 0 (statische
 Adressen sieht man nicht). `service_config_unapplied` kommt aus der Momentaufnahme (heute
-unbekannt, Paket G), `source_families` wird auf 64 begrenzt statt zu werfen,
+unbekannt, auch mit Paket G, Abschnitt 7.2), `source_families` wird auf 64 begrenzt statt zu werfen,
 `clients_on_target` `None` (Clients je Funk sind nicht zugeordnet), `temporal_only` und
 `cause_outside_router` bleiben `None` (Paket F); `target_fact` ist `direct` nur, wenn der
 Dienst der Aktion im frischen Poll eingeschaltet ist und nicht läuft.
 
 **Heute unbekannt und wer es füllt:** Rechte der Root-Anmeldung und Stand der ACL auf dem
-Router (C2); ob die gespeicherte Dienst-Konfiguration geladen ist (G); `odhcpd` im Poll
+Router (C2); ob die gespeicherte Dienst-Konfiguration geladen ist (auch Paket G weiß es
+nicht: es bräuchte einen Blick auf die laufende Konfiguration, Abschnitt 7.2); `odhcpd` im Poll
 (eigenes kleines Paket oder C2: `DEFAULT_SERVICES`); Uplink-Medium der abhängigen Router und
 Funkname des iwinfo-Wegs (F/C-Funk, gesperrt); ob eine Wiederherstellung ausführbar ist (kein
 Ausführer); Ursache außerhalb des Routers, nur zeitliche Nähe (F); Alter der Registry-Fakten
@@ -1202,7 +1211,7 @@ Paket; heute das private `_acl_blocked` hinter `_safe_call`).
   Speicherformat bleibt unverändert (kein neuer Wert). Das Adapter-Paket kann den Wert ergänzen.
 - Eine Freigabe zählt nur auf einem Datensatz im Zustand `approved` (`EXECUTION_START_STATE`).
 - Ein Dienst-Neustart wendet die gespeicherte Konfiguration an: `config_captured` verlangt
-  `service_config_unapplied = false` (heute unbekannt, sperrt). Seit dem zweiten Review von
+  `service_config_unapplied = false` (heute unbekannt, sperrt; Paket G ändert das nicht). Seit dem zweiten Review von
   PR #80 auch für `router.reboot` (er wendet alle gespeicherte Konfiguration an; zusätzlich
   bleibt er über `no_recovery_mechanism` gesperrt).
 - `management_path_available` für den Dienst-Neustart besteht nur mit frischem Poll und
@@ -1218,6 +1227,117 @@ Paket; heute das private `_acl_blocked` hinter `_safe_call`).
 - Als laufende Reparatur zählen offene Datensätze nach der Planung (ab `preflight`, ohne
   Endzustände); für die Flotten-Grenze die, die eine Sperre halten oder freigegeben sind.
 - Konfiguration ändernd ist im Katalog v1 nur `config.restore`.
+
+### 7.2 Anbindung an den Configuration Manager (`heal_config_link.py`, Paket G)
+
+**Stand heute:** gebaut und getestet (`tests/test_heal_config_link_v1530.py`), **nicht an die
+Engine angebunden** (die Naht `HealFactsProvider` aus Paket X steht in Abschnitt 2.1; wie man
+sie füllt, steht unten). Nur lesen: kein Router-Aufruf, kein Wiederherstellen, kein Probelauf,
+nichts wird geschrieben, kein Audit-Eintrag, kein Laden eines Speichers. Ein Test mit dem
+echten Core und dem aufzeichnenden api-Objekt des Coordinators weist null Router-Aufrufe nach
+(`test_recorded_calls_zero_router_calls`): der einzige Aufruf beim Anbieter ist der Vergleich
+zweier gespeicherter Versionen.
+
+**Quellen.**
+
+- Der **Versionsindex** des Core im Speicher (`core.versions.records(router_id)`, nur wenn
+  `loaded`; ein Core, der nicht geladen oder geschlossen ist, zählt als nicht laufend). Je
+  Version: Kennung (`bkp_…`), angelegt und – bei einer Wiederholung desselben Inhalts – zuletzt
+  wieder gesehen, Status, Prüfstatus, ob das Archiv eine sha256 trägt, die Prüfsumme des
+  UCI-Inhalts und die Art (`full_archive`, `uci_snapshot`, `partial`). Die Prüfsumme des Inhalts
+  wird nur verglichen und nie ausgegeben.
+- Der **Vergleich zweier gespeicherter Versionen**:
+  `ConfigurationApi.async_compare(ConfigRef.backup(a), ConfigRef.backup(b),
+  actor=Actor.for_module("self_healing"))`. Beide Verweise sind Sicherungsverweise, also liest
+  der Core nur die gespeicherten Artefakte.
+- **Nicht benutzt**, weil sie den Router lesen oder schreiben: die Live-Drift-Prüfung
+  (`async_detect_drift`, `DriftReport`), der Probelauf des Wiederherstellens
+  (`async_prepare_restore`: Router-Verbindung, Audit). Die Drift-Zusammenfassung des
+  Router-Zustands nennt keine Bereiche und hilft deshalb nicht.
+
+**Welche Änderung.** Jede vergleichbare Version (Status `ok`, Prüfstatus `valid` oder
+`unverified`, mit Inhaltsprüfsumme) ist eine Beobachtung ihres Inhalts beim Anlegen und, wenn
+sie wiederholt wurde, beim letzten Wiedersehen. Nach Zeit sortiert gibt die neueste Beobachtung
+den aktuellen Inhalt; rückwärts gegangen ist die erste Beobachtung eines anderen Inhalts die
+**Basis**. Daraus wird `VersionPair`: Basis, die neueste Version, `changed_after` (zuletzt den
+alten Inhalt gesehen) und `changed_at` (zuerst den neuen gesehen). Die wirkliche Änderung liegt
+in `(changed_after, changed_at]` (Zufallstest gegen simulierte echte Änderungszeiten). Mit
+`before` (Beginn des Vorfalls) zählen nur Beobachtungen **strikt davor**. Ein Gleichstand zweier
+Inhalte an der Grenze ist `ambiguous_order` (kein Paar). Die Wiederholung einer älteren
+Version (Deduplizierung vergleicht nur mit der neuesten Version derselben Art) wird über das
+Wiedersehen richtig als Rückkehr zum alten Inhalt erkannt. Die **Sicherung des Plans** ist das
+neueste von Hand wiederherstellbare Archiv (`ok`, gültig oder ungeprüft, mit sha256,
+`full_archive`) mit dem alten Inhalt unmittelbar vor der Änderung, sonst die Basis selbst
+(`backup_present` dann `false`).
+
+**Zeitgrenze (DECIDED):** `ConfigFact.changed_at` ist die **spätere** Grenze, also der Zeitpunkt,
+an dem die Änderung beobachtet wurde. Playbook F verlangt `changed_at < started_at`. Weil die
+wirkliche Änderung ≤ `changed_at` liegt, ist sie dann strikt vor dem Beginn des Vorfalls; die
+frühere Grenze könnte eine Änderung als „vorher“ werten, die erst danach geschah. Für
+`config_change_24h` gilt umgekehrt die **frühere** Grenze: „ja“ nur, wenn `changed_after` im
+Fenster der letzten 24 h liegt (dann liegt die Änderung sicher darin) und `changed_at` nicht
+nach der Momentaufnahme.
+
+**Grenze der Uhren (bekannt, nicht erkennbar):** beide Seiten benutzen die Wanduhr (Network
+Intelligence Epoch-Sekunden, der Configuration Manager UTC-Zeitstempel). Ging die Uhr beim
+Speichern einer Version nach und sprang später vor, ist deren Stempel zu früh; eine Änderung
+nach dem Beginn kann dann als „vorher“ erscheinen und Playbook F wählen. Niemand sieht das im
+Speicher. Die Richtung ist vorsichtig: F schlägt nichts vor, es ersetzt höchstens einen
+Neustart-Vorschlag durch einen Plan, der nie ausführt. Network Intelligence verschiebt seine
+Zeiten bei einem Sprung, der Versionsindex nicht.
+
+**Was gefüllt wird und was unbekannt bleibt:**
+
+| Fakt | gefüllt | unbekannt (Grund) |
+|---|---|---|
+| `ConfigFact.version_known`, `version_id`, `backup_present` | mit Paar: die Sicherung des Plans; ohne Paar: die neueste nutzbare Version; leerer Index: `false`/`false` („keine Sicherung“ ist ein bekanntes Nein) | Index nicht lesbar: `core_not_running`, `versions_not_loaded`, `source_error`, `invalid_router_id` |
+| `diff_proven`, `changed_areas`, `change_risk`, `changed_at` | Vergleich des Paars gelesen: `true` mit Bereichen, höchstem Risiko (unbekannt, wenn ein Risiko fehlt) und `changed_at`; gleiche Konfiguration: `false` mit leeren Bereichen | `no_usable_version`, `single_content`, `ambiguous_order`, `diff_not_read`, `diff_other_versions`, `diff_failed`, `diff_unreadable`, `diff_truncated`, `diff_area_unknown`, `secrets_not_comparable` |
+| `restore_check` | – | **immer** `None` (`restore_dry_run_not_run`: der Probelauf spricht mit dem Router) |
+| Vorabprüfung `backups` | dieselben Zeilen wie `heal_preflight._backup_facts` (Test), neueste zuerst, höchstens 64 | wie oben (Index nicht lesbar) |
+| Zusammenfassung `config_captured`, `backup_present` | `current`/`outdated`/`none` bzw. `verified`/`unverified`/`outdated`/`none`, nach den Regeln der Prüfungen (Test gegen `run_preflight`) | `snapshot_time_ahead`, `backup_time_ahead` |
+| `service_config_unapplied` | – | **immer** `running_config_not_tracked`: der Configuration Manager liest nur die gespeicherte UCI-Konfiguration, nie die laufende. Ein Dienst- oder Router-Neustart bleibt damit gesperrt |
+| `config_change_24h` | `true`, wenn ein Vergleich eine Änderung in einem der Bereiche des Ziels im Fenster belegt | sonst `None`, **nie `false`** (der Speicher kann nicht belegen, dass sich nach seiner neuesten Version nichts geändert hat) |
+| Wiederherstellen | – | `restore_executable` immer `false`, `reasons.restore = restore_unsupported_dry_run_only`; `DriftPlan` lehnt jeden anderen Wert ab |
+
+`ConfigLink.reasons` nennt zu jedem unbekannten Fakt den Grund (Codes aus `REASONS`, deutsche
+Texte in `REASON_TEXT_DE`). `to_dict()` enthält Kennungen, Codes, Zeiten und Bereiche, keine
+Prüfsumme, keine Adresse, keinen Konfigurationsinhalt. Fehler werden nur mit ihrem Typnamen
+protokolliert.
+
+**Strenge beim Vergleich (DECIDED):** ein abgeschnittener Vergleich, eine einzige nicht
+vergleichbare Änderung (Geheimnis mit anderem Installationsschlüssel) oder eine vergleichbare
+Änderung ohne bekannten Bereich macht den ganzen Vergleich unbekannt – sonst könnte ein
+fehlender Bereich F übersehen lassen. Ein Vergleich anderer Versionen als des gewählten Paars
+(auch ein Live-Verweis) zählt nicht.
+
+**So steckt ein späteres Paket die Anbindung ein** (Paket G verdrahtet nichts; `heal_engine.py`
+bleibt unverändert):
+
+1. **In der Faktenquelle** (`HealFactsProvider.facts(context)`, synchron, ohne I/O, in der
+   Ereignisschleife):
+   `link = heal_config_link.config_link_for(hass, context.router_id, wall_now=time.time(),
+   before=<Beginn des Vorfalls>, diff=<StoredDiff aus dem Zwischenspeicher oder None>)`.
+   `config_link_for` liest nur den Speicher und wirft nur bei eigenen falschen Eingaben
+   (`ConfigLinkError`; die Engine zählt eine Ausnahme der Quelle als „nichts bekannt“).
+   `before` ist der Beginn des Vorfalls in Wanduhr-Sekunden von Network Intelligence
+   (`first_seen`). Der Datensatz trägt ihn auf Millisekunden gerundet (`params.first_seen`);
+   wer diesen Wert nimmt, zieht 0,001 s ab, damit „strikt davor“ nicht durch die Rundung
+   aufgeweicht wird.
+2. **Den Vergleich außerhalb des Entscheidungswegs lesen**, etwa wenn ein Vorfall gemeldet wird
+   oder sich der Versionsindex ändert: `link = await async_config_link_for(hass, router_id,
+   wall_now=…, before=…)` (oder `async_read_stored_diff(core.manager.api(1), knowledge,
+   before=…)`) und `link.diff` je (Router, `before`) zwischenspeichern. Ein veralteter
+   Zwischenspeicher ist ungefährlich: passt der Vergleich nicht mehr zum gewählten Paar, ist der
+   Fakt `diff_other_versions` (unbekannt).
+3. **Playbook F:** `heal_playbooks.Evidence(…, config=link.config_fact)` an `assess` geben.
+4. **Richtlinie:** `HealFacts(config_change_24h=link.config_change_24h(bereiche_des_ziels),
+   context=replace(risk_context, service_config_unapplied=link.service_config_unapplied.value),
+   …)` (der Wert ist heute immer `None`).
+5. **Vorabprüfungen:** `dataclasses.replace(collect_preflight_facts(…),
+   **link.preflight_overrides())` setzt `backups` und `service_config_unapplied`.
+6. **Nie:** einen Live-Verweis vergleichen, `async_prepare_restore` oder `async_detect_drift`
+   aus der Faktenquelle rufen, einen anderen Akteur als `self_healing` benutzen oder
+   `restore_executable` setzen (der Typ lehnt es ab).
 
 ## 8. Playbooks A–G
 
@@ -1489,8 +1609,8 @@ Paketen); kein Text setzt Werte ein, Router-Texte erscheinen nie darin.
 |---|---|
 | Erkennung heute | **nicht vorhanden**: Network Intelligence meldet keine Konfigurationsabweichung als Vorfall (`drift_incident`). F greift als **Überlagerung** (Regeln in 8.2, Punkt 7): ein Vergleich des Configuration Managers belegt eine Änderung im Bereich des Vorfalls (DHCP, DNS, WLAN, VLAN, Schnittstelle, Routing, Dienste), ihre Zeit ist bekannt und liegt vor dem Vorfall, und das ursprüngliche Playbook hat **keinen Hinweis** auf eine Ursache außerhalb gesehen (nicht nur: nichts gemessen; 8.2 Punkt 7, Hinweise in 8.3). Nur zeitliche Nähe einer Änderung genügt nicht; unbekannte Zeit → nur Hinweis |
 | Rollen, Fähigkeit | Gateway, Access Point; `config.capture`, `config.diff` |
-| Schritte | letzte bekannte Version · Vergleich · relevante Änderungen · Auswirkung · Kompatibilität der Wiederherstellung (Probelauf; es gibt keinen Ausführer) · Rücksetz-Plan · Freigabe (C2) · gesicherte Wiederherstellung (G) · Prüfung (H) |
-| Darf vorschlagen | **nichts**. Ergebnis ist ein Plan: Version, relevante und kritische Bereiche, Risiko der Änderung, Prüfergebnis, Sicherung vorhanden, manuelle Schritte (Vergleich prüfen, Probelauf, ausdrückliche Freigabe, von Hand wiederherstellen, danach prüfen); der Plan führt nie aus und verlangt immer eine ausdrückliche Freigabe (eine andere Einstellung lehnt der Typ ab). Die tiefe Anbindung an den Configuration Manager ist Paket G |
+| Schritte | letzte bekannte Version · Vergleich · relevante Änderungen · Auswirkung · Kompatibilität der Wiederherstellung (Probelauf; es gibt keinen Ausführer) · Rücksetz-Plan · Freigabe (C2) · gesicherte Wiederherstellung (im Register `deferred_to` „G“; Paket G bringt keinen Ausführer, der Schritt bleibt aufgeschoben, offene Frage in Abschnitt 16) · Prüfung (H) |
+| Darf vorschlagen | **nichts**. Ergebnis ist ein Plan: Version, relevante und kritische Bereiche, Risiko der Änderung, Prüfergebnis, Sicherung vorhanden, manuelle Schritte (Vergleich prüfen, Probelauf, ausdrückliche Freigabe, von Hand wiederherstellen, danach prüfen); der Plan führt nie aus und verlangt immer eine ausdrückliche Freigabe (eine andere Einstellung lehnt der Typ ab). Seit Paket G füllt `heal_config_link` die Fakten (Abschnitt 7.2): die Sicherung des Plans ist das neueste wiederherstellbare Archiv mit dem alten Inhalt, der Plan nennt alle geänderten Bereiche (`changed_areas`), sagt `restore_executable: false` und prüft jedes Feld bei jeder Änderung neu (`invalid_plan`, `restore_not_executable`) |
 | Ursache außerhalb | **False** nur, wenn ein Vergleich eine Änderung im Bereich belegt **und** die genannte Ursache auf einen Bereich zeigt, der sich wirklich geändert hat (`DRIFT_CAUSE_AREAS`: `dhcp_server` → DHCP, `radio_restart` → WLAN, `vlan` → VLAN, `uplink_config` → Schnittstelle oder WLAN); ohne genannte Ursache, bei einer anderen Ursache und für Vorfälle von D und E (`wan_down`, Ports) nie: **None**. Sieht das ursprüngliche Playbook einen Hinweis nach außen, greift F gar nicht (8.2) |
 | Nie | nie eine automatische Wiederherstellung (`config.restore` ist Probelauf, gesperrt); nie eine automatische Rücksetzung kritischer Konfiguration (VLAN, Schnittstelle, Management-IP, Firewall, Routing, SSH, oder Änderungsrisiko hoch/kritisch) |
 | Abbruch | Sicherung passt nicht, keine Sicherung, kritischer Bereich, sowie die allgemeinen Abbrüche |
@@ -1980,8 +2100,8 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik | **gebaut** (PR #77) |
 | **E** | Vorabprüfungen (`heal_preflight.py`, Abschnitt 7.1): dreizehn Prüfungen, Fingerabdruck, Bindung an Router/Aktion/Parameter und Sicherheitszeit, Sammler nur aus dem Speicher, Fakten für `RiskContext`/`IncidentFacts`; nicht angebunden (Adapter-Paket: Engine und Faktenquelle; C2: letzte Vorabprüfung vor dem Ausführen) | **gebaut** (PR #80) |
 | **F** | Playbooks A–G als Daten (`heal_playbooks.py`): Register, Matcher, Analyse je Playbook, Nie-Regeln, deutsche Texte; **füllt `IncidentFacts.cause_outside_router`** (True/False/None je Playbook, Abschnitt 8.4; Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt). Reine Logik; die Engine ruft es noch nicht auf (Anbindung über die Faktenquelle `HealFactsProvider`, Abschnitt 2.1), die Beweisdaten füllt die Anbindung | **gebaut** (PR #79) |
-| **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **dieser Stand** |
-| G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
+| **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **gebaut** (PR #81) |
+| **G** | Anbindung Configuration Manager (`heal_config_link.py`, Abschnitt 7.2): Versionsindex und Vergleich gespeicherter Versionen → Fakten für Playbook F (Sicherungsverweis, Drift-Plan) und Vorabprüfungen; kein Probelauf (er spricht mit dem Router), keine Verdrahtung in die Engine | **dieser Stand** |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
 | I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
@@ -2021,6 +2141,7 @@ Hold.
 | Q6 | Router-Neustart als Aktion | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): modelliert und gesperrt, ebenso Wiederherstellen und Schnittstelle ab/an; der vorhandene Knopf bleibt |
 | Q7 | Was Auto-Heal enthalten darf | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): nur Risiko ≤ 1; Risiko 3 erlaubt kein allgemeiner Schalter; unbewertetes Risiko zählt als HOCH |
 | Q8 | Watchdog auf dem Router | offen (Entwurf: keiner) |
+| Q9 | Schritt `secured_restore` von Playbook F nennt `deferred_to` „G“, Paket G bringt aber keinen Ausführer | offen (Empfehlung: in einem späteren Paket mit neuer Playbook-Version umbenennen, etwa auf das Paket eines Wiederherstellungs-Ausführers; bis dahin unverändert, der Plan führt ohnehin nie aus) |
 
 ## 17. Tests und was nicht geprüft ist
 
@@ -2391,6 +2512,21 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   ein Hold ohne JSON-Form oder Einstellungen falschen Typs zählen als Änderung. Mutationen:
   G01–G13 des Reviewers und drei zur Bedingung des Zurücksetzens; alle scheitern außer G07
   (wie X08) und G11 (die Momentaufnahme nach `context_for`: `context_for` schreibt nichts).
+- `tests/test_heal_config_link_v1530.py` (Paket G, 110 Tests): geschlossene Mengen wörtlich
+  (Gründe, Werte, Änderungsarten gegen `ChangeKind`, Akteur gegen `heal_engine.MODULE`,
+  Schlüssel des Plans); Normalisierung (alles Seltsame wird unbekannt, nie ein Fehler); Wahl
+  des Paars mit Deduplizierung, strikter Grenze und Gleichstand; ein Zufallstest mit 3000
+  Verläufen gegen simulierte **echte** Änderungszeiten; der Vergleich mit echten
+  `ConfigDiff`-Objekten und dem echten Anbieter des Configuration Managers; Auftragstests 14,
+  18, 19 über `assess` und `run_preflight`; Gleichheit der Sicherungsfakten mit
+  `heal_preflight._backup_facts`; ein Test mit dem echten Core: **null Router-Aufrufe**, nur der
+  Vergleich beim Anbieter, nichts geschrieben, kein Bus-Ereignis. Mutationsprüfung auf grünem
+  Stand: 85 Mutationen von `heal_config_link.py` und dem Plan in `heal_playbooks.py`, alle
+  scheitern (zehn erst nach neuen Tests: Adresse in einem Code, Live-Verweis mit
+  Sicherungskennung, Grund außerhalb der Menge, neueste nutzbare Version, nachträglich
+  veränderter Vergleich, seltsame Bereichseinträge, kurze Prüfsumme, geschlossener Core,
+  Grenze im async-Weg, alle geänderten Bereiche im Plan; eine elfte, Reihenfolge nach Zeit,
+  fiel vorher nur zufällig).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 
@@ -2404,6 +2540,11 @@ Attributen; nur api, Coordinator und Speicher sind echt); ob `primary_identity_s
 Fähigkeiten und Versionsindex auf der Flotte die Werte tragen, die die Tabelle in 7.1 annimmt;
 der Sammler über `hass.config_entries` mit echten Einträgen; die Aufrufer (Engine, Routen,
 Executor), die es noch nicht gibt.
+
+Nicht geprüft (Paket G): der Versionsindex einer echten Flotte (die Tests nehmen den echten
+Core mit dem Test-Anbieter und Attrappen der Versionen mit denselben Attributen); die Wahl des
+Paars nach einem echten Sprung der Wanduhr (Grenze oben in 7.2); eine Faktenquelle, die die
+Anbindung wirklich benutzt (gibt es noch nicht); Laufzeit des Vergleichs bei großen Archiven.
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (die C1-Tests laufen mit einem nachgebildeten `hass`, dem echten Network-Intelligence-Motor

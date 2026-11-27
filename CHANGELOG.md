@@ -545,6 +545,43 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
   nichts ändern (der Vorab-Check des Slots, ein Playbook, das die Entscheidung nicht liest,
   ein zusätzliches Speichern nach dem Zurücksetzen).
 
+### Self-Healing, Paket G (Anbindung Configuration Manager, noch nicht verdrahtet)
+
+Self-Healing liest jetzt, was der Configuration Manager über die Konfiguration weiß
+(`heal_config_link.py`). Nur lesen: **kein Router-Aufruf**, kein Wiederherstellen, kein
+Probelauf, nichts wird geschrieben, kein Audit-Eintrag. Die Engine ruft es noch nicht auf
+(die Anbindung an die Faktenquelle `HealFactsProvider` beschreibt die Doku). Für Benutzer
+ändert sich nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`,
+Abschnitt 7.2.
+
+- **Quelle:** der Versionsindex des Core im Speicher und der Vergleich zweier
+  **gespeicherter** Versionen (`async_compare` mit zwei Sicherungsverweisen, als Modul
+  `self_healing`). Die Live-Drift-Prüfung und der Probelauf des Wiederherstellens lesen den
+  Router und werden deshalb nicht benutzt.
+- **Letzte Änderung:** aus den Zeitpunkten, an denen jede Version gesehen wurde (angelegt und
+  bei einer Wiederholung wieder gesehen), ergibt sich die letzte Änderung des gespeicherten
+  Inhalts: die Version davor, die danach, und zwei Zeitgrenzen. Bei einem Vorfall zählen nur
+  Versionen, die **strikt vor** seinem Beginn gesehen wurden.
+- **Playbook F** bekommt echte Fakten: belegte Änderung, geänderte Bereiche, Risiko, Zeit der
+  Änderung und die Sicherung, die ein Wiederherstellen benutzen würde (bevorzugt das neueste
+  vollständige Archiv mit dem alten Inhalt). Der Plan nennt jetzt auch alle geänderten
+  Bereiche (`changed_areas`) und sagt `restore_executable: false`; er wird bei jeder Änderung
+  neu geprüft und führt nie aus (Auftragstests 14, 18, 19).
+- **Unbekannt bleibt unbekannt, mit Grund:** ein abgeschnittener Vergleich, ein nicht
+  vergleichbares Geheimnis, ein Bereich ohne Zuordnung, ein fehlgeschlagener Vergleich, ein
+  nicht geladener Index. „Keine Sicherung im Speicher“ ist ein bekanntes Nein, ein nicht
+  lesbarer Index ist unbekannt.
+- **Vorabprüfungen:** die Sicherungsfakten sind dieselben wie die des Sammlers aus Paket E
+  (Test). `service_config_unapplied` bleibt immer unbekannt
+  (`running_config_not_tracked`): der Configuration Manager kennt nur die gespeicherte
+  Konfiguration, nicht die laufende. Ein Dienst-Neustart bleibt dadurch gesperrt.
+- **Richtlinie:** `config_change_24h` ist nur „ja“, wenn ein Vergleich eine Änderung im
+  Bereich in den letzten 24 h belegt, sonst unbekannt, nie „nein“.
+- **Tests:** `tests/test_heal_config_link_v1530.py` (110 Tests), darunter ein Zufallstest
+  gegen die echten Änderungszeiten und ein Test mit dem echten Core, der **null
+  Router-Aufrufe** und keinen Schreibzugriff nachweist. Mutationsprüfung auf grünem Stand:
+  85 Mutationen, alle scheitern.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
