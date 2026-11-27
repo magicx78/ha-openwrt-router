@@ -262,7 +262,7 @@ def overview_body(engine: HealEngine, *, admin: bool, now: float) -> dict[str, A
                 "router_id": rid,
                 "loaded": engine.router_loaded(rid),
                 "configured_mode": store.settings.router(rid).mode.value,
-                "effective_mode": store.effective_mode(rid).value,
+                "effective_mode": engine.effective_mode(rid).value,
                 "held": hold is not None,
                 "hold": _hold(
                     own if own is not None and own.active(safe) else None, safe
@@ -411,7 +411,7 @@ class SelfHealingActionView(_View):
                 "router_hold": _hold(
                     engine.store.loop.hold_on(action.router_id, safe), safe
                 ),
-                "effective_mode": engine.store.effective_mode(action.router_id).value,
+                "effective_mode": engine.effective_mode(action.router_id).value,
             }
         except RequestError as err:
             return error_response(err)

@@ -280,6 +280,53 @@ keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwickl
   überlebt hatten) und 44 eigene an den neuen Regeln lassen jede mindestens einen Test
   scheitern.
 
+### Self-Healing, Paket X (Policy an Engine)
+
+Die Engine aus Paket C1 entscheidet jetzt mit der Richtlinie aus Paket D. Weiterhin nur
+Observe: nichts geht über PROPOSED hinaus, nichts ist ausführbar, kein Router-Aufruf, kein
+Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung. Entwicklerdoku:
+`docs/self-healing.md`, Abschnitte 2.1, 9 und 10.
+
+- **Entscheidung über `heal_policy.gate`:** der laufende Engine-Entscheider ist
+  `PolicyDecider`. Er baut aus dem Kontext der Engine einen `DecisionInput` und fragt den Gate;
+  der Datensatz trägt die Entscheidung des Gates (Ergebnis, Risiko, Wert, Regeln). Scheitert
+  die Richtlinie, bleibt es bei der Observe-Empfehlung, und der Fehler wird gezählt.
+- **Fakten:** gefüllt wird nur, was die Engine selbst kennt (Router-Identität und Rolle,
+  Sperre des Routers, Flotten-Pause, Wartung, ob der Vorfall Wurzel ist, Versuche, Schutzschalter,
+  Allowlist, Sicherheitsuhr). Alles andere bleibt unbekannt und zählt damit als hohes Risiko
+  bzw. zu wenig Hinweise. Für Paket E und F gibt es die Schnittstelle `HealFactsProvider`; die
+  Voreinstellung liefert nichts, und Fakten der Engine gehen immer vor.
+- **Modus:** Engine, Panel-Schnittstelle und Diagnose zeigen den Modus der Richtlinie; ein
+  gehaltener Router und eine pausierte Flotte zeigen Observe.
+- **Sperre aus C1:** schreibende Aktionen und Risiko 1 bleiben gesperrt; nur eine lesende
+  Empfehlung mit Risiko 0 ohne geplante Änderung kommt durch.
+- **Erklärung:** `plans` zeigt je Vorschlag Aktion, geplante Änderungen und die Erklärung der
+  Entscheidung (Wertzeilen, Regeln, Codes, deutsche Texte, bekannte und unbekannte Fakten).
+  Die Erklärung wird nicht gespeichert; `executable_now` ist darin immer falsch.
+- **Speicher:** der Schritt nach EXECUTING lehnt während einer Flotten-Pause ab
+  (`fleet_paused`), in derselben Reihenfolge wie `loop_verdict`.
+- **Review-Punkte a–k:**
+  - a: ein gelöster oder ignorierter Vorfall bekommt nie einen Datensatz.
+  - b: wiederholte Ereignisse zu einem schon erfassten Vorfall zählen nicht als Doppelte;
+    erfundene Ereignisse treiben keinen Zähler.
+  - c: zurückgestellte Vorfälle werden nicht bei jedem Takt neu gebaut; der Merkzettel ist
+    begrenzt.
+  - d: eine nach einem Neustart von Network Intelligence wiederverwendete Vorfall-Nummer ist
+    ein neuer Vorfall (`first_seen`); der alte Datensatz wird als erledigt geschlossen.
+  - e: ein übrig gebliebener `MagicMock`-Ordner macht den Testlauf rot und steht in der
+    Zusammenfassung.
+  - f: der Optionstext sagt in einfachen Worten, was das Modul tut.
+  - g: der Gate prüft seine eingefrorenen Eingaben neu und nimmt die Aktion aus seiner eigenen
+    Entscheidung.
+  - h: ein Versuch über der Grenze behält eine Abklingzeit mindestens so lang wie vorher.
+  - i: eine unbekannte letzte Ausführung sperrt eine schreibende Aktion (`interval_unknown`).
+  - j: Tests für die drei Mutationen, die das Review überlebt hatten.
+  - k: `ATTEMPT_WINDOW_S` steht nur noch im Modell.
+- Tests: `tests/test_heal_x_policy_v1530.py` (50), `tests/test_heal_x_engine_v1530.py` (74)
+  und `tests/test_heal_x_misc_v1530.py` (2). Mutationsprüfung: jede der 47 gezielten
+  Lockerungen lässt mindestens einen Test scheitern (zehn erst nach eigenen Tests für einen
+  Schutz, der hinter einem zweiten lag).
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)

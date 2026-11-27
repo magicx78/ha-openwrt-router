@@ -1,11 +1,12 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket X: Richtlinie in der Engine)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
      Paket D (Branch feature/self-healing-d, 2026-11-27, auf B und C1). Gebaut sind heal_model.py
      und heal_store.py (Paket B), die Kennung `rem_` in core_models.py, seit Paket C1
      heal_engine.py, heal_views.py, der Modulschalter `self_healing_enabled` und die
      Verdrahtung in __init__.py, config_flow.py und diagnostics.py, seit Paket D
-     heal_catalog.py und heal_policy.py (reine Logik, von der Engine noch nicht aufgerufen).
+     heal_catalog.py und heal_policy.py (reine Logik), seit Paket X (Branch
+     feature/self-healing-x) entscheidet die Engine über heal_policy.gate (PolicyDecider).
      Aussagen zu B, C1 und D sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
@@ -75,9 +76,13 @@ Datensatz (verzögert) und spätestens, wenn die Engine stoppt.
 Abschnitt 7) und die Richtlinie (`heal_policy.py`, Abschnitte 9 und 10): Risiko nach Kontext,
 Konfidenzwert, die fünf Ergebnisse, Modi und Allowlist, Schleifenschutz-Entscheidungen. Beide
 sind **reine Logik** ohne HA-Import, ohne Router-Aufruf, ohne Zeitquelle und ohne
-Ausführungsweg. Die Engine aus C1 ruft sie noch nicht auf (sie nutzt weiter
-`ObserveOnlyDecider`); das Einsetzen über die Schnittstelle `HealDecider` ist ein eigenes
-kleines Paket nach dem Merge von D. Auch Paket D ändert für Benutzer nichts.
+Ausführungsweg. Auch Paket D ändert für Benutzer nichts.
+
+**Stand heute (Paket X):** Die Engine entscheidet über die Richtlinie: `PolicyDecider`
+(Abschnitt 2.1) baut aus dem Kontext eines Datensatzes einen `DecisionInput` und fragt
+`heal_policy.gate`; der Datensatz trägt die Entscheidung des Gates selbst (Wert, Regeln,
+Risiko). Die Engine zeigt den Modus der Richtlinie (Hold und Flotten-Pause: Observe). Weiter
+als PROPOSED geht nichts, ausführbar ist nichts, kein Router-Aufruf kommt dazu.
 
 ## 2. Modulaufbau
 
@@ -91,7 +96,7 @@ frei).
 | `heal_model.py` | rein (ohne HA) | Zustände, die eine Übergangstabelle, `RemediationAction`, Neustartregel, Schleifenschutz-Daten, Einstellungen, Wartungsfenster; `transition()` ist der einzige Weg, einen Zustand zu ändern | **gebaut** (Paket B) |
 | `heal_store.py` | async | Store `openwrt_router.self_healing`, Schreiben vor dem Handeln, Grenzen | **gebaut** (Paket B) |
 | `heal_catalog.py` | rein | geschlossene Liste typisierter Aktionen, Parameterprüfung, Rollback-Aussage je Aktion | **gebaut** (Paket D) |
-| `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); die Engine (C1) ruft sie noch nicht auf – ein eigenes kleines Paket setzt einen `HealDecider` über `heal_policy` ein (Abschnitt 2.1), I ruft `record_outcome` |
+| `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); seit Paket X ruft die Engine `gate` und `effective_mode` über `PolicyDecider` (Abschnitt 2.1); `record_outcome` ruft später I |
 | `heal_preflight.py` | rein + async | Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf** | Plan (E) |
 | `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten | Plan (F, G) |
 | `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
@@ -162,8 +167,19 @@ Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intellige
    eine aktive Router-Kennung geben (`rtr_…`; ein verwaister Datensatz zählt nicht). Sonst
    nichts (`skipped_router_not_loaded`, `skipped_router_disabled`, `skipped_no_router_id`).
 8. Ein Datensatz je Öffnung: gibt es für Vorfall und Zahl der Wiedereröffnungen schon einen
-   Observe-Datensatz (in jedem Zustand, auch geschlossen), entsteht keiner (`deduplicated`).
-9. `RemediationAction.new` mit Aktion `observe.evaluate`, Parameter `{"incident": "inc-N"}`,
+   Observe-Datensatz (in jedem Zustand, auch geschlossen), entsteht keiner. Das wird **nicht**
+   gezählt (Paket X, b): sonst triebe jede gefälschte Meldung mit einer bekannten Kennung den
+   Zähler hoch. `deduplicated` zählt nur, wenn erst der Speicher ein Doppeltes erkennt, und
+   dann höchstens einmal je Öffnung (gemerkt in einer begrenzten Liste, 1000).
+   **Dieselbe Öffnung** heißt: gleiche Kennung, gleiche Zahl der Wiedereröffnungen und
+   `first_seen` des Vorfalls nicht später als der gespeicherte (Paket X, d). Network
+   Intelligence zählt nach einem Zurücksetzen seines Speichers wieder ab `inc-1`; ein Vorfall
+   mit derselben Kennung und späterem `first_seen` ist ein anderer. Offene Datensätze des
+   älteren schließen als `incident_gone`. Rückwärts verschoben (`first_seen` früher, wie
+   `_shift` nach einem Uhrsprung) bleibt es derselbe; fehlt die Zeit auf einer Seite (Datensätze
+   aus C1), entscheidet die Kennung.
+9. `RemediationAction.new` mit Aktion `observe.evaluate`, Parameter `{"incident": "inc-N",
+   "first_seen": …}` (`first_seen` auf Millisekunden, nur wenn Network Intelligence ihn hat),
    Vorfallkennung, -art und Zahl der Wiedereröffnungen, Zeitpunkt = Wanduhr der Engine in
    diesem Moment; dann `SelfHealingStore.add()`. Doppelte erkennt der Speicher (je Vorfall,
    je Aktion, je Router-Bauteil); eine Ablehnung wegen Grenzen wird gezählt
@@ -172,6 +188,12 @@ Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intellige
 10. Hat der Router schon einen offenen Datensatz eines **anderen** Vorfalls, wartet der neue
     Vorfall im Speicher der Engine (höchstens 200, die ältesten fallen heraus, `deferred`) und
     bekommt seinen Datensatz, sobald der erste geschlossen ist (Grund `incident_deferred`).
+    Die Engine sieht das am Halter des Router-Platzes vorher und baut dafür keinen Datensatz;
+    ein wartender Vorfall wird nicht erneut angesehen, solange derselbe Datensatz den Platz
+    hält (gemerkt je Öffnung, höchstens `SKIP_MEMO_MAX` = 1000, Paket X, c). 500 wartende
+    Vorfälle auf einem Router kosten den Takt so nur Nachschlagen im Speicher.
+    Gelöste, ignorierte oder bestätigte Vorfälle bekommen auf keinem Weg einen Datensatz, auch
+    wenn Network Intelligence sie noch als gemeldet führt (Paket X, a).
 11. Meldet Network Intelligence für den Router Wartung, bekommt der Datensatz die Markierung
     `in_maintenance`.
 12. DETECTED → ANALYZED mit der Ursache, **wie Network Intelligence sie meldet** (Code, Status,
@@ -200,24 +222,79 @@ Router ohne Datensatz ihrer Öffnung auf: derselbe Weg und dieselben Prüfungen 
 Lauf, Überspringen wird dabei nicht gezählt, kein Router-Aufruf, nur Speicher. Ein Eintrag, der
 beim Start noch in `SETUP_IN_PROGRESS` steht, wird mit dem nächsten Takt nachgeholt.
 
-**Schnittstelle für Paket D** (`heal_engine.py`): `HealDecider` ist ein Protocol mit
+**Entscheidungsschnittstelle** (`heal_engine.py`): `HealDecider` ist ein Protocol mit
 `propose(context: DecisionContext) -> Proposal`. `DecisionContext` (eingefroren) enthält den
 Datensatz, die Router-Kennung, eingestellten und geltenden Modus, Hold, Flotten-Pause,
-Modulschalter, Wartung, ob der Router geladen ist, Identitätsstatus und Rolle aus dem Core,
-die Ursache, die Quellenfamilien, `evidence_sufficient` und `write_path_available` (in 1.53.0
-immer `False`). `Proposal` trägt `Decision`, `Risk`, Playbook, Voraussetzungen, geplante
-Änderungen, erwartete Wirkung und `executable`. Der Entscheider muss rein sein (kein I/O, kein
-Router, keine Änderung am Speicher); er läuft im Event-Loop, auch für die Route `plans`.
-Ohne Paket D gilt `ObserveOnlyDecider`: `insufficient_evidence`, Score 0, Grund
-`no_decision_policy`, Risiko unbewertet (höchste Klasse). Die Engine prüft jeden Vorschlag:
-eine Ausnahme oder ein falscher Typ → der Standard (`decider_failed`); eine handelnde Empfehlung
-ohne bestätigte Ursache und mit weniger als zwei Quellenfamilien (nur zeitliche Nähe oder ein
-einzelner Hinweis) → `insufficient_evidence` mit `why_not = insufficient_evidence_sources` und
-Score höchstens 0,59 (`decision_clamped`). Ausführbar ist in 1.53.0 nichts: `plan_for` meldet
-immer `executable: false` und die Blocker als Codes (`no_write_path`, `mode_observe`,
-`router_held`, `fleet_paused`, `module_disabled`, `in_maintenance`,
-`identity_not_confirmed`, `router_not_loaded`, `insufficient_evidence_sources`,
-`nothing_executable`, `not_in_planning`).
+Modulschalter, Wartung (und ob sie bekannt ist), ob der Router geladen ist, Identitätsstatus
+und Rolle aus dem Core, die Ursache, die Quellenfamilien, ob der Vorfall jetzt eine Wurzel
+ist, `evidence_sufficient`, Kopien von Versuchen und Schutzschaltern, die Zeit der
+Sicherheitsuhr, die Allowlist und `write_path_available` (in 1.53.0 immer `False`).
+`Proposal` trägt `Decision`, `Risk`, Playbook, Voraussetzungen, geplante Änderungen,
+erwartete Wirkung, `executable`, die Katalogaktion (`action_type`) und eine Erklärung als
+reines JSON. Der Entscheider muss rein sein (kein I/O, kein Router, keine Änderung am
+Speicher); er läuft im Event-Loop, auch für die Route `plans`.
+
+**Die Richtlinie in der Engine (Paket X).** Die laufende Engine (`async_setup_self_healing`)
+benutzt `PolicyDecider`: er bildet den Kontext auf einen `heal_policy.DecisionInput` ab und
+ruft `heal_policy.gate` (nie `decide` direkt, nie eine eigene Entscheidung); der Vorschlag
+entsteht aus der Entscheidung des Gates (`to_model`, `risk.to_model`, `to_impact` bei
+schreibenden Aktionen) und ist **nie** ausführbar. Geplante Änderungen gibt es nur bei einer
+schreibenden Aktion mit handelndem Ergebnis (je Bauteil `kind`, Name, Aktion). Liefert das
+Gate keine Entscheidung (Modul aus), gilt `ObserveOnlyDecider` mit der Erklärung des Gates.
+Eine Ausnahme der Richtlinie zählt `decider_failed`, und `ObserveOnlyDecider` gilt
+(`insufficient_evidence`, Score 0, Grund `no_decision_policy`, Risiko unbewertet).
+`HealEngine(hass)` ohne Entscheider nutzt weiter `ObserveOnlyDecider` (Tests, Rückfall).
+
+Ein Ablauf: Wurzelvorfall → Datensatz DETECTED → ANALYZED (Ursache von Network
+Intelligence) → `context_for` (Speicher auf der Sicherheitsuhr, Core, Network Intelligence)
+→ `PolicyDecider.propose` → Faktenquelle → `DecisionInput` → `gate` → Entscheidung des
+Gates → `Proposal` → Prüfung der Engine (Typ, Klammer unten) → PROPOSED. Ohne Faktenquelle
+bewertet die Richtlinie die Aktion des Datensatzes selbst, `observe.evaluate` (Risiko 0,
+kein Router-Aufruf; die Buchungsparameter `incident`/`first_seen` werden zu `{}`, nur wenn sie
+genau die des Datensatzes sind): **Recommended**, nur lesend.
+
+**Welche Fakten die Engine füllt** (nur, was sie im Speicher hat; ihr Wert gilt immer, auch
+`None`, nie der einer Faktenquelle): Rolle (`gateway`, `access_point`, `unknown`, sonst
+unbekannt), Identität bestätigt (`identity_status == "confirmed"`), Wartung (Markierung oder
+Network Intelligence; ohne Network Intelligence unbekannt), Schutzschalter offen und frühere
+Fehlversuche in 24 h (`prior_failed_attempts`) aus dem `LoopState` auf der Sicherheitsuhr für
+die Schlüssel der Kandidatenaktion, Wurzel oder Kind, Vorfallart, Ursachenstufe, -status und
+-konfidenz, Zahl der Quellenfamilien. Modus, Hold, Flotten-Pause, Modulschalter und Allowlist
+gehen an das Gate, `guards_green` ist `None`. **Unbekannt bleiben** Erreichbarkeit, abhängige
+Router, Clients, Management-Weg, Funk-Uplink, Dienstfakten, Security-Erkennungen,
+gleichzeitige Reparatur, `diag_enabled`, Schwere, Frische, Befund am Ziel, Ursache außerhalb,
+zeitliche Nähe und Konfigurationsänderungen in 24 h. Ein geladener Router-Eintrag sagt nichts
+über die Erreichbarkeit und wird nicht als `reachable` gelesen.
+
+**Naht für E und F** (`HealFactsProvider`): ein Protocol mit `facts(context) -> HealFacts`.
+`HealFacts` (eingefroren, geprüft) nennt eine Kandidatenaktion mit Parametern (Standard: die
+des Datensatzes), einen `RiskContext`, `IncidentFacts`, `config_change_24h` und das Playbook.
+Standard ist `UnknownFactsProvider` (alles unbekannt). Die Quelle bekommt eine Kopie des
+Kontexts; eine Ausnahme (`facts_failed`), ein anderer Typ oder ein nachträglich veränderter
+Wert (`facts_invalid`, `HealFacts` wird mit `replace` neu geprüft) heißt „nichts bekannt“.
+Paket E (Vorabprüfungen) und F (Playbooks) setzen eine eigene Quelle ein:
+`HealEngine.decider = PolicyDecider(provider)`.
+
+**Die Klammer aus C1 bleibt für alles, was schreiben könnte:** eine handelnde Empfehlung ohne
+bestätigte Ursache und mit weniger als zwei Quellenfamilien (nur zeitliche Nähe oder ein
+einzelner Hinweis) → `insufficient_evidence` mit `why_not = insufficient_evidence_sources`
+und Score höchstens 0,59 (`decision_clamped`). Ausgenommen ist nur ein Schritt mit Risiko 0,
+der nichts schreibt: Aktion im Katalog, `writes` falsch, Grundrisiko 0, vorgeschlagenes
+Risiko 0, keine geplante Änderung (heute `observe.evaluate`). `diag.refresh` (Risiko 1) und
+jede unbekannte Aktion werden weiter geklammert.
+
+Ausführbar ist in 1.53.0 nichts: `plan_for` meldet immer `executable: false`, die Blocker als
+Codes (`no_write_path`, `mode_observe`, `router_held`, `fleet_paused`, `module_disabled`,
+`in_maintenance`, `identity_not_confirmed`, `router_not_loaded`,
+`insufficient_evidence_sources`, `nothing_executable`, `not_in_planning`) und seit Paket X
+die Erklärung der Richtlinie: Wertzeilen, ausgelöste Regeln, Codes, Risiko, die Antwort des
+Gates (Erlaubnis, Modus, Gründe; `executable_now` immer falsch), bekannte und unbekannte
+Fakten und die deutschen Texte aus `REASON_TEXT_DE`. Gespeichert wird beim Lesen nichts.
+
+**Modus:** Engine, Routen und Diagnose zeigen `HealEngine.effective_mode` =
+`heal_policy.effective_mode` für Risiko 1: Modul aus, Hold oder Flotten-Pause → Observe.
+`SelfHealingStore.effective_mode` (Freigabe statt Auto-Heal in der Pause) bleibt unverändert,
+die Engine liest ihn nicht mehr.
 
 **Leistung:** ereignisgetrieben plus ein Takt alle 5 Minuten; gelesen wird nur Speicher
 (Vorfälle von Network Intelligence, Registry des Core), geschrieben nur über das verzögerte
@@ -983,28 +1060,19 @@ Evidence), sicher außerhalb heißt Not Safe; eine ungeladene Dienst-Konfigurati
 Safe für den Neustart, unbekannt Insufficient Evidence, nur sicher `False` lässt ihn weiter.
 Die allgemeinen −20 für eine Konfigurationsänderung in 24 h bleiben daneben.
 
-**Stand heute (Paket D):** Risiko, Wert, Ergebnis und Erklärung sind gebaut und getestet
-(`tests/test_heal_policy_v1530.py`). Wer die Fakten füllt (Network Intelligence, Security
-Center, Topologie, Vorabprüfungen), ist offen (Anbindung an die Engine aus C1 als eigenes
-Paket, dazu E, F); bis dahin ist jedes unbekannte Feld „unbekannt“ und sperrt eine schreibende
-Aktion.
+**Stand heute (Paket D, X):** Risiko, Wert, Ergebnis und Erklärung sind gebaut und getestet
+(`tests/test_heal_policy_v1530.py`). Seit Paket X füllt die Engine, was sie im Speicher hat
+(Abschnitt 2.1); die übrigen Fakten (Security Center, Topologie, Vorabprüfungen) kommen mit E
+und F über `HealFactsProvider`. Bis dahin ist jedes unbekannte Feld „unbekannt“ und sperrt
+eine schreibende Aktion.
 
-**Anbindung an die Engine (eigenes Paket nach dem Merge von D, hier nicht gebaut):** Die
-Schnittstelle `HealDecider` aus C1 (Abschnitt 2.1) lässt sich mit den öffentlichen Funktionen
-bedienen: ein `PolicyDecider.propose(context)` baut aus `DecisionContext` einen
-`DecisionInput` (Aktion und Parameter aus dem Datensatz; `role`, Identität =
-`identity_status == "confirmed"`, `in_maintenance` in `RiskContext`), ruft `gate()` und gibt
-`Proposal(decision=d.to_model(), risk=d.risk.to_model(), expected_impact=d.to_impact(),
-executable=False)` zurück. Ein Probelauf außerhalb des Repos mit dieser Form läuft durch die
-Prüfung der Engine (`_decide`) ohne `decider_failed`. `DecisionContext` hat heute **nicht**:
-Erreichbarkeit, abhängige Router, Clients, Security-Erkennungen, gleichzeitige Reparatur,
-Schutzschalter, die Dienst- und Zielfakten, `diag_enabled`, alle `IncidentFacts`
-(Schwere, Ursachenstufe, Konfidenz, Wurzel, Frische, Zielzustand, Ursache außerhalb), den
-Verlauf der Versuche (`prior_failed_attempts` aus `LoopState` auf der Sicherheitsuhr) und
-Konfigurationsänderungen in 24 h. Ohne sie bleibt jede schreibende Aktion Insufficient
-Evidence – streng, aber ohne Nutzen. Die Engine nutzt heute `SelfHealingStore.effective_mode()`
-(bei Flotten-Pause Freigabe statt Observe); das Anbindungspaket soll den Modus über `gate()`
-bzw. `heal_policy.effective_mode` nehmen.
+**Anbindung an die Engine (Paket X, gebaut):** `heal_engine.PolicyDecider` (Abschnitt 2.1)
+bildet `DecisionContext` auf `DecisionInput` ab und ruft `gate()`; die Fakten, die die Engine
+im Speicher hat, sind gefüllt (Rolle, Identität, Wartung, Schutzschalter, Verlauf der
+Versuche, Wurzel, Ursache), alle übrigen bleiben unbekannt oder kommen von einer Faktenquelle
+(E, F). Der Modus kommt aus `heal_policy.effective_mode`. Eine schreibende Aktion bleibt damit
+heute Insufficient Evidence (fehlender Kontext), außer eine Faktenquelle liefert alles; dann
+höchstens Requires Approval, nie ausführbar.
 
 ## 10. Modi, Wartung, Schleifenschutz
 
@@ -1080,7 +1148,13 @@ ist, liest der Gate aus `inp.context.in_maintenance` – derselbe Fakt, den `dec
 und `LoopState`, auf der Sicherheitsuhr. Prüfreihenfolge, die erste passende gewinnt:
 
 1. `module_enabled`, `held` oder `fleet_paused` ist kein echter Wahrheitswert (etwa `None`)
-   → `none` (`gate_input_invalid`). Modul aus → `none` (`module_disabled`).
+   → `none` (`gate_input_invalid`). Modul aus → `none` (`module_disabled`). Danach prüft der
+   Gate seine eingefrorenen Eingaben noch einmal (`replace` von Kontext, Vorfall und Eingabe,
+   Paket X, g): ein mit `object.__setattr__` nachträglich gesetzter Wert → `none`
+   (`gate_input_invalid`); die Parameter werden dabei genau einmal gelesen, und die Aktion
+   nimmt der Gate aus seiner eigenen Entscheidung (`PolicyDecision.refusal`, Katalogeintrag
+   und Parameter der Entscheidung), nie ein zweites Mal aus der Eingabe. `decide()` prüft
+   ebenso neu und wirft `PolicyError`; `limits` wird auch neu geprüft.
 2. Aktion oder Parameter vom Katalog abgelehnt → `none` mit dem Code der Ablehnung; Aktion
    gesperrt (`action_disabled`) oder ihr Risiko **unter** dem Grundrisiko des Katalogs
    (`risk_below_catalog`) → `none`.
@@ -1106,7 +1180,7 @@ ausführen, kommt `not_in_release` dazu und `executable_now` bleibt falsch. In 1
 **DECIDED (Paket D):** eine pausierte Flotte heißt in der Richtlinie **Observe** (Regel des
 Eigentümers), strenger als `SelfHealingStore.effective_mode()` aus Paket B, der dann Freigabe
 liefert. Ein Test hält fest, dass die Richtlinie nie mehr erlaubt als der Speicher; die Engine
-(Anbindung nach C1, dann I) soll `heal_policy.effective_mode` bzw. `gate` benutzen. **DECIDED:** `diag.refresh`
+benutzt seit Paket X `heal_policy.effective_mode` und `gate`. **DECIDED:** `diag.refresh`
 hat Risiko 1, ist also im Modus Observe nur eine Empfehlung und in 1.53.0 nicht ausführbar.
 **DECIDED (Review PR #77):** der Gate nimmt den `DecisionInput` und entscheidet selbst
 (statt `PolicyDecision` unbaubar zu machen); ein Schalter, der kein echter Wahrheitswert ist,
@@ -1140,7 +1214,11 @@ Alle Zeiten sind Zeiten der **Sicherheitsuhr** (`safe_now`, Abschnitt 5.2), nie 
   3600, 7200 s. Eine laufende Abklingzeit wird **nie verkürzt** (`max(alt, neu)`), auch nicht
   wenn ältere Versuche die Spanne verlassen haben. Beim Buchen wird das Ergebnis auf „offen“
   (`None`) gesetzt. `book_attempt` bucht genau wie `heal_store._next_attempts` (ein Test
-  vergleicht beide über Zufallsfolgen).
+  vergleicht beide über Zufallsfolgen). Eine Buchung über die Grenze hinaus (die Prüfung
+  lehnt sie ab, die Funktion muss aber für sich sicher sein) verdoppelt weiter ab der Stufe
+  davor (Paket X, h): `recent` hält nur 3 Zeiten, ohne das würde die Wartezeit kürzer als nach
+  der alten festen Regel. Die Fenstergröße `ATTEMPT_WINDOW_S` steht nur in `heal_model.py`
+  (Paket X, k).
 - **Speicherformat** (`heal_store`, Minor 2, nur hinzugefügt): `recent` ist ein neues Feld des
   Versuchsdatensatzes. Eine Datei des bisherigen Stands (Minor 1, ohne `recent`) lädt weiter;
   ihre Versuche gelten streng als **zum Zeitpunkt des letzten Versuchs** (`last_at`, sonst
@@ -1149,11 +1227,16 @@ Alle Zeiten sind Zeiten der **Sicherheitsuhr** (`safe_now`, Abschnitt 5.2), nie 
   Schutzschalter auf irgendeinem Schlüssel (`breaker_open`, kein Zeitpunkt – nur ein
   Administrator schließt), Flotten-Pause (`fleet_paused`, bis zu ihrem Ende), Abklingzeit
   (`cooling_down`, bis zur spätesten), Versuche in den letzten 24 h aufgebraucht
-  (`max_attempts`, bis der älteste zählende die Spanne verlässt). Dieselbe Reihenfolge wie
-  `heal_store._attempt_refusal`.
+  (`max_attempts`, bis der älteste zählende die Spanne verlässt). Seit Paket X prüft
+  `heal_store._attempt_refusal` beim dauerhaften Schritt nach EXECUTING dieselben Punkte in
+  derselben Reihenfolge, auch die Flotten-Pause (vorher fehlte sie dort; ein Zufallstest
+  vergleicht beide).
 - **Mindestabstand** (`interval_verdict(action, last_run_at=…, safe_now=…)`): eine Aktion mit
   `min_interval_s` im Katalog (heute `diag.refresh`, 300 s) läuft je Router höchstens einmal in
-  diesem Abstand; sonst `min_interval` mit `retry_at`. `last_run_at` `None` heißt „lief hier nie“.
+  diesem Abstand; sonst `min_interval` mit `retry_at`. `last_run_at` `None` heißt „unbekannt“:
+  eine lesende Aktion darf, eine **schreibende** wird abgelehnt (`interval_unknown`), außer der
+  Aufrufer sagt ausdrücklich `never_ran=True` (Paket X, i; `never_ran` zusammen mit einer Zeit
+  ist ein `PolicyError`).
 - **Schutzschalter** (`record_outcome`, `OutcomeEvent`): **sofort offen** nach jedem Ausgang,
   der den Router sperrt (`not_resolved`, `partial`, `new_fault`, `unknown`, `escalated`,
   `stuck_released`), nach `rolled_back` und nach jedem unterbrochenen Versuch
@@ -1193,8 +1276,9 @@ pausiert und den Modus wirksam macht – als reine Funktionen, die neue Kopien z
 ruft sie niemand auf und nichts schreibt ihr Ergebnis in den Speicher (die Engine aus C1 geht
 nur bis PROPOSED; Anbindung als eigenes Paket, Ausgänge mit I). Am Speicher aus Paket B hat Paket D nur das gleitende Fenster, die nie verkürzte
 Abklingzeit und das offene Ergebnis beim Buchen geändert (Review PR #77, Punkte 6–8, Minor 2).
-Der dauerhafte Schritt des Speichers lehnt während einer Flotten-Pause noch **nicht** ab
-(siehe Abschnitt 15). Knöpfe und Schalter benutzen die Sperre noch nicht.
+Paket X: der dauerhafte Schritt des Speichers lehnt während einer Flotten-Pause ab
+(`fleet_paused`, für jedes Risiko, wie `loop_verdict`), und eine Buchung über die Grenze
+verkürzt die Wartezeit nicht. Knöpfe und Schalter benutzen die Sperre noch nicht.
 
 ## 11. HTTP-API, Entitäten, Ereignisse, Dienste
 
@@ -1275,10 +1359,12 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Nicht-Administrator oder Automation löst ein Schreiben aus | Guard, schreibende Routen nur für Administratoren, keine Dienste, nur lesende Entitäten | Plan |
 | Freigabe wiederholt, doppelt ausgeführt | einmalige Schreiberlaubnis, Idempotenz, Prüfsumme | **teilweise**: das Modell lässt EXECUTING nur einmal zu; der Speicher gibt bei gleicher Idempotenz-, Aktions-, Vorfall- oder Bauteilkennung die vorhandene Aktion zurück, lehnt eine Idempotenz-Kennung ohne Datensatz ab, und die Eingaben dieser Prüfung sind eingefroren |
 | Zustand ändert sich zwischen Freigabe und Ausführung | `binding_hash` mit Fingerabdruck, letzte Vorabprüfung | Funktion `binding_hash()` vorhanden; Bindung und Fingerabdruck sind nach der Planung unveränderlich |
-| Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; die Logik, die Schutzschalter öffnet und die Flotte pausiert, ist gebaut (`heal_policy.record_outcome`, Paket D), aber noch nicht aufgerufen (Anbindung an die Engine aus C1 als eigenes Paket, Ausgänge mit I) |
+| Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; die Logik, die Schutzschalter öffnet und die Flotte pausiert, ist gebaut (`heal_policy.record_outcome`, Paket D), aber noch nicht aufgerufen (Ausgänge mit I); seit Paket X lehnt der dauerhafte Schritt in der Flotten-Pause ab |
 | Automatischer Eingriff nur wegen zeitlicher Nähe | `temporal_only` muss ausdrücklich `False` sein, sonst Insufficient Evidence | **gebaut** in der Richtlinie (Abschnitt 9.3) |
 | Risiko 3 über einen allgemeinen Schalter oder eine Allowlist erlaubt | Risiko 3 nie erlaubt; Allowlist nur bis Risiko 1; der Gate prüft Katalog und Parameter selbst und trifft die Entscheidung selbst | **gebaut** in der Richtlinie (Abschnitt 10.1) |
-| Gefälschte oder veränderte Entscheidung (eigener Konstruktor, `dataclasses.replace`, andere Parameter als geprüft) | `gate()` nimmt nur den `DecisionInput` und ruft `decide()` selbst; eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst, mit erneuter Prüfung der Parameter; Parameter werden einmal gelesen und eingefroren | **gebaut** (Review PR #77, Abschnitte 7 und 10.1) |
+| Gefälschte oder veränderte Entscheidung (eigener Konstruktor, `dataclasses.replace`, andere Parameter als geprüft, nachträglich mit `object.__setattr__` geänderte Eingaben) | `gate()` nimmt nur den `DecisionInput`, prüft ihn mit `replace` neu und ruft `decide()` selbst; die Aktion kommt aus seiner eigenen Entscheidung; eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst, mit erneuter Prüfung der Parameter; Parameter werden einmal gelesen und eingefroren | **gebaut** (Review PR #77 und Paket X, Abschnitte 7 und 10.1) |
+| Faktenquelle (E/F) liefert falsche Typen oder lügt über Fakten der Engine | Typ genau `HealFacts`, erneute Prüfung, sonst „nichts bekannt“ (gezählt); Fakten der Engine gelten immer; Kopie des Kontexts; nichts geht über PROPOSED | **gebaut** (Paket X, Abschnitt 2.1) |
+| Gefälschte Meldungen treiben Zähler oder Rechenzeit | Meldung nur Auslöser; Wiederholung einer erfassten Öffnung nicht gezählt; wartende Vorfälle ohne neuen Datensatz je Takt, begrenzte Merkliste | **gebaut** (Paket X, Abschnitt 2.1) |
 | Unbekannter Kontext als harmlos gelesen | jedes unbekannte Feld zählt als HOCH und nicht bewertet; unbekannter Verlauf der Versuche sperrt ein Schreiben; Schalter des Gates (`held`, `fleet_paused`, `module_enabled`) müssen echte Wahrheitswerte sein | **gebaut** (Abschnitte 9 und 10.1) |
 | Versuchsgrenze am Fensterrand umgangen (zwei Versuche kurz vor und zwei kurz nach dem Ende eines festen Fensters) | gleitendes Fenster: höchstens N Versuche in jeder Spanne von 24 h; Abklingzeit nie verkürzt; offener Ausgang zählt nie als Erfolg | **gebaut** in Richtlinie und Speicher (Abschnitt 10.2) |
 | Ergebnis unbekannt, die nächste Aktion verschlimmert es | Hold bis zur Freigabe durch einen Administrator | **gebaut** im Speicher (Abschnitt 5.1) |
@@ -1297,7 +1383,8 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 |---|---|---|
 | **B** | Zustandsmaschine, Datenmodell, Speicher, Neustartregel, Grenzen | **gebaut** (PR #75) |
 | **C1** | Engine-Gerüst, Modulschalter, Verdrahtung, lesende Routen, Listener | **gebaut** (PR #78; nur Observe, Abschnitt 2.1 und 11) |
-| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik; die Engine ruft sie noch nicht auf (eigenes kleines Paket nach dem Merge: ein `HealDecider` über `heal_policy`, Abschnitt 2.1) | **dieser Stand** |
+| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik | **gebaut** (PR #77) |
+| **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **dieser Stand** |
 | E | Vorabprüfungen | offen |
 | F | Playbooks A–G; **muss `IncidentFacts.cause_outside_router` füllen** (Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt) – bis dahin ist er `None` und sperrt jeden Dienst-Neustart (Insufficient Evidence) | offen |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
@@ -1307,13 +1394,12 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | J | Tab im Dashboard | offen |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
 
-**Auflage für Paket I oder C2 (Review PR #77):** der dauerhafte Schritt des Speichers nach
-EXECUTING (`heal_store._attempt_refusal`) prüft heute Hold, Schutzschalter, Abklingzeit und
-Versuche, aber **keine Flotten-Pause**. Die Richtlinie lehnt in der Pause ab (`loop_verdict`,
-`fleet_paused`); damit der Speicher nie lockerer ist als die Richtlinie, muss dieser Schritt
-während einer Flotten-Pause ebenfalls ablehnen. Paket D hat das nicht geändert (erlaubt waren
-im Speicher nur die Punkte 6–8 des Reviews).
 | L | Gesamttests, Leistung, Sicherheitsprüfung, Doku | offen |
+
+**Auflage aus Review PR #77, erledigt mit Paket X:** der dauerhafte Schritt des Speichers nach
+EXECUTING (`heal_store._attempt_refusal`) prüft jetzt Hold, Schutzschalter, **Flotten-Pause**,
+Abklingzeit und Versuche, in der Reihenfolge von `loop_verdict`; der Speicher ist damit nie
+lockerer als die Richtlinie.
 
 Entscheidungen des Eigentümers:
 
@@ -1435,10 +1521,9 @@ Hold.
   jede der 76 lässt mindestens einen Test scheitern, darunter die zehn, die das Review
   überlebt hatten (M3, M5, M6, M8, M16, M19, M22, M23, M24, M26).
 
-Nicht geprüft (Paket D): wer die Fakten von `RiskContext` und `IncidentFacts` füllt (etwa
-`service_config_unapplied`, `service_dependant_routers`, `cause_outside_router`) und ob sie
-stimmen (Network Intelligence, Topologie, Security Center, Vorabprüfungen – Anbindung, E, F);
-die Aufrufe der Engine (Anbindung nach C1, dann I); dass die Router-Aufrufe der gesperrten Aktionen auf der Flotte
+Nicht geprüft (Paket D, X): wer die übrigen Fakten von `RiskContext` und `IncidentFacts`
+füllt (etwa `service_config_unapplied`, `service_dependant_routers`, `cause_outside_router`)
+und ob sie stimmen (Topologie, Security Center, Vorabprüfungen – E, F); die Ausgänge (I); dass die Router-Aufrufe der gesperrten Aktionen auf der Flotte
 so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Oberfläche.
 
 - `tests/test_heal_engine_v1530.py` (C1): Auftragstest 1 (Observe: ein Datensatz bis
@@ -1470,7 +1555,31 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   Obergrenze der Warteliste, Abbruch der Core-Bindung beim Stopp, nur eigene Planungs-
   Datensätze schließen, gescheitertes Entladen.
 - Nach dem ganzen Testlauf darf kein Verzeichnis `MagicMock` stehen (Hook
-  `pytest_sessionfinish` in `tests/conftest.py`, der Lauf scheitert sonst).
+  `pytest_sessionfinish` in `tests/conftest.py`, der Lauf scheitert sonst). Seit Paket X (e)
+  nennt ein roter Abschnitt das Verzeichnis, und die letzte Zeile lautet „N passed, 1 stray
+  MagicMock directory (run failed)“ statt nur „N passed“.
+- `tests/test_heal_x_policy_v1530.py`, `tests/test_heal_x_engine_v1530.py`,
+  `tests/test_heal_x_misc_v1530.py` (Paket X): der Gate prüft nachträglich veränderte
+  Eingaben neu und liest Parameter genau einmal (g); Buchungen über die Grenze nie kürzer als
+  die alte Regel, Zufallsvergleich (h); unbekannter letzter Lauf sperrt Schreibendes (i); die
+  drei überlebenden Mutationen des Reviews (gleiche Kopie eines Katalogeintrags,
+  `PolicyLimits`-Unterklasse ohne Prüfung, Fensterrand unter einer Sekunde) (j); eine
+  Definition von `ATTEMPT_WINDOW_S` per AST (k); Flotten-Pause im dauerhaften Schritt und
+  Vergleich mit `loop_verdict` über Zufallsfolgen. Engine mit echter Richtlinie: Standard der
+  laufenden Engine, gefüllte und unbekannte Fakten, Fakten der Engine schlagen die Quelle,
+  Schutzschalter und Fehlversuche aus dem `LoopState`, günstige Quelle für `service.restart`
+  höchstens Requires Approval, 13 feindliche Quellen und 6 Kandidaten (nichts über PROPOSED),
+  Rückfall bei Fehler der Richtlinie, Hold und Pause zeigen Observe (Engine, Übersicht,
+  Diagnose), die Klammer in beiden Richtungen, die Erklärung in `plans` (und über die echte
+  Route) ohne Speichern, echter Network-Intelligence-Motor Ende zu Ende, null zusätzliche
+  Router-Aufrufe; Punkte a–d der Engine; Hook (e) in einem Kindprozess; Optionstext (f).
+- **Mutationsprüfung Paket X:** 47 gezielte Lockerungen an `heal_policy.py`,
+  `heal_store.py` und `heal_engine.py` (Neuprüfung im Gate, Ablehnungsweg, Abklingzeit über
+  der Grenze, unbekannter letzter Lauf, Flotten-Pause im Speicher, Vorrang der Engine-Fakten,
+  Abbildung der Wartung, Klammer, Punkte a–d, Erklärung). Im ersten Lauf überlebten zehn,
+  alle hinter einem zweiten Schutz (z. B. Merkzettel und Vorprüfung des Slots in c, Reconcile
+  und `_close_stale` in d, eine Klammer-Bedingung, die der heutige Katalog nie verletzt); für
+  jede kam ein eigener Test dazu, danach ließ jede der 47 mindestens einen Test scheitern.
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 

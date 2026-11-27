@@ -257,7 +257,8 @@ async def test_holds_and_the_fleet_pause_are_shown(world: World, http: Http) -> 
     assert routers[R1]["effective_mode"] == "observe"
     assert routers[R2]["held"] is False
     assert routers[R2]["configured_mode"] == "auto_heal"
-    assert routers[R2]["effective_mode"] == "approval"
+    # the policy's mode (package X): a paused fleet is Observe for Risk 1+
+    assert routers[R2]["effective_mode"] == "observe"
     assert body["fleet"]["paused"] is True
     assert body["fleet"]["pause_reason"] == "store_lost"
     assert body["fleet"]["pause_remaining_s"] == 3600
