@@ -1,6 +1,6 @@
 """Self-Healing: post-remediation verification (package H).
 
-Developer document: ``docs/self-healing.md`` §7.2. Release 1.53.0 executes
+Developer document: ``docs/self-healing.md`` §7.3. Release 1.53.0 executes
 nothing; here the verification watches whether an incident clears BY
 ITSELF, the data the owner needs before any write is allowed. Nothing in
 this module calls a router.
@@ -61,14 +61,14 @@ between the snapshots (else ``wall_clock_jump``).
 
 **After the verdict.** :func:`planned_end` maps a final result by its
 verdict key (never by class) onto heal_model's transition table; only
-``repaired_by_action`` resolves a record (docs §7.2, for the wiring).
+``repaired_by_action`` resolves a record (docs §7.3, for the wiring).
 
 **Binding.** A result is bound to the action id, action type, params, the
 call result, both snapshots and both times (``binding``, sha256). Every
 derived field is ``init=False``; :meth:`VerifyResult.check_binding`
 re-derives everything first. There is no secret: only INCONSISTENT edits
 are caught; an edit of inputs and derived fields alike (a fully consistent
-forgery) is not (same limit as ``heal_preflight``; docs §7.2).
+forgery) is not (same limit as ``heal_preflight``; docs §7.3).
 
 **No names.** ``to_dict`` and ``to_verification`` carry counts, closed
 codes and ids only; service and interface names stay inside the snapshot
@@ -104,7 +104,7 @@ from .heal_preflight import STALE_POLLS, Fact, FactSources, known, unknown
 _LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Pinned constants (docs §7.2)
+# Pinned constants (docs §7.3)
 # ---------------------------------------------------------------------------
 
 # Nothing is judged before this many safety-clock seconds after the start:
@@ -425,7 +425,7 @@ class VerifySnapshot:
     between two snapshots (the resolve age is wall time). Each fact is a
     ``heal_preflight.Fact`` (known, or unknown with a reason) whose
     ``age_s`` says how long before ``taken_at`` it was measured; a fact
-    without an age never counts (docs §7.2). Shapes:
+    without an age never counts (docs §7.3). Shapes:
     ``services``/``interfaces`` ((name, running/up), ...) with unique names;
     ``radio_clients`` ((AP interface, clients), ...);
     ``service_pids`` ((service, pid), ...) of running instances; ``wan``
@@ -931,7 +931,7 @@ def _rebooted(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
 def _no_reboot(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
     """A router whose uptime went back rebooted: an outage nobody planned
     (order test 23). Misses a reboot only if the router was up for less
-    than the time between the snapshots before (docs §7.2)."""
+    than the time between the snapshots before (docs §7.3)."""
     cid = "no_unplanned_reboot"
     miss = _missing(cid, b, a, ("uptime_s",))
     if miss is not None:
@@ -1438,7 +1438,7 @@ class VerifyResult:
     def _untampered(self) -> bool:
         """The derived fields are what the stored inputs give again.
 
-        Catches INCONSISTENT edits only (docs §7.2): an input or a derived
+        Catches INCONSISTENT edits only (docs §7.3): an input or a derived
         field changed behind the frozen dataclass's back, a shared Fact
         changed in place, a pinned constant changed at run time. An edit of
         inputs and every derived field alike is consistent and not seen.
@@ -1549,7 +1549,7 @@ class VerifyResult:
         """The record's ``verification`` part (heal_model), as far as the
         model can hold it: class, before/after per criterion, checks.
 
-        NOT in the model (docs §7.2, for package I / C2 to store): the
+        NOT in the model (docs §7.3, for package I / C2 to store): the
         attribution, ``final``, ``escalate``, ``credited_to_action``, the
         verdict key, the binding digest and the two safety times.
         """
@@ -1596,7 +1596,7 @@ def verify(
 
 
 # ---------------------------------------------------------------------------
-# Where a record goes with a final result (for the later wiring, docs §7.2)
+# Where a record goes with a final result (for the later wiring, docs §7.3)
 # ---------------------------------------------------------------------------
 
 

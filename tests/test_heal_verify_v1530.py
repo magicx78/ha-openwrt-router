@@ -1466,7 +1466,7 @@ def test_replace_re_derives() -> None:
 
 
 def test_known_limit_a_fully_consistent_forgery_is_not_seen() -> None:
-    """Documented limit (docs §7.2): no secret, so inputs and derived
+    """Documented limit (docs §7.3): no secret, so inputs and derived
     fields changed alike are consistent and pass."""
     r = run(a=after(management_path=False))
     assert r.result is VR.NEW_FAULT

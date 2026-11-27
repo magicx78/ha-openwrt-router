@@ -2036,7 +2036,16 @@ class Withheld:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DriftPlan:
-    """Playbook F's plan shape: a dry run and manual steps, never an execution."""
+    """Playbook F's plan shape: a dry run and manual steps, never an execution.
+
+    ``version_id``: the stored version a restore would use (package G: the
+    newest restorable archive of the content before the change).
+    ``changed_areas``: every area the stored comparison shows as changed;
+    ``relevant_areas`` the ones the incident touches. ``restore_executable``
+    is always False: there is no restore executor (the Configuration
+    Manager's provider only runs a dry run), so a restore is by hand only.
+    Every field is validated again on ``dataclasses.replace`` (package G).
+    """
 
     version_id: str | None
     version_known: bool | None
@@ -2046,13 +2055,53 @@ class DriftPlan:
     restore_check: str | None
     backup_present: bool | None
     manual_steps: tuple[str, ...]
+    changed_areas: tuple[str, ...] = ()
     requires_explicit_approval: bool = True
     executes: bool = False
+    restore_executable: bool = False
 
     def __post_init__(self) -> None:
-        """A plan never executes and always needs an explicit approval."""
+        """A plan never executes, never restores, always needs an approval."""
         if self.executes is not False or self.requires_explicit_approval is not True:
             raise PlaybookError("plan_must_not_execute")
+        if self.restore_executable is not False:
+            raise PlaybookError("restore_not_executable")
+        if not _plan_sound(self):
+            raise PlaybookError("invalid_plan")
+
+
+def _areas_sound(value: Any) -> bool:
+    """A sorted tuple of distinct configuration areas."""
+    return (
+        type(value) is tuple
+        and all(type(a) is str and a in CONFIG_AREAS for a in value)
+        and list(value) == sorted(set(value))
+    )
+
+
+def _plan_sound(plan: DriftPlan) -> bool:
+    """Every field of ``plan`` inside its closed set (package G)."""
+    spec = hc.CATALOG["config.restore"].params[0]
+    if plan.version_id is not None and not spec.accepts(plan.version_id):
+        return False
+    for flag in (plan.version_known, plan.backup_present):
+        if flag is not None and type(flag) is not bool:
+            return False
+    if not (_areas_sound(plan.changed_areas) and _areas_sound(plan.relevant_areas)):
+        return False
+    if not set(plan.relevant_areas) <= set(plan.changed_areas):
+        return False
+    if plan.critical_areas != tuple(
+        a for a in plan.relevant_areas if a in CRITICAL_CONFIG_AREAS
+    ):
+        return False
+    if plan.change_risk is not None and _member(plan.change_risk, CHANGE_RISKS) is None:
+        return False
+    if plan.restore_check is not None and (
+        _member(plan.restore_check, RESTORE_CHECKS) is None
+    ):
+        return False
+    return type(plan.manual_steps) is tuple and plan.manual_steps == DRIFT_MANUAL_STEPS
 
 
 DRIFT_MANUAL_STEPS: Final = (
@@ -2154,6 +2203,7 @@ class PlaybookFinding:
             else {
                 "version_id": self.plan.version_id,
                 "version_known": self.plan.version_known,
+                "changed_areas": list(self.plan.changed_areas),
                 "relevant_areas": list(self.plan.relevant_areas),
                 "critical_areas": list(self.plan.critical_areas),
                 "change_risk": self.plan.change_risk,
@@ -2162,6 +2212,7 @@ class PlaybookFinding:
                 "manual_steps": list(self.plan.manual_steps),
                 "requires_explicit_approval": self.plan.requires_explicit_approval,
                 "executes": self.plan.executes,
+                "restore_executable": self.plan.restore_executable,
             },
         }
 
@@ -3236,6 +3287,7 @@ def _analyze_drift(run: _Run) -> PlaybookFinding:
     plan = DriftPlan(
         version_id=cfg.version_id,
         version_known=cfg.version_known,
+        changed_areas=tuple(sorted(cfg.changed_areas or frozenset())),
         relevant_areas=relevant,
         critical_areas=critical,
         change_risk=cfg.change_risk,
