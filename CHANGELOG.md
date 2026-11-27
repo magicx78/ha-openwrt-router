@@ -545,6 +545,44 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
   nichts ändern (der Vorab-Check des Slots, ein Playbook, das die Entscheidung nicht liest,
   ein zusätzliches Speichern nach dem Zurücksetzen).
 
+### Self-Healing, Paket H
+
+Die Prüfung nach einer Reparatur (`heal_verify.py`): Sie entscheidet aus gemessenen Fakten
+vor und nach einer Aktion, ob es besser wurde. Reine Logik ohne HA-Import, ohne Uhr und
+**ohne Router-Aufruf**; die Engine ruft sie noch nicht auf, Modell und Speicher sind
+unverändert. Für Benutzer ändert sich nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku:
+`docs/self-healing.md`, Abschnitt 7.2.
+
+- **Fünf Klassen** (die des Modells): behoben, teilweise, nicht behoben, unbekannt, neue
+  Störung. **Unbekannt ist nie Erfolg:** fehlt ein Fakt oder ist er veraltet, ist das
+  Ergebnis „unbekannt“. **Jede gemessene Verschlechterung gewinnt** („neue Störung“, zur
+  Eskalation markiert): Verwaltungsweg verloren, mehr Clients weg als erlaubt (30 %,
+  mindestens 2), ein Dienst oder eine Schnittstelle aus, WAN verloren, weniger
+  AP-Schnittstellen, mehr abhängige Router gestört, ein neuer Vorfall, ein ungeplanter
+  Neustart des Routers.
+- **„Behoben“** nur, wenn Network Intelligence den Vorfall nach dem Start gemessen gelöst hat
+  (`quiet` nur mit Log-Abdeckung), die Wirkung der Aktion gesehen ist (beim Dienst-Neustart
+  eine neue PID; Funk-Neustart, Schnittstelle ab/an und Wiederherstellen sind nicht messbar
+  und werden deshalb nie „behoben“) und nichts schlechter oder unbekannt ist.
+- **„Von selbst behoben“:** ohne ausgeführtes Schreiben (lesende Aktion, kein Aufruf,
+  abgelehnt) wird nie eine Aktion gutgeschrieben; in 1.53.0 ist das das einzige gute Ergebnis.
+  Ein Aufruf mit unklarem Ausgang wird nie gutgeschrieben.
+- **Zeit auf der Sicherheitsuhr:** Wartezeit 600 s, Höchstwartezeit 3600 s; Momentaufnahme
+  davor höchstens 300 s, danach höchstens 180 s alt. Ein Sprung der Wanduhr ändert das nicht.
+- **Bindung:** das Ergebnis ist an Aktion, Typ, Parameter und beide Momentaufnahmen gebunden;
+  eine spätere Änderung wird erkannt. Eine in sich stimmige Fälschung aller Felder wird nicht
+  erkannt (wie bei den Vorabprüfungen, dokumentiert).
+- **Keine Namen im Ergebnis:** nur Kennungen, Codes und Zähler.
+- **Sammler** für die Momentaufnahme nur aus dem Speicher (letzter Poll, Network
+  Intelligence); wirft nie, nennt für jedes Unbekannte einen Grund.
+- Tests: 253 neue (Auftragstests 15, 16, 17, 21, 23; jede Klasse; unbekannt bei jedem
+  Kriterium; jeder Wächter; alle Zeitgrenzen; 10 000 Zufallsfälle gegen ein eigenes Orakel;
+  null Router-Aufrufe mit dem echten api und Coordinator). Mutationsprüfung: 78 Lockerungen;
+  77 lassen einen Test scheitern, eine ist gleichwertig.
+- **Für ein späteres Paket (I/C2):** das Modell hat keine Felder für Zuordnung, Endgültigkeit,
+  Eskalation, Bindung, die Sicherheitszeiten und die Momentaufnahme davor; der Ablauf der
+  Anbindung steht in Abschnitt 7.2.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
