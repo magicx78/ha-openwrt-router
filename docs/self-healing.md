@@ -1,15 +1,16 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine; Paket H: Prüfung nach der Reparatur)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
-     Paket X (Branch feature/self-healing-x, 2026-11-27, auf B, C1, D, E und F). Gebaut sind heal_model.py
+     Paket H (Branch feature/self-healing-h, 2026-11-27, auf B, C1, D, E, F und X). Gebaut sind heal_model.py
      und heal_store.py (Paket B), die Kennung `rem_` in core_models.py, seit Paket C1
      heal_engine.py, heal_views.py, der Modulschalter `self_healing_enabled` und die
      Verdrahtung in __init__.py, config_flow.py und diagnostics.py, seit Paket D
      heal_catalog.py und heal_policy.py (reine Logik), seit Paket E heal_preflight.py
      (Vorabprüfungen und Sammler, nicht angebunden), seit Paket F heal_playbooks.py (reine
      Logik, noch nicht aufgerufen), seit Paket X (Branch feature/self-healing-x) entscheidet
-     die Engine über heal_policy.gate (PolicyDecider).
-     Aussagen zu B, C1, D, E, F und X sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     die Engine über heal_policy.gate (PolicyDecider), seit Paket H heal_verify.py (Prüfung
+     nach einer Reparatur mit Sammler, reine Logik, nicht angebunden).
+     Aussagen zu B, C1, D, E, F, X und H sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
      tests/full_router_kit.py); nicht auf Routern,
@@ -100,6 +101,14 @@ einen Dienst-Neustart (dnsmasq, odhcpd) zur Freigabe vor; alles andere ist eine 
 Reine Logik, kein Router-Aufruf, von der Engine noch nicht aufgerufen; für Benutzer ändert
 sich nichts.
 
+**Stand heute (Paket H):** Dazu kommt die Prüfung nach einer Reparatur (`heal_verify.py`,
+Abschnitt 7.2): Sie vergleicht zwei Momentaufnahmen (vor der Aktion, nach der Wartezeit) und
+ordnet das Ergebnis in eine der fünf Klassen des Modells ein. Unbekanntes zählt nie als
+Erfolg, jede gemessene Verschlechterung gewinnt, und ohne ausgeführtes Schreiben ist das
+einzige gute Ergebnis „von selbst behoben“. Ein Sammler baut die Momentaufnahme nur aus dem
+Speicher (kein Router-Aufruf). Reine Logik, von der Engine noch nicht aufgerufen; für Benutzer
+ändert sich nichts.
+
 ## 2. Modulaufbau
 
 Geplant ist **eine** Instanz für die ganze Flotte je HA-Installation, verdrahtet wie Security
@@ -115,7 +124,7 @@ frei).
 | `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); seit Paket X ruft die Engine `gate` und `effective_mode` über `PolicyDecider` (Abschnitt 2.1); `record_outcome` ruft später I |
 | `heal_preflight.py` | rein + Sammler | dreizehn Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf**; Fakten für `RiskContext`/`IncidentFacts` | **gebaut** (Paket E, Abschnitt 7.1); Engine und Routen rufen sie noch nicht auf |
 | `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten, Matcher (Vorfall → höchstens ein Playbook), Analyse je Playbook, `cause_outside_router`, deutsche Texte | **gebaut** (Paket F, Abschnitt 8); die Engine ruft es noch nicht auf; die tiefe Anbindung an den Configuration Manager (F-Plan) ist Paket G |
-| `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
+| `heal_verify.py` | rein + Sammler | Prüfung nach einer Reparatur: die fünf Ergebnisklassen aus zwei Momentaufnahmen, Zuordnung zur Aktion, Wartezeiten auf der Sicherheitsuhr, Bindung; Sammler nur aus dem Speicher, **kein Router-Aufruf** | **gebaut** (Paket H, Abschnitt 7.2); die Engine ruft es noch nicht auf (Anbindung I/C2) |
 | `heal_engine.py` | async | Ablauf, Sperren, Warteschlange, Zeitgeber, Neustart | **gebaut** bis PROPOSED (C1, Abschnitt 2.1); Ausführen, Sperren, Warteschlange Plan (C2, I) |
 | `heal_views.py` | HTTP | Routen (Abschnitt 11) | **gebaut**: fünf lesende Routen (C1); schreibende Plan (C2) |
 | `heal_entities.py` | HA | nur lesende Entitäten | Plan (K) |
@@ -1219,6 +1228,172 @@ Paket; heute das private `_acl_blocked` hinter `_safe_call`).
   Endzustände); für die Flotten-Grenze die, die eine Sperre halten oder freigegeben sind.
 - Konfiguration ändernd ist im Katalog v1 nur `config.restore`.
 
+### 7.2 Prüfung nach der Reparatur (`heal_verify.py`, Paket H)
+
+**Stand heute:** gebaut als reine Logik mit einem Sammler, der nur liest. Kein HA-Import, kein
+Router-Aufruf, keine Zeitquelle (die Zeiten kommen als Sicherheitszeit vom Aufrufer), kein
+`await`. Die Engine ruft es noch nicht auf; Modell und Speicher sind unverändert.
+
+**Die fünf Klassen** sind `heal_model.VerificationResult` (gleich Auftrag §11 und Entwurf):
+`resolved` (erfolgreich behoben), `partial` (teilweise), `not_resolved` (nicht behoben),
+`unknown` (Zustand unbekannt), `new_fault` (neue Störung verursacht). Die Regeln, in dieser
+Reihenfolge (`_decide`):
+
+1. **`new_fault`**: irgendein Kriterium ist gemessen **schlechter** (`worse`). Gewinnt immer,
+   auch gegen eine Verbesserung und gegen Unbekanntes; `escalate` ist dann wahr und das
+   Ergebnis endgültig. Das Modul meldet nur, eskalieren muss I.
+2. **`unknown`**: irgendein Kriterium ist unbekannt. Ebenso, wenn die Zeit- oder Beweislage
+   kein Urteil erlaubt (Torprüfung unten), und wenn der Vorfall gelöst ist, die **Wirkung** der
+   Aktion aber nicht gesehen wurde (`action_effect_not_seen`: nie der Aktion gutgeschrieben).
+3. **`not_resolved`**: die Wirkung einer ausgeführten Aktion ist nicht gesehen und der Vorfall
+   nicht gelöst; oder weder der Vorfall noch ein Zielzustand hat sich verbessert.
+4. **`resolved`**: der Vorfall ist **gemessen** gelöst (`incident_cleared` = `improved`), jeder
+   Zielzustand ist verbessert oder gehalten, jede Wirkung gesehen, nichts schlechter, nichts
+   unbekannt.
+5. **`partial`**: sonst, wenn der Vorfall oder ein Zielzustand sich verbessert hat.
+
+**Zuordnung** (`attribution`): `action` nur bei einer schreibenden Katalogaktion mit
+Aufrufergebnis `ok`; `action_unconfirmed` bei `inconclusive`; `no_write` bei einer lesenden
+Aktion, ohne Aufruf (`None`) oder bei `rejected` (vor jeder Änderung abgelehnt). Gutgeschrieben
+(`credited_to_action`) wird nur `resolved` mit `action`. **„Von selbst behoben“** ist keine
+sechste Klasse, sondern `resolved` mit `no_write` (`verdict_key` `cleared_by_itself`); es ist
+das **einzige** gute Ergebnis ohne ausgeführtes Schreiben, und in 1.53.0 (nur
+`observe.evaluate` ausführbar) das einzige gute Ergebnis überhaupt (Test).
+`verdict_key` ist eine von neun festen Kennungen für die Anzeige: `repaired_by_action`,
+`repaired_execution_unconfirmed`, `cleared_by_itself`, `partially_repaired`,
+`action_did_not_help`, `not_cleared`, `worse_after_action`, `worse_without_action`,
+`cannot_tell`.
+
+**Kriterien** (`criteria_for`). Jedes hat eine Rolle: das Hauptkriterium, Zielzustände,
+Wirkungen und Wächter. Ohne ausgeführtes Schreiben (oder bei einer lesenden Aktion) gelten nur
+das Hauptkriterium und alle neun Wächter.
+
+| Aktion (ausgeführt) | Zielzustand | Wirkung | Wächter |
+|---|---|---|---|
+| `service.restart` | `service_running` (der Dienst läuft) | `service_restarted` (neue PID, keine alte mehr) | alle neun; der Zieldienst zählt nicht in `services_still_running` |
+| `wifi.radio_restart` | `radio_aps_present` (AP-Schnittstellen nicht weniger) | `radio_restarted`: **immer unbekannt** (nicht messbar) | ohne `ap_interfaces_kept` |
+| `interface.cycle` | `interface_up` | `interface_cycled`: **immer unbekannt** | alle neun; die Zielschnittstelle zählt nicht in `interfaces_still_up` |
+| `router.reboot` | – | `router_rebooted` (Laufzeit kleiner als vorher) | ohne `no_unplanned_reboot` |
+| `config.restore` | – | `config_matches_version`: **immer unbekannt** (die geladene Version wird nicht erfasst) | alle neun |
+
+Hauptkriterium `incident_cleared`: der Ziel-Vorfall war vorher offen (`active` oder
+`acknowledged`), ist nachher `resolved`, wurde nicht wieder geöffnet (`reopen_count` gleich),
+die Lösung liegt nach dem Start (Sicherheitszeit der Momentaufnahme minus Alter der Lösung ≥
+Start) und ist **gemessen**: Grund `cleared`, oder `quiet` nur mit Log-Abdeckung (`log_ok`
+wahr). `no_data`, `router_removed`, jeder andere Grund, ein ignorierter Vorfall oder ein
+unbekannter Zustand ergeben `unknown`; noch offen oder wieder geöffnet ergibt `not_improved`;
+ein kleinerer `reopen_count` nachher ist `unknown` (`incident_history_inconsistent`).
+
+Die neun Wächter (schlechter heißt `new_fault`):
+
+| Wächter | schlechter, wenn |
+|---|---|
+| `management_path` | vorher erreichbar (frischer, erfolgreicher Poll), nachher nicht (Auftragstest 21) |
+| `clients_within_tolerance` | `vorher − nachher > max(2, vorher × 30 // 100)` Clients |
+| `services_still_running` | ein vorher laufender Dienst (außer dem Ziel) läuft nicht mehr oder fehlt |
+| `interfaces_still_up` | eine vorher aktive Schnittstelle (außer dem Ziel) ist ab oder fehlt |
+| `wan_not_lost` | WAN vorher `up`, nachher `down` oder `absent`; `down` ↔ `absent` ist unbekannt |
+| `ap_interfaces_kept` | weniger AP-Schnittstellen |
+| `dependants_not_degraded` | mehr abhängige Router (hinter diesem in der Topologie) mit aktivem Wurzelvorfall |
+| `no_new_incidents` | eine neue Kennung unter den aktiven Wurzelvorfällen `warning`/`critical` dieses Routers (ohne den Ziel-Vorfall) |
+| `no_unplanned_reboot` | Laufzeit nachher kleiner als vorher (Auftragstest 23) |
+
+Ein Wächter, der vorher schon schlecht war und es bleibt, verhindert `resolved` nicht
+(Verwaltungsweg und WAN beide Male `down`: `not_improved`; gleiche Zähler: `held`). **Jedes**
+Kriterium,
+dessen Fakt auf einer Seite unbekannt ist, ist `unknown` (Grund `<fakt>_unknown_<seite>`), und
+damit die ganze Prüfung (Test über jedes Kriterium, jede Aktion und beide Seiten).
+
+**Zeit** (Sicherheitsuhr, Abschnitt 5.2; das Modul liest keine Uhr). `started_at` ist die
+Sicherheitszeit des Endes der Aktion (beim Beobachten: der Beginn).
+
+| Konstante | Wert | Bedeutung |
+|---|---|---|
+| `VERIFY_SETTLE_S` | 600 s | vor `started_at + 600` gibt es kein Urteil (`settle_time_not_reached`, auch nicht bei einer Verschlechterung); eine Momentaufnahme davor ist `after_snapshot_too_early` |
+| `VERIFY_MAX_WAIT_S` | 3600 s | ab `started_at + 3600` wird `unknown`, `not_resolved` und `partial` **endgültig**; eine Momentaufnahme danach ist `after_snapshot_beyond_max_wait` |
+| `BEFORE_MAX_AGE_S` | 300 s | die Momentaufnahme davor ist höchstens so alt (bei Start), nie nach dem Start |
+| `AFTER_MAX_AGE_S` | 180 s | die Momentaufnahme danach ist beim Urteil höchstens so alt, nie in der Zukunft |
+
+Die Grenzen sind getestet (599,999 s / 600 s, 3599,999 s / 3600 s, 180 s / 180,001 s,
+300 s / 300,001 s). Ein Sprung der Wanduhr ändert sie nicht: im Lauf zählt nur monotone Zeit
+(Test mit `SafetyClock.observe` über Sprünge von Tagen vor und zurück). `final` heißt: ein
+späteres Urteil ändert die Klasse nicht mehr; `resolved` und `new_fault` sind sofort
+endgültig, die anderen erst mit der Höchstwartezeit (oder wenn die Beweislage es nie mehr
+erlaubt, etwa eine fehlende Momentaufnahme davor).
+
+**Bindung und Fälschung.** `VerifyResult` nimmt nur die Eingaben (Aktion, Typ, Parameter,
+Aufrufergebnis, beide Momentaufnahmen, Start, Urteilszeit) und leitet alles andere selbst ab
+(`init=False`); Parameter werden einmal gelesen und eingefroren, Typen genau geprüft (keine
+Unterklassen), Katalog und Parameter über `heal_catalog.try_validate`. `binding` ist sha256
+über Eingaben und beide Zeitkonstanten. `check_binding(…)` leitet zuerst neu ab und meldet
+`tampered` (Eingabe oder abgeleitetes Feld hinter dem Rücken der eingefrorenen Klasse
+geändert, ein geteilter `Fact` an Ort und Stelle geändert, eine Konstante zur Laufzeit
+geändert), dann `other_action` oder `other_snapshot`, sonst `valid`. **Ehrliche Grenze wie bei
+den Vorabprüfungen:** es gibt kein Geheimnis; wer Eingaben und alle abgeleiteten Felder
+stimmig zusammen ändert, wird nicht erkannt (Test
+`test_known_limit_a_fully_consistent_forgery_is_not_seen`).
+
+**Keine Namen.** Eine Momentaufnahme trägt Dienst- und Schnittstellennamen (nur geprüfte
+Codes, keine Adressen) für den Vergleich; ein Ergebnis (`to_dict`, `to_verification`) trägt
+nur Kennungen (`rem_`, `rtr_`, Vorfall), Codes, Zähler und Wahrheitswerte. Adressen,
+Hostnamen, Client-Namen und Geheimnisse kommen nie hinein (Test mit Daten, die sie enthalten).
+
+**Sammler** `snapshot_from_sources(src, router_id, incident_id, *, safe_now, wall_now)` (Stil
+von `heal_preflight.facts_from_sources`, dieselben `FactSources`): wirft nie, gibt `None` nur
+bei unbrauchbaren eigenen Eingaben, jeder Fakt ist bekannt oder unbekannt mit Grund. Quelle
+sind der letzte Poll des Coordinators (nur wenn erfolgreich und höchstens zwei Intervalle alt;
+ein fehlgeschlagener Poll ist `management_path = False`, gemessen, alle anderen Poll-Fakten
+`poll_failed`) und Network Intelligence (nur wenn ihr letzter Lauf höchstens zwei Intervalle
+zurückliegt). Die Wanduhr dient nur dem Alter dieser Daten; eine Wanduhr hinter dem Poll
+oder Network Intelligence ist unbekannt. Kein Router-Aufruf, kein Refresh (Test mit der
+aufgezeichneten Aufrufliste des echten api und Coordinators).
+
+**Was das Modell nicht hält (für I/C2):** `heal_model.Verification` hält Klasse, `before`,
+`after` und `checks`; `to_verification()` füllt sie (`improved`/`held` → `pass`,
+`not_improved`/`worse` → `fail`, `unknown` → `unknown`). **Nicht** im Modell und deshalb von
+I/C2 zu speichern: `attribution`, `final`, `escalate`, `credited_to_action`, `verdict_key`,
+`binding`, `started_at` und `judged_at` (Sicherheitszeiten), dazu die Momentaufnahme davor
+selbst (ohne sie ist nach einem Neustart jedes Urteil `unknown`, `before_snapshot_missing`).
+`execution.call_finished_at` ist Wanduhr; C2 muss die **Sicherheitszeit** des Aufrufendes
+mitgeben.
+
+**Anbindung (später, I/C2; `heal_engine.py` bleibt in Paket H unverändert):**
+
+1. Unmittelbar vor dem Aufruf (nach der letzten Vorabprüfung) baut die Engine die
+   Momentaufnahme davor mit `snapshot_from_sources` und speichert sie mit dem Datensatz.
+2. Nach dem Aufruf: `started_at` = Sicherheitszeit des Aufrufendes, Übergang EXECUTING →
+   VERIFYING.
+3. In jedem Takt ab `settle_until`: Momentaufnahme danach, `verify(…)`, dann
+   `check_binding(…)` mit den gespeicherten Eingaben (nur `valid` darf angewandt werden).
+4. Solange `final` falsch ist, bleibt der Datensatz in VERIFYING.
+5. Endgültig (Vorschlag, Kanten aus Abschnitt 4): `resolved` → RESOLVED; `new_fault` → ESCALATED mit Hold (Abschnitt 5.1);
+   `not_resolved`, `partial` → FAILED (unterbrochen: MANUAL_RECOVERY_REQUIRED, denn
+   VERIFYING → FAILED gilt nur ohne Unterbrechung); `unknown` → MANUAL_RECOVERY_REQUIRED. Jeder Ausgang
+   geht an `heal_policy.record_outcome` (Schutzschalter, Flotten-Pause; Paket D).
+6. Unterbrochen (Neustart in VERIFYING): ohne gespeicherte Momentaufnahme davor ist das
+   Urteil `unknown` und endgültig, nie wiederholt.
+
+**DECIDED (Paket H):**
+
+- Die fünf Klassen sind die des Modells; „von selbst behoben“ ist `resolved` + `no_write`,
+  keine sechste Klasse (das Modell bleibt unverändert).
+- Wartezeit 600 s und Höchstwartezeit 3600 s (Entwurf: zwei stabile Polls; die 600 s stehen
+  für „mindestens zwei Polls im Takt von 60 s bis 300 s“, eine echte Stabilität über zwei Polls
+  misst das Modul nicht).
+- Client-Toleranz 30 %, mindestens 2 (Entwurf: Funk-Clients zurück auf ≥ 70 %).
+- Nur Vorfälle `warning`/`critical` zählen als neue Störung (`info` ist Rauschen).
+- `quiet` zählt nur mit Log-Abdeckung als gemessen gelöst.
+- `escalate` nur bei `new_fault`; `not_resolved` und `partial` werden erst mit der
+  Höchstwartezeit endgültig.
+- Jeder Wächter gilt für jede Aktion (außer dem, den die Aktion selbst ersetzt).
+- Ein Neustart des Routers wird nur erkannt, wenn die Laufzeit zurückgeht (ein Router, der
+  zwischen den Momentaufnahmen neu startet und danach länger läuft als vorher, bleibt
+  unerkannt; bei 600–3600 s Abstand nur bei sehr kurzer Laufzeit davor möglich).
+- Funk → phy ist nicht zugeordnet; `radio_aps_present` zählt alle AP-Schnittstellen des
+  Routers.
+- „Von selbst behoben“ verlangt bekannte Wächter wie jedes `resolved` (streng; offene Frage
+  im Bericht des Pakets).
+
 ## 8. Playbooks A–G
 
 Alle Playbooks arbeiten nur am **Wurzelvorfall** von Network Intelligence; ihre Leseschritte
@@ -1966,7 +2141,8 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | **teilweise**: die Richtlinie sperrt einen Dienst-Neustart bei `cause_outside_router` (sicher außerhalb: Not Safe, unbekannt: Insufficient Evidence); Paket F füllt den Fakt aus den Beweisdaten (Abschnitt 8.4, A) und schlägt bei True nie einen Neustart vor; aufgerufen wird es noch nicht |
 | Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab; der Katalog (Paket D) nimmt nur genaue `str` aus geschlossenen Mengen, keine Unterklassen, keine Zusatzschlüssel, und wiederholt abgelehnte Werte nie; nie-Familien (Client, Firewall, VLAN, Management, Routing, Firmware, `network`, `wpad`, UCI, Shell) stehen nicht im Katalog. Kein Schreibweg vorhanden |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
-| Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
+| Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden; seit Paket H ist ein verlorener Verwaltungsweg in der Prüfung `new_fault` (eskalieren), ein `inconclusive` wird nie gutgeschrieben (Abschnitt 7.2) |
+| Erfolg ohne Beweis gemeldet (fehlende, veraltete oder unbekannte Daten nach der Aktion; Vorfall „gelöst“ nur weil still oder ohne Daten; Störung, die von selbst verging, der Aktion zugeschrieben; Neustart des Routers während der Aktion) | Unbekanntes ist nie Erfolg, jede gemessene Verschlechterung gewinnt, `resolved` nur bei gemessener Lösung nach dem Start und gesehener Wirkung, Zuordnung nur bei `ok`; Wartezeiten auf der Sicherheitsuhr; Bindung an Aktion und Momentaufnahmen | **gebaut** als Logik (Paket H, Abschnitt 7.2); noch nicht aufgerufen; eine in sich stimmige Fälschung aller Felder wird nicht erkannt |
 | Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | Sperre und Fremd-Schreibzugriff als Daten vorhanden, noch nicht benutzt |
 | Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für den Speicher; Test mit der Maskierung des Core |
 | Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers, ohne Ende, wenn er noch eine Ausführung zeigt; Holds aus beendeten Datensätzen werden bei jedem Laden neu gesetzt | **gebaut** |
@@ -1980,9 +2156,9 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik | **gebaut** (PR #77) |
 | **E** | Vorabprüfungen (`heal_preflight.py`, Abschnitt 7.1): dreizehn Prüfungen, Fingerabdruck, Bindung an Router/Aktion/Parameter und Sicherheitszeit, Sammler nur aus dem Speicher, Fakten für `RiskContext`/`IncidentFacts`; nicht angebunden (Adapter-Paket: Engine und Faktenquelle; C2: letzte Vorabprüfung vor dem Ausführen) | **gebaut** (PR #80) |
 | **F** | Playbooks A–G als Daten (`heal_playbooks.py`): Register, Matcher, Analyse je Playbook, Nie-Regeln, deutsche Texte; **füllt `IncidentFacts.cause_outside_router`** (True/False/None je Playbook, Abschnitt 8.4; Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt). Reine Logik; die Engine ruft es noch nicht auf (Anbindung über die Faktenquelle `HealFactsProvider`, Abschnitt 2.1), die Beweisdaten füllt die Anbindung | **gebaut** (PR #79) |
-| **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **dieser Stand** |
+| **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **gebaut** (PR #81) |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
-| H | Prüfung und die fünf Ergebnisklassen | offen |
+| **H** | Prüfung nach der Reparatur (`heal_verify.py`, Abschnitt 7.2): die fünf Klassen aus zwei Momentaufnahmen, Kriterien je Aktion, neun Wächter, „von selbst behoben“, Wartezeit 600 s und Höchstwartezeit 3600 s auf der Sicherheitsuhr, Bindung, Sammler nur aus dem Speicher. Reine Logik, nicht angebunden: **I/C2 muss** die Momentaufnahme davor, `attribution`, `final`, `escalate`, `credited_to_action`, `verdict_key`, `binding` und die Sicherheitszeiten `started_at`/`judged_at` speichern (das Modell hat dafür keine Felder), die Sicherheitszeit des Aufrufendes mitgeben und die Prüfung in VERIFYING aufrufen (Ablauf in 7.2) | **dieser Stand** |
 | I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
 | J | Tab im Dashboard | offen |
@@ -2391,6 +2567,32 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   ein Hold ohne JSON-Form oder Einstellungen falschen Typs zählen als Änderung. Mutationen:
   G01–G13 des Reviewers und drei zur Bedingung des Zurücksetzens; alle scheitern außer G07
   (wie X08) und G11 (die Momentaufnahme nach `context_for`: `context_for` schreibt nichts).
+- `tests/test_heal_verify_v1530.py` (Paket H, 253 Tests): Auftragstests 15 (fehlgeschlagene
+  Reparatur: `partial` und `not_resolved`), 16 (erfolgreiche Prüfung), 17 (fehlgeschlagene
+  Prüfung), 21 (Verwaltungsweg verloren: `new_fault`, auch ohne Aktion) und 23 (Neustart des
+  Routers während der Aktion: `new_fault`; beim geplanten Neustart die Wirkung); jede der fünf
+  Klassen; „von selbst behoben“ für jede Aktion ohne Schreiben und als einziges gutes Ergebnis
+  in 1.53.0; „unbekannt ist nie Erfolg“ für **jedes** Kriterium, jede Aktion und beide Seiten
+  (wörtliche Liste, welcher Fakt welches Kriterium speist) und für jeden Fakt; jeder Wächter
+  einzeln schlechter (gewinnt auch gegen Unbekanntes); Grenzen der Client-Toleranz, des WAN
+  und des Vorfalls (17 Fälle); alle Zeitgrenzen und ein Wanduhrsprung über `SafetyClock`;
+  Bindung (`valid`, `other_action`, `other_snapshot`, `tampered` für jedes abgeleitete Feld,
+  jede Eingabe, einen geteilten `Fact`, eine Konstante) und die bekannte Grenze der stimmigen
+  Fälschung; genaue Typen und Schranken; keine Namen und Adressen im Ergebnis; 10 000
+  Zufallsfälle gegen ein eigenes Orakel aus den Eingaben (alle fünf Klassen erreicht);
+  geschlossene Mengen und Konstanten als wörtliche Listen; Reinheit per AST. Der Sammler:
+  jeder Grund für unbekannt, kaputte Quellen ohne Ausnahme, und mit dem echten api und
+  Coordinator aus `tests/full_router_kit.py` nach zwei Polls **null zusätzliche
+  Router-Aufrufe** (Aufrufliste gleich, kein Refresh) bis zum Ergebnis „von selbst behoben“.
+- **Mutationsprüfung Paket H:** 78 gezielte Lockerungen an `heal_verify.py` (Reihenfolge der
+  Klassen, Torprüfung und beide Zeitkonstanten, jede Regel des Vorfalls, jeder Wächter, Ziele
+  und Wirkungen, Zuordnung, Bindung, Sammler) auf grüner Grundlinie. Im ersten Lauf überlebten
+  fünf (und eine passte nicht, falsche Einrückung im Skript): `partial` zu früh endgültig, ein
+  vorher fehlender Zieldienst als gehalten, Bindung ohne Parameter, Bindung ohne Wartezeit,
+  und „gehalten zählt als gelöst“ für das Hauptkriterium. Für die ersten vier kam je ein Test
+  dazu; im zweiten Lauf ließen 77 der 78 mindestens einen Test scheitern. Die letzte ist
+  gleichwertig: das Hauptkriterium ist nie `held` (es hat sich geändert oder nicht; der
+  Zufallstest hält das fest).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 
@@ -2404,6 +2606,14 @@ Attributen; nur api, Coordinator und Speicher sind echt); ob `primary_identity_s
 Fähigkeiten und Versionsindex auf der Flotte die Werte tragen, die die Tabelle in 7.1 annimmt;
 der Sammler über `hass.config_entries` mit echten Einträgen; die Aufrufer (Engine, Routen,
 Executor), die es noch nicht gibt.
+
+Nicht geprüft (Paket H): die Prüfung gegen echte Router und eine laufende HA-Instanz; ob
+Network Intelligence einen Vorfall nach einer echten Reparatur mit `cleared` löst (die Tests
+nehmen Attrappen mit denselben Attributen, der Sammler auch das echte api und den echten
+Coordinator); ob 600 s auf jeder Flotte für zwei stabile Polls reichen (bei 300 s
+Poll-Abstand unter CPU-Last nur knapp); ob PIDs aus `service_instances` auf allen
+OpenWrt-Ständen bei einem Neustart wechseln; die Anbindung (Engine, Speicherfelder,
+Übergänge), die es noch nicht gibt.
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (die C1-Tests laufen mit einem nachgebildeten `hass`, dem echten Network-Intelligence-Motor
