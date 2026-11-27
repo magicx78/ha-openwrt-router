@@ -153,7 +153,11 @@ Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intellige
 2. Network Intelligence nicht geladen: nichts (`skipped_ni_unavailable`). Kennt es den Vorfall
    nicht: nichts; `skipped_unknown_incident` und `incidents_seen` zählen eine unbekannte
    Kennung nur **einmal** (gemerkt in einer begrenzten Liste, 1000; Review PR #81), damit
-   Meldungen mit erfundenen Kennungen keinen Zähler treiben. Meldungen zu einem bekannten
+   Meldungen mit erfundenen Kennungen keinen Zähler treiben. Die Liste ist ein Fenster, keine
+   Sperre: nach 1000 weiteren verschiedenen unbekannten Kennungen fällt die älteste heraus und
+   zählt beim nächsten Mal wieder. Wer viele erfundene Kennungen schickt, treibt die Zähler
+   also höchstens um eins je Kennung und Fenster, nicht je Meldung (zweites Review PR #81;
+   bewusst ohne Codeänderung). Meldungen zu einem bekannten
    Vorfall zählen in `incidents_seen` weiter je Meldung. Gelöst oder ignoriert laut Network
    Intelligence: die Datensätze schließen (unten). Bestätigt (`acknowledged`): kein neuer
    Datensatz, ein offener bleibt.
@@ -241,9 +245,18 @@ läuft, und `write_path_available` (in 1.53.0 immer `False`). Der Kontext ist ei
 Kopie** (Review PR #81, P1): Datensatz, Ursache, Hold, Allowlist-Einträge und Versuchs- und
 Schutzschalter-Datensätze werden aus ihrer JSON-Form neu gebaut (`to_dict`/`from_dict`).
 Auch `object.__setattr__` auf dem, was ein Entscheider oder eine Faktenquelle bekommt, ändert
-nichts am Speicher. Dahinter prüft die Engine: hat sich der Datensatz während der Entscheidung
-trotzdem geändert (`to_dict()` vorher und nachher), wird nichts angewandt, der Datensatz wird
-aus seiner letzten Form wiederhergestellt und der Fall gezählt (`decision_tampered`).
+nichts am Speicher, auch nicht an Hold und Allowlist (zweites Review PR #81: sonst ließe sich
+ein Hold beenden oder die gespeicherte Allowlist auf `service.restart` mit Risiko 3 umschreiben).
+Dahinter prüft die Engine im Schritt nach PROPOSED: haben sich während der Entscheidung der
+Datensatz, irgendein Hold (`LoopState.holds`, auch der der Flotte) oder die Einstellungen
+(Modulschalter, Grenzen, Modi, Allowlisten) trotzdem geändert (`to_dict()` vorher und
+nachher), wird nichts angewandt, alle drei werden aus ihrer Form vor der Entscheidung
+wiederhergestellt und der Fall einmal gezählt (`decision_tampered`). **Gewollt:** das gilt
+für jedes Schreiben in den Speicher während einer Entscheidung, auch ein an sich
+rechtmäßiges (etwa ein Hold, der die Lage nur strenger macht). Ein Entscheider oder eine
+Faktenquelle schreibt nie in den Speicher; tut sie es doch, wird die Entscheidung verworfen,
+das Schreiben zurückgenommen und der Takt versucht es erneut. Die Route `plans` prüft das
+nicht nach; sie verlässt sich auf die Kopien und speichert nichts.
 `Proposal` trägt `Decision`, `Risk`, Playbook, Voraussetzungen, geplante Änderungen,
 erwartete Wirkung, `executable`, die Katalogaktion (`action_type`) und eine Erklärung als
 reines JSON. Der Entscheider muss rein sein (kein I/O, kein Router, keine Änderung am
@@ -271,8 +284,10 @@ sie genau die des Datensatzes sind): **Recommended**, nur lesend, keine geplante
 **Kandidat einer Faktenquelle** (Review PR #81, P2b, Entscheidung des Koordinators): nennt eine
 Quelle eine Kandidatenaktion (etwa `service.restart`), wird sie ebenfalls über das Gate
 entschieden, erscheint aber **nur** in der Erklärung von `plans`, unter `candidate` mit
-`label: "candidate"` und `note: "not_the_record_decision"` (Aktion, Parameter, Playbook,
-Ergebnis, Entscheidung, Gate, Fakten, geplante Änderungen, deutsche Texte). Ergebnis, Risiko,
+`label: "candidate"` und `note: "not_the_record_decision"` (Aktion, Playbook, Ergebnis,
+Entscheidung, Gate, Fakten, geplante Änderungen, deutsche Texte). Parameter stehen dort nur
+so, wie der Katalog sie geprüft hat (`candidate.policy.params`; bei einer Ablehnung leer), nie
+die rohen Parameter der Quelle (zweites Review PR #81). Ergebnis, Risiko,
 Playbook und geplante Änderungen des Datensatzes kommen nie vom Kandidaten; am Modell ändert
 sich nichts. Scheitert die Bewertung des Kandidaten, steht dort `error: candidate_failed`
 (gezählt), der Datensatz bleibt unberührt. **Pflicht für ein späteres Paket:** soll ein
@@ -341,7 +356,9 @@ die Engine liest ihn nicht mehr.
 (Vorfälle von Network Intelligence, Registry des Core), geschrieben nur über das verzögerte
 Schreiben des Speichers. Kein Coordinator-Listener, kein Refresh, kein Poll; die Aufrufliste
 zweier Polls ist mit laufender Engine, einem Vorfall und einem Takt gleich der ohne
-(Test `test_zero_extra_router_calls`).
+(Test `test_zero_extra_router_calls`). **Bekannte Kosten** (Messung des zweiten Reviews von
+PR #81, keine Änderung): mit der Richtlinie ist die Route `plans` 3- bis 4-mal langsamer als
+mit `ObserveOnlyDecider`, rund 1 ms je Plan, linear in der Zahl der offenen Datensätze.
 
 **DECIDED (C1):**
 
@@ -1404,7 +1421,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Automatischer Eingriff nur wegen zeitlicher Nähe | `temporal_only` muss ausdrücklich `False` sein, sonst Insufficient Evidence | **gebaut** in der Richtlinie (Abschnitt 9.3) |
 | Risiko 3 über einen allgemeinen Schalter oder eine Allowlist erlaubt | Risiko 3 nie erlaubt; Allowlist nur bis Risiko 1; der Gate prüft Katalog und Parameter selbst und trifft die Entscheidung selbst | **gebaut** in der Richtlinie (Abschnitt 10.1) |
 | Gefälschte oder veränderte Entscheidung (eigener Konstruktor, `dataclasses.replace`, andere Parameter als geprüft, nachträglich mit `object.__setattr__` geänderte Eingaben) | `gate()` nimmt nur den `DecisionInput`, prüft ihn mit `replace` neu und ruft `decide()` selbst; die Aktion kommt aus seiner eigenen Entscheidung; eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst, mit erneuter Prüfung der Parameter; Parameter werden einmal gelesen und eingefroren | **gebaut** (Review PR #77 und Paket X, Abschnitte 7 und 10.1) |
-| Faktenquelle (E/F) liefert falsche Typen oder lügt über Fakten der Engine | Typ genau `HealFacts`, erneute Prüfung, sonst „nichts bekannt“ (gezählt); Fakten der Engine gelten immer, auch unbekannt; tiefe Kopie des Kontexts, Prüfung des Datensatzes nach der Entscheidung (`decision_tampered`); ihr Kandidat nur in der Erklärung; nichts geht über PROPOSED | **gebaut** (Paket X und Review PR #81, Abschnitt 2.1) |
+| Faktenquelle (E/F) liefert falsche Typen oder lügt über Fakten der Engine | Typ genau `HealFacts`, erneute Prüfung, sonst „nichts bekannt“ (gezählt); Fakten der Engine gelten immer, auch unbekannt; tiefe Kopie des Kontexts (auch Hold und Allowlist), Prüfung von Datensatz, Holds und Einstellungen nach der Entscheidung (`decision_tampered`); ihr Kandidat nur in der Erklärung, mit den vom Katalog geprüften Parametern; nichts geht über PROPOSED | **gebaut** (Paket X und beide Reviews von PR #81, Abschnitt 2.1) |
 | Gefälschte Meldungen treiben Zähler oder Rechenzeit | Meldung nur Auslöser; Wiederholung einer erfassten Öffnung nicht gezählt; wartende Vorfälle ohne neuen Datensatz je Takt, begrenzte Merkliste | **gebaut** (Paket X, Abschnitt 2.1) |
 | Unbekannter Kontext als harmlos gelesen | jedes unbekannte Feld zählt als HOCH und nicht bewertet; unbekannter Verlauf der Versuche sperrt ein Schreiben; Schalter des Gates (`held`, `fleet_paused`, `module_enabled`) müssen echte Wahrheitswerte sein | **gebaut** (Abschnitte 9 und 10.1) |
 | Versuchsgrenze am Fensterrand umgangen (zwei Versuche kurz vor und zwei kurz nach dem Ende eines festen Fensters) | gleitendes Fenster: höchstens N Versuche in jeder Spanne von 24 h; Abklingzeit nie verkürzt; offener Ausgang zählt nie als Erfolg | **gebaut** in Richtlinie und Speicher (Abschnitt 10.2) |
@@ -1636,9 +1653,25 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
 - **Mutationsprüfung Review PR #81:** 82 Mutationen auf grünem Stand (die 61 des Reviewers,
   an geänderten Stellen sinngleich übertragen, E24 durch E24b ersetzt, und 21 neue). Alle vom
   Review geforderten (E02–E04, E06–E08, E18, E23, E30, E31, E34, E39, E40) scheitern. Von 6
-  Überlebenden bekamen 4 einen Test (E35, E41, N19, N21). Zwei bleiben gleichwertig: E36, weil
-  der Vorab-Check des Slots früher zurückkehrt, und P05, weil die Katalogprüfung danach
-  dieselbe Begründung liefert.
+  Überlebenden bekamen 4 einen Test (E35, E41, N19, N21). E36 bleibt gleichwertig, weil der
+  Vorab-Check des Slots früher zurückkehrt. P05 war **nicht** gleichwertig (zweites Review):
+  ohne die Prüfung der Ablehnung bleibt die Erlaubnis `none`, aber der Grund wird ein anderer
+  (`param_missing` statt `param_unknown` oder `param_value_invalid`).
+- **Zweites Review PR #81** (`tests/test_heal_x_engine_v1530.py`, Abschnitt „Second review
+  of PR #81“, und `tests/test_heal_x_policy_v1530.py`): eine Faktenquelle, die in Hold,
+  Allowlist und Ursache ihres Kontexts schreibt, ändert nichts am Speicher, und die Prüfung
+  hat nichts zurückzusetzen; ein Entscheider, der den Speicher anders erreicht und einen Hold
+  beendet, löscht oder setzt, die Allowlist umschreibt oder die Einstellungen ersetzt, wird
+  nicht angewandt, alles wird zurückgesetzt und gezählt; ohne Änderung wird nichts neu
+  gebaut; `ROLLBACK_PENDING` zählt als gleichzeitige Reparatur; der Kandidat zeigt nur die
+  vom Katalog geprüften Parameter; der Gate nennt den Grund seiner eigenen Ablehnung (P05).
+  Mutationsprüfung auf grünem Stand: 93 Mutationen (die 84 des zweiten Reviews, die drei
+  zur Prüfung nach der Entscheidung auf die erweiterte Prüfung übertragen, und 9 neue zu
+  Holds, Einstellungen und Kandidaten-Parametern); 90 scheitern, darunter N04, N05, N06, P05
+  und N13. Drei bleiben gleichwertig: E36 (wie oben), N22 (die eigenen Fakten mit Playbook:
+  `decision_input` liest das Playbook nicht, der Vorschlag trägt keines) und X08 (kein
+  `schedule()` nach dem Zurücksetzen: das verzögerte Schreiben serialisiert den Speicher erst
+  beim Schreiben, und zwischen Schreiben und Zurücksetzen in einer Entscheidung läuft keins).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 

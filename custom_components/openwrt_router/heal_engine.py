@@ -106,6 +106,7 @@ from .heal_model import (
     Factor,
     HealMode,
     HealModelError,
+    HealSettings,
     Impact,
     LoopKey,
     RemediationAction,
@@ -738,7 +739,8 @@ class PolicyDecider:
             "label": "candidate",
             "note": "not_the_record_decision",
             "action_type": facts.candidate_action,
-            "params": dict(facts.candidate_params or {}),
+            # no params of the provider here: only the catalog-validated
+            # ones under ``policy.params`` (second review of PR #81)
             "playbook_id": facts.playbook_id,
             "playbook_version": facts.playbook_version,
         }
@@ -1631,7 +1633,7 @@ class HealEngine:
             )
             self.counters["analyzed"] += 1
         if action.state is ActionState.ANALYZED:
-            before = action.to_dict()
+            before = self._guarded(action)
             context = self.context_for(action)
             proposal, _clamped = self._decide(context)
             if not self._untouched(action_id, action, before):
@@ -1669,26 +1671,61 @@ class HealEngine:
                 )
             self.counters["proposed"] += 1
 
+    def _guarded(self, action: RemediationAction) -> dict[str, Any]:
+        """What a decision must not change, in its JSON form: the record,
+        every hold and the settings (module switch, limits, modes and
+        allowlists; second review of PR #81)."""
+        store = self.store
+        return {
+            "record": action.to_dict(),
+            "holds": {k: h.to_dict() for k, h in store.loop.holds.items()},
+            "settings": store.settings.to_dict(),
+        }
+
     def _untouched(
         self, action_id: str, action: RemediationAction, before: dict[str, Any]
     ) -> bool:
-        """The record is what it was before the decision. Else nothing is
-        applied, the record is put back as it was and the case is counted
-        (``decision_tampered``; review of PR #81, P1)."""
-        live = self.store.get(action_id)
+        """The record, the holds and the settings are what they were
+        before the decision. Else nothing is applied, all three are put
+        back as they were and the case is counted (``decision_tampered``;
+        review of PR #81, P1, and its second review).
+
+        A decider or provider never writes to the store; a write during a
+        decision is refused like a tampering (docs §2.1)."""
+        store = self.store
+        live = store.get(action_id)
         try:
-            same = live is action and live.to_dict() == before
+            record_same = live is action and live.to_dict() == before["record"]
         except Exception:  # noqa: BLE001 - a damaged record is a changed one
-            same = False
-        if same:
+            record_same = False
+        try:
+            rest_same = (
+                isinstance(store.settings, HealSettings)
+                and store.settings.to_dict() == before["settings"]
+                and {k: h.to_dict() for k, h in store.loop.holds.items()}
+                == before["holds"]
+            )
+        except Exception:  # noqa: BLE001 - a damaged part is a changed one
+            rest_same = False
+        if record_same and rest_same:
             return True
         self.counters["decision_tampered"] += 1
-        _LOGGER.warning("Self-Healing: a record changed during its decision")
+        _LOGGER.warning(
+            "Self-Healing: the store changed during a decision (%s)",
+            "record" if not record_same else "holds or settings",
+        )
         if live is action or live is None:
             # the store still holds this object (or lost it): the last
             # state the store itself wrote, rebuilt from its JSON form
-            self.store.actions[action_id] = RemediationAction.from_dict(before)
-            self.store.schedule()
+            store.actions[action_id] = RemediationAction.from_dict(before["record"])
+        # the holds and settings as before, rebuilt the same way (the
+        # holds map is refilled in place)
+        store.loop.holds.clear()
+        store.loop.holds.update(
+            {k: RouterHold.from_dict(v) for k, v in before["holds"].items()}
+        )
+        store.settings = HealSettings.from_dict(before["settings"])
+        store.schedule()
         return False
 
     def effective_mode(self, router_id: str) -> HealMode:

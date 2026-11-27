@@ -1550,7 +1550,8 @@ async def test_the_record_keeps_its_own_decision_not_the_candidates(
     assert record.history[-1].reason == "decision_recommended"
     candidate = candidate_of(engine.plan_for(record))
     assert candidate["action_type"] == "service.restart"
-    assert candidate["params"] == {"service": "dnsmasq"}
+    assert "params" not in candidate  # only the catalog's, under policy
+    assert candidate["policy"]["params"] == {"service": "dnsmasq"}
     assert candidate["outcome"] == "requires_approval"
 
 
@@ -1945,6 +1946,204 @@ async def test_a_failing_candidate_leaves_the_record_alone(
     assert decider.counters["candidate_failed"] == 2  # the step and the plan
     assert explanation["candidate"]["error"] == "candidate_failed"
     assert "outcome" not in explanation["candidate"]
+
+
+# ---------------------------------------------------------------------------
+# Second review of PR #81: hold and allowlist, the raw candidate params
+# ---------------------------------------------------------------------------
+
+
+def _hold_and_allowlist(store: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Auto-Heal with a Risk 1 allowlist entry, and the router held for an
+    hour; their JSON forms (the objects themselves are what a write hits)."""
+    safe = store.now()
+    allow = hm.AllowEntry(
+        action_type="diag.refresh", params={}, max_risk=hm.RiskClass.LOW
+    )
+    settings = hm.HealSettings(
+        routers={R1: hm.RouterSettings(mode=M.AUTO_HEAL, allowlist=(allow,))}
+    )
+    store.set_settings(settings)
+    hold = hm.RouterHold(
+        router_id=R1,
+        reason=hm.HoldReason.OUTCOME_UNKNOWN,
+        since=safe - 10,
+        until=safe + 3600,
+    )
+    store.loop.place_hold(hold)
+    return hold.to_dict(), settings.to_dict()
+
+
+class Vandal:
+    """Writes into the hold, the allowlist and the cause it is handed."""
+
+    def facts(self, context: he.DecisionContext) -> he.HealFacts:
+        if context.hold is not None:
+            object.__setattr__(context.hold, "until", 1.0)  # end the hold
+        for entry in context.allowlist:
+            object.__setattr__(entry, "action_type", "service.restart")
+            object.__setattr__(entry, "params", {"service": "dnsmasq"})
+            object.__setattr__(entry, "max_risk", hm.RiskClass.HIGH)
+        if context.cause is not None:
+            object.__setattr__(context.cause, "status", hm.CauseStatus.CONFIRMED)
+            object.__setattr__(context.cause, "confidence", 1.0)
+        return he.UNKNOWN_FACTS
+
+
+async def test_a_provider_cannot_end_a_hold_or_rewrite_the_allowlist(
+    world: World,
+) -> None:
+    """The reviewer's probe (N04 hold, N05 cause, N06 allowlist): the copies
+    take every write, in the step and in the plans route, and the tamper
+    check has nothing to put back."""
+    engine = await world.start(decider=he.PolicyDecider(Vandal()))
+    store = engine.store
+    hold, settings = _hold_and_allowlist(store)
+    world.open("inc-1", cause="dns_upstream", cause_status="hypothesis")
+    [record] = world.records()
+    assert record.state is S.PROPOSED
+    assert engine.counters["decision_tampered"] == 0
+    cause = record.cause.to_dict()
+    assert record.cause.status is hm.CauseStatus.HYPOTHESIS
+    engine.plan_for(record)
+    engine.plan_for(record)
+    assert store.loop.holds[R1].to_dict() == hold
+    assert store.loop.hold_on(R1, store.now()) is not None
+    assert store.settings.to_dict() == settings
+    [entry] = store.settings.router(R1).allowlist
+    assert entry.action_type == "diag.refresh"
+    assert dict(entry.params) == {}
+    assert entry.max_risk is hm.RiskClass.LOW
+    assert store.get(record.action_id).cause.to_dict() == cause
+    assert engine.effective_mode(R1) is M.OBSERVE
+
+
+def _end_hold(store: Any) -> None:
+    object.__setattr__(store.loop.holds[R1], "until", 1.0)
+
+
+def _release_hold(store: Any) -> None:
+    del store.loop.holds[R1]
+
+
+def _hold_fleet(store: Any) -> None:
+    safe = store.now()
+    store.loop.place_hold(
+        hm.RouterHold(
+            router_id=None,
+            reason=hm.HoldReason.OUTCOME_UNKNOWN,
+            since=safe,
+            until=safe + 60,
+        )
+    )
+
+
+def _widen_allowlist(store: Any) -> None:
+    [entry] = store.settings.router(R1).allowlist
+    object.__setattr__(entry, "action_type", "service.restart")
+    object.__setattr__(entry, "params", {"service": "dnsmasq"})
+    object.__setattr__(entry, "max_risk", hm.RiskClass.HIGH)
+
+
+def _replace_settings(store: Any) -> None:
+    store.set_settings(hm.HealSettings(enabled=False))
+
+
+@pytest.mark.parametrize(
+    "write",
+    [_end_hold, _release_hold, _hold_fleet, _widen_allowlist, _replace_settings],
+    ids=["end_hold", "release_hold", "hold_fleet", "allowlist", "settings"],
+)
+async def test_holds_or_settings_changed_during_a_decision_are_put_back(
+    world: World, write: Any
+) -> None:
+    """Defence behind the copies: a decider that reaches the live store some
+    other way. Nothing is applied, the holds and the settings are put back
+    as they were, and the case is counted. Any store write during a
+    decision counts, even one that only makes things stricter (docs §2.1)."""
+
+    class Reaching:
+        def propose(self, context: he.DecisionContext) -> he.Proposal:
+            assert world.engine is not None
+            write(world.engine.store)
+            return he.DEFAULT_DECIDER.propose(context)
+
+    engine = await world.start(decider=Reaching())
+    store = engine.store
+    hold, settings = _hold_and_allowlist(store)
+    holds_map = store.loop.holds
+    world.open("inc-1")
+    [record] = world.records()
+    assert engine.counters["decision_tampered"] == 1
+    assert engine.counters["proposed"] == 0
+    assert record.state is S.ANALYZED
+    assert store.loop.holds is holds_map
+    assert {k: h.to_dict() for k, h in store.loop.holds.items()} == {R1: hold}
+    assert store.loop.hold_on(R1, store.now()) is not None
+    assert store.settings.to_dict() == settings
+    [entry] = store.settings.router(R1).allowlist
+    assert entry.max_risk is hm.RiskClass.LOW
+    saved = store.payload()
+    assert saved["settings"] == settings
+    assert saved["loop"]["holds"] == [hold]
+
+
+async def test_a_quiet_decision_restores_nothing(world: World) -> None:
+    """The check itself writes nothing when nothing changed."""
+    engine = await world.start(decider=he.PolicyDecider())
+    store = engine.store
+    _hold_and_allowlist(store)
+    settings, holds = store.settings, dict(store.loop.holds)
+    world.open("inc-1")
+    assert engine.counters["decision_tampered"] == 0
+    assert store.settings is settings
+    assert store.loop.holds == holds
+    assert all(store.loop.holds[k] is h for k, h in holds.items())
+
+
+async def test_a_rollback_pending_record_is_a_concurrent_repair(
+    world: World,
+) -> None:
+    """ROLLBACK_PENDING holds the repair lock but is not in flight (N13)."""
+    engine = await world.start()
+    world.open("inc-1")
+    record = world.of("inc-1")
+    busy = SimpleNamespace(action_id="rem_other", state=S.ROLLBACK_PENDING)
+    real_open = engine.store.open_actions
+
+    def with_busy(router_id: str | None = None) -> list[Any]:
+        return [*real_open(router_id), busy]
+
+    with patch.object(engine.store, "open_actions", with_busy):
+        assert engine.context_for(record).concurrent_repair is True
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "shown", "hidden"),
+    [
+        ("service.restart", {"service": "dnsmasq"}, {"service": "dnsmasq"}, ()),
+        ("service.restart", {"service": "../etc/shadow"}, {}, ("../etc/shadow",)),
+        ("diag.refresh", {"secret_key": "hunter2"}, {}, ("secret_key", "hunter2")),
+    ],
+)
+async def test_the_candidate_shows_only_catalog_validated_params(
+    world: World,
+    measured: None,
+    action: str,
+    params: dict[str, Any],
+    shown: Any,
+    hidden: tuple[str, ...],
+) -> None:
+    engine = await world.start(decider=he.PolicyDecider(Favourable(action, **params)))
+    world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
+    [record] = world.records()
+    assert_own_read_only(record)
+    candidate = candidate_of(engine.plan_for(record))
+    assert "params" not in candidate
+    assert candidate["policy"]["params"] == shown
+    text = json.dumps(engine.plan_for(record).to_dict())
+    for raw in hidden:
+        assert raw not in text
 
 
 __all__ += ["R2", "Event", "FakeNI", "hc"]

@@ -311,7 +311,10 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
   - b: wiederholte Ereignisse zu einem schon erfassten Vorfall zählen nicht als Doppelte;
     ein Doppeltes, das erst der Speicher erkennt, zählt höchstens einmal je Öffnung.
     Ereignisse mit einer Vorfall-Nummer, die Network Intelligence nicht kennt, zählen je Nummer
-    nur einmal (`incidents_seen`, `skipped_unknown_incident`). Jedes Ereignis zu einem
+    nur einmal (`incidents_seen`, `skipped_unknown_incident`), solange die Nummer unter den
+    letzten 1000 unbekannten ist; danach fällt sie heraus und zählt beim nächsten Mal wieder.
+    Erfundene Nummern treiben die Zähler also um eins je Nummer und Fenster, nicht je
+    Ereignis. Jedes Ereignis zu einem
     bekannten Vorfall zählt weiter in `incidents_seen`, jedes fehlerhafte in
     `skipped_bad_event`.
   - c: zurückgestellte Vorfälle werden nicht bei jedem Takt neu gebaut; der Merkzettel ist
@@ -329,8 +332,8 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
   - i: eine unbekannte letzte Ausführung sperrt eine schreibende Aktion (`interval_unknown`).
   - j: Tests für die drei Mutationen, die das Review überlebt hatten.
   - k: `ATTEMPT_WINDOW_S` steht nur noch im Modell.
-- Tests: `tests/test_heal_x_policy_v1530.py` (50), `tests/test_heal_x_engine_v1530.py`
-  (102) und `tests/test_heal_x_misc_v1530.py` (2).
+- Tests: `tests/test_heal_x_policy_v1530.py` (62), `tests/test_heal_x_engine_v1530.py`
+  (113) und `tests/test_heal_x_misc_v1530.py` (2).
 
 #### Nach dem Review von PR #81
 
@@ -361,9 +364,31 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
 - Mutationsprüfung auf grünem Stand: die 61 Mutationen des Reviewers (an den geänderten
   Stellen sinngleich übertragen, E24 durch E24b ersetzt) und 21 neue an den Änderungen dieses
   Reviews. Im ersten Lauf überlebten 6, darunter keine der vom Review geforderten. Vier
-  bekamen eigene Tests. Zwei bleiben, weil sie nichts ändern: der Vorab-Check des Slots greift
-  schon vorher, und die Ablehnung des Gates hat ohne den Code dieselbe Begründung aus dem
-  Katalog.
+  bekamen eigene Tests. Einer bleibt, weil er nichts ändert: der Vorab-Check des Slots greift
+  schon vorher. Die Ablehnung des Gates (P05) hielten wir für gleichwertig; das stimmte nicht
+  (siehe unten).
+
+#### Nach dem zweiten Review von PR #81
+
+- **Hold und Allowlist sind vor einer Faktenquelle sicher.** Die tiefen Kopien von Hold und
+  Allowlist hatten keinen Test; eine geteilte Kopie hätte einer Quelle erlaubt, einen Hold zu
+  beenden oder die gespeicherte Allowlist auf `service.restart` mit Risiko 3 umzuschreiben.
+  Jetzt prüft ein Test das, und die Engine vergleicht nach jeder Entscheidung außer dem
+  Datensatz auch alle Holds und die Einstellungen; hat sich etwas geändert, wird nichts
+  angewandt, alles wird zurückgesetzt und gezählt (`decision_tampered`). Das gilt bewusst
+  für jedes Schreiben in den Speicher während einer Entscheidung, auch ein rechtmäßiges:
+  Entscheider und Faktenquellen schreiben nie in den Speicher.
+- **Ablehnung des Gates:** ohne die Prüfung der Ablehnung bliebe die Erlaubnis gleich
+  (`none`), aber der Grund wäre ein anderer (`param_missing` statt `param_unknown` oder
+  `param_value_invalid`). Ein Test hält den Grund jetzt fest.
+- **Kandidat:** die Erklärung zeigt nur noch die vom Katalog geprüften Parameter
+  (`candidate.policy.params`), nicht mehr die rohen der Faktenquelle.
+- **Bekannte Kosten:** die Route `plans` braucht mit der Richtlinie rund 1 ms je Plan (3- bis
+  4-mal so lang wie vorher, linear); keine Änderung.
+- Mutationsprüfung auf grünem Stand: 93 Mutationen, 90 scheitern (darunter die geteilten
+  Kopien von Hold, Ursache und Allowlist und die Ablehnung des Gates). Drei bleiben, weil sie
+  nichts ändern (der Vorab-Check des Slots, ein Playbook, das die Entscheidung nicht liest,
+  ein zusätzliches Speichern nach dem Zurücksetzen).
 
 ## [1.52.3] - 2026-11-27
 

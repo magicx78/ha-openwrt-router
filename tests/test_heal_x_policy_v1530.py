@@ -550,4 +550,37 @@ def test_the_docs_no_longer_say_the_store_ignores_the_pause() -> None:
     assert "aber **keine Flotten-Pause**" not in text
 
 
+@pytest.mark.parametrize(
+    ("action", "params", "code"),
+    [
+        ("config.restore", {"x": 1}, "param_unknown"),
+        ("service.restart", {"service": "../etc"}, "param_value_invalid"),
+        ("service.restart", {"x": 1}, "param_unknown"),
+        ("diag.refresh", {"x": 1}, "param_unknown"),
+    ],
+)
+@pytest.mark.parametrize("mode", list(hp.HealMode))
+def test_the_gate_names_its_decisions_own_refusal(
+    action: str, params: dict[str, Any], code: str, mode: hp.HealMode
+) -> None:
+    """Second review of PR #81 (P05): the gate refuses with the code of its
+    own decision. Without that check it asks the catalog again with the
+    decision's empty params: another code (``param_missing``), or none at
+    all for an action without required params."""
+    verdict = hp.gate(
+        hp.DecisionInput(action_type=action, params=params),
+        mode=mode,
+        allowlist=(),
+        module_enabled=True,
+        held=False,
+        fleet_paused=False,
+        guards_green=None,
+    )
+    assert verdict.permission is hp.Permission.NONE
+    assert verdict.reasons == (code,)
+    assert verdict.decision is not None
+    assert verdict.decision.refusal == code
+    assert verdict.effective_mode is hp.HealMode.OBSERVE
+
+
 __all__ += ["GATE_OK"]
