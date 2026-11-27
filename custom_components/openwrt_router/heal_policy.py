@@ -38,6 +38,7 @@ from typing import Any, Final
 from . import heal_catalog as hc
 from .heal_model import (
     ALLOWLIST_MAX,
+    ATTEMPT_WINDOW_S,
     AUTO_HEAL_MAX_RISK,
     BACKOFF_STEP_MAX,
     RECENT_ATTEMPTS_MAX,
@@ -78,8 +79,8 @@ _LOGGER = logging.getLogger(__name__)
 
 O = DecisionOutcome
 
-# The attempt window of the loop protection (the store counts the same).
-ATTEMPT_WINDOW_S: Final = 86400
+# The attempt window of the loop protection is ``heal_model.ATTEMPT_WINDOW_S``
+# (one definition; the store counts the same, review of PR #77).
 FLEET_WINDOW_S: Final = 86400
 # The step a "diagnose first" outcome points at.
 DIAGNOSE_STEP: Final = "diag.refresh"
@@ -164,10 +165,20 @@ DEFAULT_POLICY_LIMITS: Final = PolicyLimits()
 
 
 def _limits(value: Any) -> PolicyLimits:
-    """Only a real :class:`PolicyLimits` (its bounds were checked)."""
+    """Only a real :class:`PolicyLimits`, its bounds checked again.
+
+    The exact type (a subclass could skip the validation) and a fresh copy
+    (``replace`` runs ``__post_init__`` again), so a value set after
+    construction with ``object.__setattr__`` is refused (package X, g).
+    """
     if type(value) is not PolicyLimits:
         raise _fail("limits")
-    return value
+    try:
+        return replace(value)
+    except PolicyError:
+        raise
+    except Exception as err:  # anything odd is invalid
+        raise _fail("limits") from err
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +343,27 @@ class DecisionInput:
             # cannot reach the decision
             snapshot = dict(list(self.params.items()))
             object.__setattr__(self, "params", MappingProxyType(snapshot))
+
+
+def _revalidated(inp: Any) -> DecisionInput:
+    """A fresh, validated copy of ``inp`` (raises :class:`PolicyError`).
+
+    The inputs are frozen, but ``object.__setattr__`` still reaches them.
+    ``replace`` runs every ``__post_init__`` again: the context, the
+    incident facts and the input itself (its params are read once more,
+    each value once, into a read-only copy). Everything after this reads
+    the copy only (package X, g).
+    """
+    if type(inp) is not DecisionInput:
+        raise _fail("input")
+    try:
+        context = replace(inp.context)
+        incident = None if inp.incident is None else replace(inp.incident)
+        return replace(inp, context=context, incident=incident)
+    except PolicyError:
+        raise
+    except Exception as err:  # anything odd is invalid
+        raise _fail("input") from err
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +728,9 @@ class PolicyDecision:
     writes: bool
     impact: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     catalog_version: int = hc.CATALOG_VERSION
+    # the catalog's refusal code when the action did not validate (None:
+    # it did; ``action_type`` and ``params`` are then the catalog's own)
+    refusal: str | None = None
 
     def to_impact(self) -> Impact:
         """The model's expected-impact part (router ids come from the engine).
@@ -739,6 +774,7 @@ class PolicyDecision:
             "next_step": self.next_step,
             "writes": self.writes,
             "catalog_version": self.catalog_version,
+            "refusal": self.refusal,
             "impact": dict(self.impact),
             "score": {
                 "total": self.score.total,
@@ -858,6 +894,7 @@ def _refused(inp: DecisionInput, code: str) -> PolicyDecision:
         why_not=code,
         next_step=None,
         writes=False,
+        refusal=code,
     )
 
 
@@ -886,8 +923,7 @@ def decide(
     4. **Requires Approval**: a write of Risk 2 or more.
     5. **Recommended**: everything else (diagnostics, Risk <= 1).
     """
-    if type(inp) is not DecisionInput:
-        raise _fail("input")
+    inp = _revalidated(inp)
     limits = _limits(limits)
     va, refusal = hc.try_validate(inp.action_type, inp.params)
     if va is None:
@@ -1270,12 +1306,21 @@ def gate(
         return refuse("gate_input_invalid")
     if not module_enabled:
         return refuse("module_disabled")
-    va, refusal = hc.try_validate(inp.action_type, inp.params)
+    try:
+        # a fresh copy: a value slipped into the frozen input after its
+        # construction is checked again, and the params are read once
+        inp = _revalidated(inp)
+    except PolicyError:
+        return refuse("gate_input_invalid")
     decision = decide(inp, limits)
-    if va is None:
-        return refuse(
-            "not_in_catalog" if refusal is None else refusal, decision=decision
-        )
+    if decision.refusal is not None or decision.action_type is None:
+        return refuse(decision.refusal or "not_in_catalog", decision=decision)
+    try:
+        # the action of the gate's own decision (the catalog's entry and
+        # params), never the input a second time (package X, g)
+        va = hc.validate(decision.action_type, decision.params)
+    except hc.CatalogError as err:
+        return refuse(err.code, decision=decision)
     found = va.entry
     risk = decision.risk.risk_class
     eff = effective_mode(
@@ -1387,7 +1432,14 @@ class LoopVerdict:
 
 
 LOOP_CODES: Final = frozenset(
-    {"breaker_open", "fleet_paused", "cooling_down", "max_attempts", "min_interval"}
+    {
+        "breaker_open",
+        "fleet_paused",
+        "cooling_down",
+        "max_attempts",
+        "min_interval",
+        "interval_unknown",
+    }
 )
 
 
@@ -1418,6 +1470,23 @@ def _window_times(att: AttemptRecord, safe: float) -> tuple[float, ...]:
     return att.times_in_window(safe, ATTEMPT_WINDOW_S)
 
 
+def _booked_step(
+    att: AttemptRecord, in_window: int, count: int, limits: LoopLimits
+) -> int:
+    """The backoff step of one more attempt.
+
+    ``count - 1`` while the limit allows the attempt. A booking past the
+    limit (``in_window >= max_attempts_24h``; :func:`loop_verdict` refuses
+    it, but the function must be safe on its own) keeps doubling from the
+    step before: ``recent`` holds only ``RECENT_ATTEMPTS_MAX`` times, so
+    counting them alone would shorten the backoff (package X, h).
+    """
+    step = min(count - 1, BACKOFF_STEP_MAX)
+    if in_window >= limits.max_attempts_24h:
+        step = min(max(step, att.backoff_step + 1), BACKOFF_STEP_MAX)
+    return step
+
+
 def book_attempt(
     record: AttemptRecord | None, limits: LoopLimits, safe_now: float
 ) -> AttemptRecord:
@@ -1433,9 +1502,10 @@ def book_attempt(
     if safe > TIME_MAX - _BOOK_HEADROOM_S:
         raise PolicyError("invalid clock")
     att = AttemptRecord() if record is None else record
-    recent = (*_window_times(att, safe), safe)
+    window = _window_times(att, safe)
+    recent = (*window, safe)
     count = min(len(recent), 1000)
-    step = min(count - 1, BACKOFF_STEP_MAX)
+    step = _booked_step(att, len(window), count, limits)
     backoff = min(limits.backoff_base_s * 2**step, limits.backoff_cap_s)
     until = safe + max(limits.cooldown_s, backoff)
     if att.cooldown_until is not None and att.cooldown_until > until:
@@ -1768,14 +1838,32 @@ def dedupe_verdict(
 
 
 def interval_verdict(
-    action_type: str, *, last_run_at: float | None, safe_now: float
+    action_type: str,
+    *,
+    last_run_at: float | None,
+    safe_now: float,
+    never_ran: bool = False,
 ) -> LoopVerdict:
     """The catalog's shortest interval between two runs on one router
-    (``diag.refresh``: 300 s). ``last_run_at`` None: it never ran on this
-    router. Safety-clock times only."""
+    (``diag.refresh``: 300 s). Safety-clock times only.
+
+    ``last_run_at`` None: unknown. A read-only action may run then. A write
+    is refused (``interval_unknown``) unless the caller states
+    ``never_ran=True`` (it knows the action never ran on this router;
+    package X, i). ``never_ran`` with a ``last_run_at`` contradicts itself
+    and raises.
+    """
     found = hc.entry(action_type)
     safe = _safe(safe_now)
-    if last_run_at is None or found.min_interval_s == 0:
+    if type(never_ran) is not bool:
+        raise _fail("never_ran")
+    if never_ran and last_run_at is not None:
+        raise _fail("never_ran")
+    if last_run_at is None:
+        if found.writes and not never_ran:
+            return LoopVerdict(allowed=False, reason="interval_unknown")
+        return LoopVerdict(allowed=True)
+    if found.min_interval_s == 0:
         return LoopVerdict(allowed=True)
     last = _safe(last_run_at, "last_run_at")
     until = last + found.min_interval_s
@@ -1916,6 +2004,7 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "cooling_down": "Abklingzeit läuft.",
         "max_attempts": "Versuche in 24 h aufgebraucht.",
         "min_interval": "Mindestabstand zwischen zwei Läufen noch nicht erreicht.",
+        "interval_unknown": "Unbekannt, wann die Aktion zuletzt lief: keine schreibende Aktion.",
     }
 )
 

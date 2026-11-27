@@ -716,7 +716,7 @@ def _self_healing_summary(hass: HomeAssistant, entry_id: str) -> dict[str, Any]:
         router_ids = engine.router_ids()
         modes = dict.fromkeys((m.value for m in HealMode), 0)
         for rid in router_ids:
-            modes[store.effective_mode(rid).value] += 1
+            modes[engine.effective_mode(rid).value] += 1
         own = engine.router_id_for_entry(entry_id)
         fleet = store.loop.fleet
         paused = fleet.paused(safe)

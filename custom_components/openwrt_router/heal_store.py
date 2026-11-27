@@ -98,6 +98,7 @@ from . import core_store
 from .const import DOMAIN
 from .core_models import ROUTER_ID_PREFIX, is_valid_id
 from .heal_model import (
+    ATTEMPT_WINDOW_S,
     BACKOFF_STEP_MAX,
     FLEET_HOLD_KEY,
     IN_FLIGHT_STATES,
@@ -152,7 +153,6 @@ ATTEMPTS_RETENTION_S: Final = 7 * 86400
 ATTEMPTS_MAX: Final = 1000
 BREAKERS_MAX: Final = 1000
 SAVE_DELAY_S: Final = 10.0  # design §2.3; durable steps write at once
-ATTEMPT_WINDOW_S: Final = 86400  # attempts are counted per 24 h
 UNREADABLE_HOLD_S: Final = 86400  # coordinator decision (review of PR #75)
 STORE_LOST_HOLD_S: Final = 86400
 
@@ -897,8 +897,8 @@ class SelfHealingStore:
         in flight every payload (a delayed write, HA's final write) carries
         the new record, so the read-back accepts this or any later write
         that holds it. Into EXECUTING the loop guards apply (hold, open
-        breaker, cooldown, attempts in 24 h) and the attempt is booked in
-        the same write (``execution.attempt_no``).
+        breaker, fleet pause, cooldown, attempts in 24 h) and the attempt is
+        booked in the same write (``execution.attempt_no``).
         """
         async with self._durable_lock:
             current = self._current(action_id)
@@ -975,13 +975,20 @@ class SelfHealingStore:
             return DurableResult(True, new)
 
     def _attempt_refusal(self, action: RemediationAction, safe: float) -> str | None:
-        """Why the loop protection refuses running ``action`` now (or None)."""
+        """Why the loop protection refuses running ``action`` now (or None).
+
+        The order of ``heal_policy.loop_verdict``: an open breaker, a fleet
+        pause (on the safety clock; package X), a running cooldown, the
+        attempts in the sliding 24 h span.
+        """
         limits = self.settings.limits
         keys = action.loop_keys
         for key in keys:
             breaker = self.loop.breakers.get(key)
             if breaker is not None and breaker.state is BreakerState.OPEN:
                 return "breaker_open"
+        if self.loop.fleet.paused(safe):
+            return "fleet_paused"
         for key in keys:
             att = self.loop.attempts.get(key)
             if (
@@ -1015,9 +1022,14 @@ class SelfHealingStore:
             att = self.loop.attempts.get(key)
             if att is None:
                 att = AttemptRecord()
-            recent = (*att.times_in_window(safe, ATTEMPT_WINDOW_S), safe)
+            window = att.times_in_window(safe, ATTEMPT_WINDOW_S)
+            recent = (*window, safe)
             count = min(len(recent), 1000)
             step = min(count - 1, BACKOFF_STEP_MAX)
+            if len(window) >= limits.max_attempts_24h:
+                # past the limit: keep doubling (``recent`` keeps only
+                # RECENT_ATTEMPTS_MAX times; heal_policy._booked_step)
+                step = min(max(step, att.backoff_step + 1), BACKOFF_STEP_MAX)
             backoff = min(limits.backoff_base_s * 2**step, limits.backoff_cap_s)
             until = safe + max(limits.cooldown_s, backoff)
             if att.cooldown_until is not None and att.cooldown_until > until:
