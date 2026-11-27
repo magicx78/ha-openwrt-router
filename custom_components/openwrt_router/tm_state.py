@@ -844,6 +844,8 @@ def router_state(
         {
             "router_id": rid,
             "router_name": routers.name_of(rid),
+            # 1.52.2, additive: the config entry now (enabled / disabled / null)
+            "entry": routers.entry_of(rid),
             "reachable": reach,
             "role": role,
             "uplink": uplink,
@@ -1427,7 +1429,14 @@ def _diff(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]
         state = "unknown"
     else:
         state = "same" if a == b else "changed"
-    return {"from": a, "to": b, "state": state}
+    # 1.52.2, additive: why each side is unknown (null: that side is known)
+    return {
+        "from": a,
+        "to": b,
+        "state": state,
+        "from_reason": before.get("reason"),
+        "to_reason": after.get("reason"),
+    }
 
 
 def _radio_diff(

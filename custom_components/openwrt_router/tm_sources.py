@@ -269,12 +269,27 @@ class ReadRequest:
     now: float
 
 
+# 1.52.2: the config entry of a router now (``entry`` of a router in
+# ``/state`` and in the blocks of ``/compare``); null: no config entry, only
+# history.
+ENTRY_ENABLED: Final = "enabled"
+ENTRY_DISABLED: Final = "disabled"  # ``disabled_by`` is set (never set up)
+
+
 @dataclass(frozen=True, slots=True)
 class RouterMap:
     """``entry_id`` -> contract ``router_id`` and ``router_id`` -> display name."""
 
     by_entry: Mapping[str, str] = field(default_factory=dict)
     names: Mapping[str, str | None] = field(default_factory=dict)
+    # 1.52.2: router ids whose config entry is disabled by the user or HA
+    disabled: frozenset[str] = frozenset()
+
+    def entry_of(self, router_id: str | None) -> str | None:
+        """``enabled`` / ``disabled`` for a router with a config entry, else None."""
+        if router_id is None or router_id not in self.names:
+            return None
+        return ENTRY_DISABLED if router_id in self.disabled else ENTRY_ENABLED
 
     def router_of_entry(self, entry_id: Any) -> str | None:
         """The router id of a config entry (None if unknown)."""
@@ -370,6 +385,7 @@ def build_router_map(hass: HomeAssistant) -> RouterMap:
         return RouterMap()
     by_entry: dict[str, str] = {}
     names: dict[str, str | None] = {}
+    disabled: set[str] = set()
     for entry in domain_entries(hass):
         entry_id = getattr(entry, "entry_id", None)
         if not isinstance(entry_id, str):
@@ -381,7 +397,9 @@ def build_router_map(hass: HomeAssistant) -> RouterMap:
         if isinstance(router_id, str):
             by_entry[entry_id] = router_id
             names[router_id] = display_name(getattr(entry, "title", None))
-    return RouterMap(by_entry, names)
+            if getattr(entry, "disabled_by", None) is not None:
+                disabled.add(router_id)
+    return RouterMap(by_entry, names, frozenset(disabled))
 
 
 def ms_floor(value: float) -> float:

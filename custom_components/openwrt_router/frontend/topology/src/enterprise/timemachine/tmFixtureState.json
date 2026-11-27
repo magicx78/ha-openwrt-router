@@ -19,6 +19,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -65,6 +66,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": false,
       "derived": false,
@@ -212,6 +214,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -258,6 +261,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": false,
       "derived": false,
@@ -393,6 +397,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -439,6 +444,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": false,
       "derived": false,
@@ -574,6 +580,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -620,6 +627,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -742,6 +750,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -779,6 +788,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -861,6 +871,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -898,6 +909,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -980,6 +992,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -1017,6 +1030,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -1128,6 +1142,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -1165,6 +1180,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -1276,6 +1292,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -1313,6 +1330,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": null,
       "derived": false,
@@ -1442,6 +1460,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -1488,6 +1507,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -1582,6 +1602,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -1628,6 +1649,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -1737,17 +1759,23 @@
       "reachable": {
        "from": true,
        "to": true,
-       "state": "same"
+       "state": "same",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "radios": [
        {
@@ -1779,17 +1807,23 @@
       "reachable": {
        "from": true,
        "to": false,
-       "state": "changed"
+       "state": "changed",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "radios": [
        {
@@ -1868,6 +1902,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -1914,6 +1949,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -2033,6 +2069,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -2079,6 +2116,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -2188,17 +2226,23 @@
       "reachable": {
        "from": true,
        "to": true,
-       "state": "same"
+       "state": "same",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "radios": [],
       "clients": {
@@ -2213,17 +2257,23 @@
       "reachable": {
        "from": false,
        "to": false,
-       "state": "same"
+       "state": "same",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "router_down",
+       "to_reason": "router_down"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "router_down",
+       "to_reason": "router_down"
       },
       "radios": [
        {
@@ -2298,6 +2348,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": null,
        "derived": false,
@@ -2335,6 +2386,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": null,
        "derived": false,
@@ -2414,6 +2466,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -2460,6 +2513,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -2569,17 +2623,23 @@
       "reachable": {
        "from": null,
        "to": true,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_recorded",
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_recorded",
+       "to_reason": "not_observed"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_recorded",
+       "to_reason": "not_observed"
       },
       "radios": [
        {
@@ -2599,17 +2659,23 @@
       "reachable": {
        "from": null,
        "to": false,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_recorded",
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_recorded",
+       "to_reason": "router_down"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_recorded",
+       "to_reason": "router_down"
       },
       "radios": [
        {
@@ -2685,6 +2751,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -2731,6 +2798,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -2825,6 +2893,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -2871,6 +2940,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -2980,17 +3050,23 @@
       "reachable": {
        "from": true,
        "to": true,
-       "state": "same"
+       "state": "same",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "radios": [
        {
@@ -3022,17 +3098,23 @@
       "reachable": {
        "from": true,
        "to": false,
-       "state": "changed"
+       "state": "changed",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "radios": [
        {
@@ -3111,6 +3193,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -3157,6 +3240,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -3251,6 +3335,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -3297,6 +3382,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -3406,17 +3492,23 @@
       "reachable": {
        "from": true,
        "to": true,
-       "state": "same"
+       "state": "same",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "radios": [
        {
@@ -3448,17 +3540,23 @@
       "reachable": {
        "from": true,
        "to": false,
-       "state": "changed"
+       "state": "changed",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "radios": [
        {
@@ -4073,6 +4171,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -4119,6 +4218,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": false,
       "derived": false,
@@ -4237,6 +4337,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -4283,6 +4384,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -4371,6 +4473,7 @@
      {
       "router_id": "rtr_11111111111111111111111111111111",
       "router_name": "Router 1",
+      "entry": "enabled",
       "reachable": {
        "value": true,
        "derived": true,
@@ -4417,6 +4520,7 @@
      {
       "router_id": "rtr_22222222222222222222222222222222",
       "router_name": "Router 2",
+      "entry": "enabled",
       "reachable": {
        "value": false,
        "derived": false,
@@ -4515,17 +4619,23 @@
       "reachable": {
        "from": true,
        "to": true,
-       "state": "same"
+       "state": "same",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "not_observed"
       },
       "radios": [
        {
@@ -4553,17 +4663,23 @@
       "reachable": {
        "from": true,
        "to": false,
-       "state": "changed"
+       "state": "changed",
+       "from_reason": null,
+       "to_reason": null
       },
       "role": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "uplink": {
        "from": null,
        "to": null,
-       "state": "unknown"
+       "state": "unknown",
+       "from_reason": "not_observed",
+       "to_reason": "router_down"
       },
       "radios": [
        {
@@ -4784,6 +4900,7 @@
     {
      "router_id": "rtr_11111111111111111111111111111111",
      "router_name": "Router 1",
+     "entry": "enabled",
      "reachable": {
       "value": true,
       "derived": true,
@@ -4830,6 +4947,7 @@
     {
      "router_id": "rtr_22222222222222222222222222222222",
      "router_name": "Router 2",
+     "entry": "enabled",
      "reachable": {
       "value": false,
       "derived": false,
