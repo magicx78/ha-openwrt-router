@@ -40,6 +40,7 @@ from .heal_model import (
     ALLOWLIST_MAX,
     AUTO_HEAL_MAX_RISK,
     BACKOFF_STEP_MAX,
+    RECENT_ATTEMPTS_MAX,
     RECENT_FAILURES_MAX,
     ROUTER_COMPONENT,
     TIME_MAX,
@@ -59,6 +60,7 @@ from .heal_model import (
     HealMode,
     HealModelError,
     HealSettings,
+    Impact,
     LoopKey,
     LoopLimits,
     LoopState,
@@ -143,7 +145,7 @@ class PolicyLimits:
     auto_failures_to_open: int = AUTO_FAILURES_DEFAULT
 
     def __post_init__(self) -> None:
-        """Validate against the bounds (raises ``HealModelError``)."""
+        """Validate against the bounds (raises :class:`PolicyError`)."""
         for name, (lo, hi) in (
             ("score_min", SCORE_MIN_BOUNDS),
             ("manual_failures_to_open", MANUAL_FAILURES_BOUNDS),
@@ -155,10 +157,17 @@ class PolicyLimits:
                 or not isinstance(value, int)
                 or not lo <= value <= hi
             ):
-                raise HealModelError(f"invalid policy.{name}")
+                raise _fail(f"policy.{name}")
 
 
 DEFAULT_POLICY_LIMITS: Final = PolicyLimits()
+
+
+def _limits(value: Any) -> PolicyLimits:
+    """Only a real :class:`PolicyLimits` (its bounds were checked)."""
+    if type(value) is not PolicyLimits:
+        raise _fail("limits")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +193,11 @@ class RiskContext:
     the radio has a STA or mesh interface. ``target_carries_dependants``: the
     target carries the uplink of other routers. ``service_enabled``: the
     target service is enabled in ``rc list`` (False: disabled on purpose).
+    ``service_dependant_routers`` / ``service_dependant_clients``: other
+    routers and clients that use this router's target service (DNS/DHCP).
+    ``service_config_unapplied``: the saved configuration of the target
+    service differs from the running one or changed recently, so a restart
+    would put a change into effect (review of PR #77).
     """
 
     role: str | None = None
@@ -194,6 +208,9 @@ class RiskContext:
     target_is_wireless_uplink: bool | None = None
     target_carries_dependants: bool | None = None
     service_enabled: bool | None = None
+    service_dependant_routers: int | None = None
+    service_dependant_clients: int | None = None
+    service_config_unapplied: bool | None = None
     clients_on_router: int | None = None
     clients_on_target: int | None = None
     open_security_findings: int | None = None
@@ -212,6 +229,8 @@ class RiskContext:
                 continue
             if f.name in (
                 "dependants",
+                "service_dependant_routers",
+                "service_dependant_clients",
                 "clients_on_router",
                 "clients_on_target",
                 "open_security_findings",
@@ -228,10 +247,13 @@ class IncidentFacts:
     ``temporal_only``: the only link to the target is a time window or an
     inferred edge. ``evidence_fresh``: the evidence is younger than two poll
     intervals. ``is_root``: a root incident, not a child it explains.
+    ``cause_outside_router``: the cause lies outside this router (WAN down,
+    upstream DNS, gateway unreachable); Playbook A (package F) fills it.
+    ``severity`` None: unknown, scored like ``info``.
     """
 
     incident_type: str | None = None
-    severity: str = "warning"
+    severity: str | None = None
     cause_level: CauseLevel = CauseLevel.UNKNOWN
     cause_status: CauseStatus = CauseStatus.HYPOTHESIS
     confidence: float | None = None
@@ -240,10 +262,11 @@ class IncidentFacts:
     temporal_only: bool | None = None
     evidence_fresh: bool | None = None
     target_fact: TargetFact | None = None
+    cause_outside_router: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate."""
-        if self.severity not in SEVERITIES:
+        if self.severity is not None and self.severity not in SEVERITIES:
             raise _fail("incident.severity")
         try:
             object.__setattr__(self, "cause_level", CauseLevel(self.cause_level))
@@ -262,7 +285,12 @@ class IncidentFacts:
         _opt_count(self.source_families, "incident.source_families", 64)
         if self.source_families is None:
             raise _fail("incident.source_families")
-        for name in ("is_root", "temporal_only", "evidence_fresh"):
+        for name in (
+            "is_root",
+            "temporal_only",
+            "evidence_fresh",
+            "cause_outside_router",
+        ):
             _opt_bool(getattr(self, name), f"incident.{name}")
 
 
@@ -273,27 +301,37 @@ _NO_INCIDENT: Final = IncidentFacts()
 class DecisionInput:
     """Everything :func:`decide` weighs (no time: a decision reads no clock).
 
+    The only thing :func:`gate` accepts: the gate decides again from it, so
+    no caller can hand in a decision of its own (review of PR #77).
+
     ``prior_failed_attempts``: failed or unknown attempts on the same loop
-    key in 24 h (see :func:`prior_failed_attempts`). ``config_change_24h``:
-    a configuration change or drift in the same area in 24 h (None:
-    unknown, counted as a change).
+    key in 24 h (see :func:`prior_failed_attempts`); None (the default):
+    unknown, which blocks a write (``history_unknown``).
+    ``config_change_24h``: a configuration change or drift in the same area
+    in 24 h (None: unknown, counted as a change). ``params`` is kept as a
+    read-only copy, each value read once.
     """
 
     action_type: Any
     params: Any = None
     incident: IncidentFacts | None = None
     context: RiskContext = field(default_factory=RiskContext)
-    prior_failed_attempts: int = 0
+    prior_failed_attempts: int | None = None
     config_change_24h: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate the typed parts (action and params go to the catalog)."""
-        if self.incident is not None and not isinstance(self.incident, IncidentFacts):
+        if self.incident is not None and type(self.incident) is not IncidentFacts:
             raise _fail("input.incident")
-        if not isinstance(self.context, RiskContext):
+        if type(self.context) is not RiskContext:
             raise _fail("input.context")
         _opt_count(self.prior_failed_attempts, "input.prior_failed_attempts", 1000)
         _opt_bool(self.config_change_24h, "input.config_change_24h")
+        if isinstance(self.params, Mapping):
+            # one read per value; later changes of the caller's mapping
+            # cannot reach the decision
+            snapshot = dict(list(self.params.items()))
+            object.__setattr__(self, "params", MappingProxyType(snapshot))
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +365,8 @@ RISK_CODES: Final = frozenset(
         "wireless_uplink_radio",
         "uplink_for_other_routers",
         "clients_affected",
+        "service_serves_other_routers",
+        "service_config_unapplied",
         "context_missing",
         "not_in_catalog",
     }
@@ -350,8 +390,22 @@ def classify_risk(va: hc.ValidatedAction, context: RiskContext) -> RiskAssessmen
       carrying their uplink: HIGH;
     * a disruption with clients on the router (radio: on the radio): at
       least MEDIUM;
+    * a service restart on a router whose DNS/DHCP other routers use: at
+      least MEDIUM, named ``service_serves_other_routers`` (owner of the
+      order: the restart stays Risk 2 on a gateway, the approval shows who
+      depends on it);
+    * a service restart while the saved configuration of the service is
+      not applied (the restart would put it into effect): HIGH;
     * a needed fact not known: HIGH and unassessed (``context_missing``).
+
+    Unknown (None) facts never count as harmless: every rule below that
+    tests a fact only for a known value relies on the fact being in the
+    action's ``needs_facts``, so None ends in ``context_missing``.
     """
+    if type(va) is not hc.ValidatedAction:
+        raise _fail("validated action")
+    if type(context) is not RiskContext:
+        raise _fail("context")
     e = va.entry
     level = e.base_risk
     reasons: list[str] = []
@@ -369,12 +423,20 @@ def classify_risk(va: hc.ValidatedAction, context: RiskContext) -> RiskAssessmen
             raise_to(RiskClass.HIGH, "role_unknown")
         if c.identity_confirmed is False:
             raise_to(RiskClass.HIGH, "identity_not_confirmed")
-        if c.open_security_findings:
+        if c.open_security_findings is not None and c.open_security_findings > 0:
             raise_to(RiskClass.HIGH, "open_security_finding")
         if c.in_maintenance is True:
             raise_to(RiskClass.MEDIUM, "in_maintenance_window")
     if d is hc.Disruption.SERVICE and c.service_enabled is False:
         raise_to(RiskClass.HIGH, "service_disabled_on_purpose")
+    if d is hc.Disruption.SERVICE and c.service_config_unapplied is True:
+        raise_to(RiskClass.HIGH, "service_config_unapplied")
+    if (
+        d is hc.Disruption.SERVICE
+        and c.service_dependant_routers is not None
+        and c.service_dependant_routers > 0
+    ):
+        raise_to(RiskClass.MEDIUM, "service_serves_other_routers")
     if d is hc.Disruption.ROUTER or (
         d in (hc.Disruption.RADIO, hc.Disruption.INTERFACE)
         and c.target_on_mgmt_path is True
@@ -382,13 +444,15 @@ def classify_risk(va: hc.ValidatedAction, context: RiskContext) -> RiskAssessmen
         raise_to(RiskClass.HIGH, "target_on_management_path")
     if d is hc.Disruption.RADIO and c.target_is_wireless_uplink is True:
         raise_to(RiskClass.HIGH, "wireless_uplink_radio")
-    if (d is hc.Disruption.ROUTER and (c.dependants or 0) > 0) or (
+    if (
+        d is hc.Disruption.ROUTER and c.dependants is not None and c.dependants > 0
+    ) or (
         d in (hc.Disruption.RADIO, hc.Disruption.INTERFACE)
         and c.target_carries_dependants is True
     ):
         raise_to(RiskClass.HIGH, "uplink_for_other_routers")
     clients = c.clients_on_target if d is hc.Disruption.RADIO else c.clients_on_router
-    if d is not hc.Disruption.NONE and clients:
+    if d is not hc.Disruption.NONE and clients is not None and clients > 0:
         raise_to(RiskClass.MEDIUM, "clients_affected")
     missing = tuple(name for name in e.needs_facts if getattr(c, name) is None)
     if missing:
@@ -423,9 +487,11 @@ TARGET_FACT_POINTS: Final[Mapping[TargetFact | None, int]] = MappingProxyType(
     {TargetFact.DIRECT: 30, TargetFact.LOG_ONLY: 10, TargetFact.NONE: 0, None: 0}
 )
 PRIOR_ATTEMPT_POINTS: Final = -25  # per failed or unknown attempt in 24 h
+# unknown history costs at least one unknown attempt (and blocks a write)
+PRIOR_UNKNOWN_POINTS: Final = PRIOR_ATTEMPT_POINTS
 CONFIG_CHANGE_POINTS: Final = -20  # a change in the same area in 24 h, or unknown
-SEVERITY_POINTS: Final[Mapping[str, int]] = MappingProxyType(
-    {"info": -10, "warning": 0, "critical": 0}
+SEVERITY_POINTS: Final[Mapping[str | None, int]] = MappingProxyType(
+    {"info": -10, "warning": 0, "critical": 0, None: -10}  # unknown like info
 )
 SCORE_MAX: Final = 100
 
@@ -467,13 +533,16 @@ def score(
     Evidence adds: cause level 0/15/30/40, cause status confirmed +10,
     NI confidence up to +10 (10 x confidence, half up), source families
     0/+5/+10, a fact on the target itself 0/+10/+30. History subtracts:
-    -25 per failed or unknown attempt on the same key in 24 h, -20 for a
-    configuration change in the same area in 24 h (unknown counts), -10 for
-    an info-level incident. A last line ``clamp`` brings the sum into
-    0..100, so the contributions always add up to the total.
+    -25 per failed or unknown attempt on the same key in 24 h (unknown
+    history: -25 as one unknown attempt), -20 for a configuration change in
+    the same area in 24 h (unknown counts), -10 for an info-level or unknown
+    severity. A last line ``clamp`` brings the sum into 0..100, so the
+    contributions always add up to the total.
     """
-    inc = incident or _NO_INCIDENT
-    prior = _opt_count(prior_failed_attempts, "prior_failed_attempts", 1000) or 0
+    if incident is not None and type(incident) is not IncidentFacts:
+        raise _fail("incident")
+    inc = _NO_INCIDENT if incident is None else incident
+    prior = _opt_count(prior_failed_attempts, "prior_failed_attempts", 1000)
     _opt_bool(config_change_24h, "config_change_24h")
     lines: list[Contribution] = [
         Contribution(
@@ -515,8 +584,14 @@ def score(
         ),
         Contribution(
             factor="prior_attempts",
-            points=PRIOR_ATTEMPT_POINTS * prior,
-            reason="prior_failed_attempts" if prior else "no_prior_attempts",
+            points=(
+                PRIOR_UNKNOWN_POINTS if prior is None else PRIOR_ATTEMPT_POINTS * prior
+            ),
+            reason=(
+                "prior_attempts_unknown"
+                if prior is None
+                else ("prior_failed_attempts" if prior > 0 else "no_prior_attempts")
+            ),
         ),
         Contribution(
             factor="config_change",
@@ -530,7 +605,11 @@ def score(
         Contribution(
             factor="severity",
             points=SEVERITY_POINTS[inc.severity],
-            reason=f"severity_{inc.severity}",
+            reason=(
+                "severity_unknown"
+                if inc.severity is None
+                else f"severity_{inc.severity}"
+            ),
         ),
     ]
     raw = sum(line.points for line in lines)
@@ -565,11 +644,13 @@ SCORE_CODES: Final = frozenset(
         "two_or_more_source_families",
         *(f"target_fact_{v.value}" for v in TargetFact),
         "prior_failed_attempts",
+        "prior_attempts_unknown",
         "no_prior_attempts",
         "no_config_change_24h",
         "config_change_24h",
         "config_change_unknown",
         *(f"severity_{v}" for v in SEVERITIES),
+        "severity_unknown",
         "within_range",
         "clamped_to_range",
     }
@@ -594,7 +675,14 @@ class RuleHit:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class PolicyDecision:
-    """The decision on one action with everything needed to explain it."""
+    """The decision on one action with everything needed to explain it.
+
+    Only for showing and storing: :func:`gate` never takes one (it decides
+    again from the :class:`DecisionInput`), so altering a decision changes
+    nothing that is allowed. ``impact``: counts only - clients on the router
+    and on the target, routers behind it, routers and clients that use its
+    DNS/DHCP, the estimated outage.
+    """
 
     action_type: str | None
     params: Mapping[str, str]
@@ -606,7 +694,26 @@ class PolicyDecision:
     why_not: str | None
     next_step: str | None
     writes: bool
+    impact: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     catalog_version: int = hc.CATALOG_VERSION
+
+    def to_impact(self) -> Impact:
+        """The model's expected-impact part (router ids come from the engine).
+
+        ``clients_on_component``: clients on the radio for a radio action,
+        clients that use the service for a service restart.
+        """
+        imp = self.impact
+        component = (
+            imp.get("service_dependant_clients")
+            if imp.get("disruption") == hc.Disruption.SERVICE.value
+            else imp.get("clients_on_target")
+        )
+        return Impact(
+            clients_on_router=imp.get("clients_on_router"),
+            clients_on_component=component,
+            est_outage_s=imp.get("est_outage_s"),
+        )
 
     def to_model(self) -> Decision:
         """The model's ``Decision`` part (outcome, score, factors, why)."""
@@ -632,6 +739,7 @@ class PolicyDecision:
             "next_step": self.next_step,
             "writes": self.writes,
             "catalog_version": self.catalog_version,
+            "impact": dict(self.impact),
             "score": {
                 "total": self.score.total,
                 "unit": self.score.unit,
@@ -674,6 +782,7 @@ _NOT_SAFE_RISK_REASONS: Final = (
     "identity_not_confirmed",
     "open_security_finding",
     "service_disabled_on_purpose",
+    "service_config_unapplied",
     "target_on_management_path",
     "wireless_uplink_radio",
     "uplink_for_other_routers",
@@ -691,6 +800,9 @@ DECISION_CODES: Final = frozenset(
         "risk_high_no_recovery",
         *_NOT_SAFE_RISK_REASONS,
         "context_missing",
+        "history_unknown",
+        "cause_outside_router",
+        "cause_location_unknown",
         "no_incident",
         "root_unknown",
         "temporal_correlation_only",
@@ -721,7 +833,7 @@ def _hit(
     )
 
 
-def _refused(inp: DecisionInput, code: str, limits: PolicyLimits) -> PolicyDecision:
+def _refused(inp: DecisionInput, code: str) -> PolicyDecision:
     hits: list[RuleHit] = []
     _hit(hits, code, O.UNSUPPORTED)
     return PolicyDecision(
@@ -761,19 +873,25 @@ def decide(
        repaired), or the probes' module is off.
     2. **Not Safe** (writes): router unreachable, identity not confirmed,
        role unknown, open security finding, service disabled on purpose,
-       management path, wireless uplink, uplink of other routers, an open
-       breaker, a concurrent repair, or HIGH risk (no rollback mechanism
-       exists).
-    3. **Insufficient Evidence**: a needed fact unknown; for writes also no
-       incident, root unknown, a link only by time, stale evidence, a
-       hypothesis with fewer than two source families, no direct fact on the
-       target, or a score below the threshold. Points at ``diag.refresh``.
+       saved service configuration not applied, the cause outside the
+       router (service restart), management path, wireless uplink, uplink
+       of other routers, an open breaker, a concurrent repair, or HIGH risk
+       (no rollback mechanism exists).
+    3. **Insufficient Evidence**: a needed fact unknown; for writes also
+       unknown attempt history, no incident, root unknown, the cause's
+       location unknown (service restart), a link only by time, stale
+       evidence, a hypothesis with fewer than two source families, no
+       direct fact on the target, or a score below the threshold. Points at
+       ``diag.refresh``.
     4. **Requires Approval**: a write of Risk 2 or more.
     5. **Recommended**: everything else (diagnostics, Risk <= 1).
     """
+    if type(inp) is not DecisionInput:
+        raise _fail("input")
+    limits = _limits(limits)
     va, refusal = hc.try_validate(inp.action_type, inp.params)
     if va is None:
-        return _refused(inp, refusal or "unknown_action", limits)
+        return _refused(inp, "unknown_action" if refusal is None else refusal)
     e = va.entry
     c = inp.context
     risk = classify_risk(va, c)
@@ -804,6 +922,13 @@ def decide(
             _hit(hits, "breaker_open", O.NOT_SAFE)
         if c.concurrent_repair is True:
             _hit(hits, "concurrent_repair", O.NOT_SAFE)
+        if (
+            e.disruption is hc.Disruption.SERVICE
+            and inc is not None
+            and inc.cause_outside_router is True
+        ):
+            # Playbook A's hard rule: no DNS restart when the cause is outside
+            _hit(hits, "cause_outside_router", O.NOT_SAFE)
         if risk.assessed and risk.risk_class >= RiskClass.HIGH:
             _hit(
                 hits,
@@ -821,11 +946,18 @@ def decide(
             facts=",".join(risk.missing),
         )
     if e.writes:
+        if inp.prior_failed_attempts is None:
+            _hit(hits, "history_unknown", O.INSUFFICIENT_EVIDENCE)
         if inc is None:
             _hit(hits, "no_incident", O.INSUFFICIENT_EVIDENCE)
         else:
             if inc.is_root is None:
                 _hit(hits, "root_unknown", O.INSUFFICIENT_EVIDENCE)
+            if (
+                e.disruption is hc.Disruption.SERVICE
+                and inc.cause_outside_router is None
+            ):
+                _hit(hits, "cause_location_unknown", O.INSUFFICIENT_EVIDENCE)
             if inc.temporal_only is not False:
                 _hit(hits, "temporal_correlation_only", O.INSUFFICIENT_EVIDENCE)
             if inc.evidence_fresh is not True:
@@ -851,15 +983,16 @@ def decide(
         _hit(hits, "temporal_link_diagnose_only", None)
 
     # notes: impact and the recovery statement (never blocking)
-    _hit(
-        hits,
-        "impact_summary",
-        None,
-        clients_on_router=c.clients_on_router,
-        clients_on_target=c.clients_on_target,
-        dependants=c.dependants,
-        est_outage_s=e.est_outage_s,
-    )
+    impact: dict[str, Any] = {
+        "disruption": e.disruption.value,
+        "clients_on_router": c.clients_on_router,
+        "clients_on_target": c.clients_on_target,
+        "dependants": c.dependants,
+        "service_dependant_routers": c.service_dependant_routers,
+        "service_dependant_clients": c.service_dependant_clients,
+        "est_outage_s": e.est_outage_s,
+    }
+    _hit(hits, "impact_summary", None, **impact)
     _hit(
         hits,
         "recovery_statement",
@@ -892,6 +1025,7 @@ def decide(
         why_not=why_not,
         next_step=DIAGNOSE_STEP if outcome is O.INSUFFICIENT_EVIDENCE else None,
         writes=e.writes,
+        impact=MappingProxyType(impact),
     )
 
 
@@ -912,7 +1046,12 @@ class Permission(StrEnum):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class GateVerdict:
-    """The gate's answer. ``executable_now``: may run in this release."""
+    """The gate's answer. ``executable_now``: may run in this release.
+
+    ``decision``: the decision the gate itself made from the input (the one
+    to show; never one a caller handed in). None only when the gate refused
+    before deciding (``gate_input_invalid``, module off).
+    """
 
     permission: Permission
     effective_mode: HealMode
@@ -920,10 +1059,12 @@ class GateVerdict:
     allowlisted: bool = False
     in_release: bool = False
     executable_now: bool = False
+    decision: PolicyDecision | None = None
 
 
 GATE_CODES: Final = frozenset(
     {
+        "gate_input_invalid",
         "module_disabled",
         "not_in_catalog",
         "action_disabled",
@@ -954,8 +1095,15 @@ def effective_mode(
 
     Module off: Observe. A held router and a paused fleet count as Observe
     for everything of Risk 1 or more (owner decision); Risk 0 keeps the
-    configured mode.
+    configured mode. Anything but a real bool for the three switches is
+    unknown and counts as Observe, whatever the risk.
     """
+    if (
+        type(module_enabled) is not bool
+        or type(held) is not bool
+        or type(fleet_paused) is not bool
+    ):
+        return HealMode.OBSERVE
     if not module_enabled:
         return HealMode.OBSERVE
     if risk >= RiskClass.LOW and (held or fleet_paused):
@@ -1071,29 +1219,64 @@ def validate_allowlist(proposed: Any) -> AllowlistVerdict:
 
 
 def gate(
-    decision: PolicyDecision,
+    inp: DecisionInput,
     *,
     mode: HealMode,
     allowlist: Sequence[AllowEntry],
     module_enabled: bool,
     held: bool,
     fleet_paused: bool,
-    in_maintenance: bool | None,
     guards_green: bool | None,
+    limits: PolicyLimits = DEFAULT_POLICY_LIMITS,
 ) -> GateVerdict:
-    """What may happen with ``decision`` on a router in ``mode``.
+    """What may happen with the action of ``inp`` on a router in ``mode``.
 
+    The gate takes the INPUT, never a decision: it validates action and
+    parameters against the catalog and runs :func:`decide` itself, so a
+    decision cannot be forged or relabelled (review of PR #77). The decision
+    it made is in the verdict.
+
+    * ``module_enabled``, ``held``, ``fleet_paused`` must be real bools;
+      anything else refuses everything (``gate_input_invalid``).
     * Observe: a recommendation only (Risk 0 read-only diagnostics run).
     * Approval: an explicit approval for everything of Risk 1 or more.
     * Auto-Heal: only an allowlisted action of Risk <= 1 runs by itself, and
-      only with all guards green and outside maintenance; everything else
-      falls back to an approval.
+      only with all guards green (``guards_green is True``) and outside
+      maintenance (``inp.context.in_maintenance is False``: one source of
+      truth, the same fact :func:`decide` reads); everything else falls
+      back to an approval.
     * Held router, paused fleet: Observe for Risk 1 or more.
-    * Risk 3 is never authorised, whatever the mode or the allowlist; the
-      gate re-checks the catalog and the risk itself (defence in depth).
+    * Risk 3 is never authorised, whatever the mode or the allowlist.
     * ``executable_now`` is True only for actions the release can run
       (1.53.0: no router call at all).
     """
+    if type(inp) is not DecisionInput:
+        raise _fail("input")
+    limits = _limits(limits)
+
+    def refuse(code: str, **kw: Any) -> GateVerdict:
+        return GateVerdict(
+            permission=Permission.NONE,
+            effective_mode=HealMode.OBSERVE,
+            reasons=(code,),
+            **kw,
+        )
+
+    if (
+        type(module_enabled) is not bool
+        or type(held) is not bool
+        or type(fleet_paused) is not bool
+    ):
+        return refuse("gate_input_invalid")
+    if not module_enabled:
+        return refuse("module_disabled")
+    va, refusal = hc.try_validate(inp.action_type, inp.params)
+    decision = decide(inp, limits)
+    if va is None:
+        return refuse(
+            "not_in_catalog" if refusal is None else refusal, decision=decision
+        )
+    found = va.entry
     risk = decision.risk.risk_class
     eff = effective_mode(
         mode,
@@ -1102,12 +1285,7 @@ def gate(
         fleet_paused=fleet_paused,
         risk=risk,
     )
-    found = (
-        hc.CATALOG.get(decision.action_type)
-        if type(decision.action_type) is str
-        else None
-    )
-    in_release = found is not None and found.action_type in hc.EXECUTABLE_IN_RELEASE
+    in_release = found.action_type in hc.EXECUTABLE_IN_RELEASE
 
     def verdict(
         permission: Permission, *reasons: str, allowlisted: bool = False
@@ -1123,12 +1301,9 @@ def gate(
             allowlisted=allowlisted,
             in_release=in_release,
             executable_now=runs and in_release,
+            decision=decision,
         )
 
-    if not module_enabled:
-        return verdict(Permission.NONE, "module_disabled")
-    if found is None:
-        return verdict(Permission.NONE, "not_in_catalog")
     if found.status is hc.CatalogStatus.DISABLED:
         return verdict(Permission.NONE, "action_disabled")
     if risk < found.base_risk:
@@ -1150,13 +1325,13 @@ def gate(
         return verdict(Permission.RECOMMEND, *context)
     if eff is HealMode.APPROVAL:
         return verdict(Permission.NEEDS_APPROVAL, *context)
-    listed = is_allowlisted(allowlist, decision.action_type, decision.params, risk)
+    listed = is_allowlisted(allowlist, found.action_type, va.params, risk)
     blockers: list[str] = []
     if risk > AUTO_HEAL_MAX_RISK or decision.outcome is O.REQUIRES_APPROVAL:
         blockers.append("risk_above_auto_limit")
     if not listed:
         blockers.append("not_allowlisted")
-    if in_maintenance is not False:
+    if inp.context.in_maintenance is not False:
         blockers.append("in_maintenance")
     if guards_green is not True:
         blockers.append("guards_not_green")
@@ -1173,27 +1348,27 @@ def safe_now_of(clock: SafetyClock) -> float:
 
 
 def gate_for_router(
-    decision: PolicyDecision,
+    inp: DecisionInput,
     *,
     settings: HealSettings,
     loop: LoopState,
     router_id: str,
-    in_maintenance: bool | None,
     guards_green: bool | None,
+    limits: PolicyLimits = DEFAULT_POLICY_LIMITS,
 ) -> GateVerdict:
     """:func:`gate` with mode, allowlist, hold and pause read from the
     persisted state, on the safety clock of ``loop``."""
     safe = safe_now_of(loop.clock)
     rs = settings.router(router_id)
     return gate(
-        decision,
+        inp,
         mode=rs.mode,
         allowlist=rs.allowlist,
         module_enabled=settings.enabled,
         held=loop.hold_on(router_id, safe) is not None,
         fleet_paused=loop.fleet.paused(safe),
-        in_maintenance=in_maintenance,
         guards_green=guards_green,
+        limits=limits,
     )
 
 
@@ -1212,7 +1387,7 @@ class LoopVerdict:
 
 
 LOOP_CODES: Final = frozenset(
-    {"breaker_open", "fleet_paused", "cooling_down", "max_attempts"}
+    {"breaker_open", "fleet_paused", "cooling_down", "max_attempts", "min_interval"}
 )
 
 
@@ -1238,8 +1413,9 @@ def backoff_schedule(
     return tuple(cooldown_after(limits, i) for i in range(1, n + 1))
 
 
-def _in_window(att: AttemptRecord, safe: float) -> bool:
-    return att.window_start is not None and safe < att.window_start + ATTEMPT_WINDOW_S
+def _window_times(att: AttemptRecord, safe: float) -> tuple[float, ...]:
+    """Attempt times in the sliding 24 h span that ends at ``safe``."""
+    return att.times_in_window(safe, ATTEMPT_WINDOW_S)
 
 
 def book_attempt(
@@ -1247,24 +1423,32 @@ def book_attempt(
 ) -> AttemptRecord:
     """The attempt record after one more attempt at ``safe_now``.
 
-    The count restarts after 24 h; the cooldown is :func:`cooldown_after`
-    of the attempt's number in the window (the store books the same).
+    Attempts count in a sliding 24 h span of safety time; the cooldown is
+    :func:`cooldown_after` of the number of attempts in that span, and a
+    running cooldown is never shortened. The new attempt's result is
+    pending (``last_result`` None) until :func:`record_outcome` notes it.
+    The store books exactly the same (review of PR #77).
     """
     safe = _safe(safe_now)
     if safe > TIME_MAX - _BOOK_HEADROOM_S:
         raise PolicyError("invalid clock")
-    att = record or AttemptRecord()
-    fresh = not _in_window(att, safe)
-    count = 1 if fresh else min(att.count + 1, 1000)
+    att = AttemptRecord() if record is None else record
+    recent = (*_window_times(att, safe), safe)
+    count = min(len(recent), 1000)
     step = min(count - 1, BACKOFF_STEP_MAX)
     backoff = min(limits.backoff_base_s * 2**step, limits.backoff_cap_s)
+    until = safe + max(limits.cooldown_s, backoff)
+    if att.cooldown_until is not None and att.cooldown_until > until:
+        until = att.cooldown_until
+    kept = recent[-RECENT_ATTEMPTS_MAX:]
     return AttemptRecord(
         count=count,
-        window_start=safe if fresh else att.window_start,
+        window_start=kept[0],
         last_at=safe,
-        cooldown_until=safe + max(limits.cooldown_s, backoff),
+        cooldown_until=until,
         backoff_step=step,
-        last_result=att.last_result,
+        last_result=None,
+        recent=kept,
     )
 
 
@@ -1290,7 +1474,9 @@ def loop_verdict(
     """May one more attempt of an action with ``keys`` run at ``safe_now``?
 
     In this order: an open breaker on any key (only an admin closes it), a
-    fleet pause, a running cooldown, the attempts per 24 h used up.
+    fleet pause, a running cooldown, ``max_attempts_24h`` attempts already
+    in the sliding 24 h span (``retry_at``: when the oldest of them that
+    must leave has left).
     """
     safe = _safe(safe_now)
     keys = tuple(keys)
@@ -1311,14 +1497,15 @@ def loop_verdict(
     ]
     if cooling:
         return LoopVerdict(allowed=False, reason="cooling_down", retry_at=max(cooling))
-    used = [
-        att.window_start + ATTEMPT_WINDOW_S
-        for key in keys
-        if (att := attempts.get(key)) is not None
-        and att.window_start is not None
-        and _in_window(att, safe)
-        and att.count >= limits.max_attempts_24h
-    ]
+    used: list[float] = []
+    for key in keys:
+        att = attempts.get(key)
+        if att is None:
+            continue
+        times = _window_times(att, safe)
+        n = limits.max_attempts_24h
+        if len(times) >= n:
+            used.append(times[len(times) - n] + ATTEMPT_WINDOW_S)
     if used:
         return LoopVerdict(allowed=False, reason="max_attempts", retry_at=max(used))
     return LoopVerdict(allowed=True)
@@ -1422,13 +1609,18 @@ def record_outcome(
     * the attempt records of ``keys`` note the result (no new attempt);
     * breakers: :func:`opens_at_once` events open at once; a clean refusal
       counts and opens at ``auto_failures_to_open`` (automatic) or
-      ``manual_failures_to_open`` (manual) failures; RESOLVED resets the
-      count of a closed breaker and never closes an open one;
+      ``manual_failures_to_open`` (manual) failures. RESOLVED never closes
+      an open breaker and never resets the count (review of PR #77: manual
+      refusals between successes must still open it); only an admin's
+      :func:`acknowledge_breaker` resets it;
     * fleet: every event but RESOLVED is a failure; ``fleet_failure_threshold``
       failures within 24 h pause Auto-Heal fleet-wide for ``fleet_pause_s``
       (a longer pause in force stays).
     """
     safe = _safe(safe_now)
+    policy = _limits(policy)
+    if type(automatic) is not bool:
+        raise _fail("automatic")
     event = OutcomeEvent(event)
     keys = tuple(dict.fromkeys(keys))
     new_attempts = dict(attempts)
@@ -1442,10 +1634,11 @@ def record_outcome(
         policy.auto_failures_to_open if automatic else policy.manual_failures_to_open
     )
     for key in keys:
-        br = breakers.get(key) or BreakerRecord()
+        br = breakers.get(key)
+        if br is None:
+            br = BreakerRecord()  # no record: never failed, closed
         if event is OutcomeEvent.RESOLVED:
-            if br.state is BreakerState.CLOSED and br.failures:
-                br = replace(br, failures=0)
+            pass  # neither closes nor forgets earlier failures
         else:
             failures = min(br.failures + 1, 1000)
             if br.state is BreakerState.OPEN:
@@ -1508,19 +1701,28 @@ def prior_failed_attempts(
     attempts: Mapping[LoopKey, AttemptRecord],
     safe_now: float,
 ) -> int:
-    """Attempts in the 24 h window that are not known to have resolved.
+    """Attempts in the sliding 24 h span that are not known to have resolved.
 
-    The store keeps one count and the last result per key, so every
-    attempt in the window counts unless the last one resolved (then all but
-    that one count); the highest over the keys.
+    The store keeps the attempt times and the result of the LAST attempt
+    only (None while pending: booking resets it). So every attempt in the
+    span counts, except the last one when it is in the span and its result
+    is ``resolved``; the highest over the keys.
     """
     safe = _safe(safe_now)
     worst = 0
     for key in keys:
         att = attempts.get(key)
-        if att is None or not _in_window(att, safe):
+        if att is None:
             continue
-        count = att.count - (1 if att.last_result == OutcomeEvent.RESOLVED.value else 0)
+        times = _window_times(att, safe)
+        count = len(times)
+        if (
+            count > 0
+            and att.last_at is not None
+            and times[-1] == att.last_at
+            and att.last_result == OutcomeEvent.RESOLVED.value
+        ):
+            count -= 1
         worst = max(worst, count)
     return worst
 
@@ -1540,11 +1742,18 @@ def dedupe_verdict(
     action_type: str,
     params: Mapping[str, Any],
     incident_id: str | None,
-    components: Sequence[Component],
 ) -> DedupeVerdict:
     """The open action a new one would duplicate: same (router, action,
-    params), same root incident (fleet-wide), or same (router, component)."""
-    held = loop.action_dedupe.get(action_dedupe_id(router_id, action_type, params))
+    params), same root incident (fleet-wide), or same (router, component).
+
+    Action, parameters and components come from the catalog validation
+    (raises :class:`heal_catalog.CatalogError`), never from the caller.
+    """
+    va = hc.validate(action_type, params)
+    components: tuple[Component, ...] = va.components
+    held = loop.action_dedupe.get(
+        action_dedupe_id(router_id, va.action_type, dict(va.params))
+    )
     if held is not None:
         return DedupeVerdict(duplicate_of=held, kind="action")
     if incident_id is not None:
@@ -1556,6 +1765,23 @@ def dedupe_verdict(
         if held is not None:
             return DedupeVerdict(duplicate_of=held, kind="component")
     return DedupeVerdict()
+
+
+def interval_verdict(
+    action_type: str, *, last_run_at: float | None, safe_now: float
+) -> LoopVerdict:
+    """The catalog's shortest interval between two runs on one router
+    (``diag.refresh``: 300 s). ``last_run_at`` None: it never ran on this
+    router. Safety-clock times only."""
+    found = hc.entry(action_type)
+    safe = _safe(safe_now)
+    if last_run_at is None or found.min_interval_s == 0:
+        return LoopVerdict(allowed=True)
+    last = _safe(last_run_at, "last_run_at")
+    until = last + found.min_interval_s
+    if safe < until:
+        return LoopVerdict(allowed=False, reason="min_interval", retry_at=until)
+    return LoopVerdict(allowed=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1581,6 +1807,9 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "never_wpad_restart": "Ein Neustart von wpad (WLAN aller Clients) steht nicht im Katalog.",
         "never_config_write": "Konfiguration schreiben steht nicht im Katalog.",
         "never_shell": "Befehle auf dem Router gibt es nicht.",
+        "never_dhcp_lease_delete": "DHCP-Leases werden nie gelöscht.",
+        "entry_not_in_catalog": "Der Katalogeintrag ist nicht der des Katalogs.",
+        "components_invalid": "Die Bauteile passen nicht zu den Parametern.",
         # catalog status reasons
         "first_write_release_approval_only": "Erste schreibende Aktion: nur mit Freigabe, ab 1.54.0.",
         "call_unverified_on_fleet": "Der Router-Aufruf ist auf dieser Flotte nicht geprüft.",
@@ -1597,6 +1826,8 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "wireless_uplink_radio": "Das Funkmodul trägt einen drahtlosen Uplink.",
         "uplink_for_other_routers": "Hinter diesem Ziel hängen weitere Router.",
         "clients_affected": "Verbundene Clients wären betroffen.",
+        "service_serves_other_routers": "Andere Router und ihre Clients nutzen DNS/DHCP dieses Routers.",
+        "service_config_unapplied": "Die gespeicherte Konfiguration des Dienstes ist nicht angewendet; ein Neustart würde sie in Kraft setzen (Drift-Playbook statt Neustart).",
         "context_missing": "Nötige Angaben zum Router fehlen; das Risiko gilt als hoch.",
         "not_in_catalog": "Nicht im Katalog: das Risiko gilt als hoch.",
         # decision rules
@@ -1608,6 +1839,9 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "concurrent_repair": "Auf dem Router läuft schon eine Reparatur.",
         "risk_high_no_recovery": "Hohes Risiko ohne Wiederherstellungsweg.",
         "no_incident": "Kein Vorfall belegt diese Aktion.",
+        "history_unknown": "Die Versuche der letzten 24 h sind unbekannt.",
+        "cause_outside_router": "Die Ursache liegt außerhalb des Routers; ein Neustart hilft nicht.",
+        "cause_location_unknown": "Unklar, ob die Ursache außerhalb des Routers liegt.",
         "root_unknown": "Unklar, ob es der Wurzelvorfall ist.",
         "temporal_correlation_only": "Nur zeitlicher Zusammenhang: zuerst diagnostizieren.",
         "evidence_stale": "Die Hinweise sind veraltet.",
@@ -1648,15 +1882,18 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "target_fact_none": "Kein Befund am Ziel.",
         "prior_failed_attempts": "Fehlgeschlagene oder unklare Versuche in 24 h.",
         "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+        "prior_attempts_unknown": "Unbekannt, ob es frühere Versuche gab.",
         "no_config_change_24h": "Keine Konfigurationsänderung in 24 h.",
         "config_change_24h": "Konfigurationsänderung im selben Bereich in 24 h.",
         "config_change_unknown": "Unbekannt, ob sich die Konfiguration geändert hat.",
         "severity_info": "Nur ein Hinweis (info).",
         "severity_warning": "Warnung.",
         "severity_critical": "Kritisch.",
+        "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
         "within_range": "Summe liegt zwischen 0 und 100.",
         "clamped_to_range": "Summe auf 0 bis 100 begrenzt.",
         # gate
+        "gate_input_invalid": "Sperre, Pause oder Modulschalter sind unklar: nichts erlaubt.",
         "module_disabled": "Self-Healing ist ausgeschaltet.",
         "risk_below_catalog": "Risiko unter dem Katalogwert: abgelehnt.",
         "risk_high_never_authorised": "Risiko 3 wird nie freigegeben.",
@@ -1678,6 +1915,7 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         # loop
         "cooling_down": "Abklingzeit läuft.",
         "max_attempts": "Versuche in 24 h aufgebraucht.",
+        "min_interval": "Mindestabstand zwischen zwei Läufen noch nicht erreicht.",
     }
 )
 
@@ -1724,6 +1962,7 @@ __all__ = [
     "effective_mode",
     "gate",
     "gate_for_router",
+    "interval_verdict",
     "is_allowlisted",
     "loop_verdict",
     "loop_verdict_for",

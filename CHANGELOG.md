@@ -169,10 +169,47 @@ keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwickl
     zurückgerollten Versuch; nach einer sauberen Ablehnung erst ab 1 automatischen bzw.
     2 manuellen. Schließen kann ihn nur ein Administrator. Flotten-Pause 24 h ab 3
     Fehlschlägen in 24 h. Alle Zeiten laufen auf der Sicherheitsuhr.
-- Paket B bleibt unverändert; ein Test hält fest, dass Richtlinie und Speicher Versuche gleich
-  zählen und die Richtlinie nie mehr erlaubt als der Speicher.
-- Tests: `tests/test_heal_catalog_v1530.py` (86) und `tests/test_heal_policy_v1530.py` (140).
-  Bei der Mutationsprüfung ließ jede der 32 gezielten Lockerungen mindestens einen Test
+- Am Speicher aus Paket B ändert sich nur das Zählen der Versuche (siehe unten); ein Test hält
+  fest, dass Richtlinie und Speicher Versuche gleich zählen und die Richtlinie nie mehr erlaubt
+  als der Speicher.
+- Tests: `tests/test_heal_catalog_v1530.py` (86), `tests/test_heal_policy_v1530.py` (141) und
+  `tests/test_heal_review_pr77_v1530.py` (108). Bei der Mutationsprüfung ließ jede der 32
+  gezielten Lockerungen mindestens einen Test scheitern.
+
+#### Nach dem Review von PR #77
+
+- **Der Gate nimmt keine Entscheidung mehr an.** `gate()` bekommt den `DecisionInput`, prüft
+  Aktion und Parameter selbst gegen den Katalog und trifft die Entscheidung selbst; eine
+  gefälschte oder mit `dataclasses.replace` veränderte Entscheidung kann nichts freischalten.
+  Eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst; Parameter werden genau
+  einmal gelesen und eingefroren. Wartung liest der Gate aus demselben Fakt wie `decide()`.
+- **Unbekannt heißt nie harmlos:** unbekannter Verlauf der Versuche sperrt jede schreibende
+  Aktion (`history_unknown`) und kostet 25 Punkte; unbekannte Schwere zählt wie `info`;
+  `held`, `fleet_paused` und `module_enabled` müssen echte Wahrheitswerte sein.
+- **Dienst-Neustart:** bleibt Risiko 2 auf dem Gateway, aber Rolle, abhängige Router und die
+  Zahl der Router und Clients, die DNS/DHCP des Routers nutzen, sind nötige Fakten; die
+  Freigabe zeigt diese Zahlen, und ein Router, dessen DNS/DHCP andere Router bedient, bekommt
+  den Regelcode `service_serves_other_routers`. Eine gespeicherte, noch nicht geladene
+  Konfiguration des Dienstes sperrt den Neustart (Not Safe), unbekannt heißt Insufficient
+  Evidence. Neu ist der Fakt „Ursache außerhalb des Routers“ (Paket F füllt ihn): sicher
+  außerhalb sperrt, unbekannt ebenfalls. Rollback-Aussage ehrlicher: lädt die gespeicherte
+  Konfiguration, kein Zurücknehmen, manuelle Wiederherstellung, wenn der Dienst nicht
+  wiederkommt.
+- **Versuchsgrenze als gleitendes Fenster:** höchstens N Versuche in jeder Spanne von 24 h
+  (vorher ein festes Fenster, das nach 24 h neu anfing). Eine laufende Abklingzeit wird nie
+  verkürzt, ein Versuch ohne festgehaltenen Ausgang zählt nie als Erfolg, und Erfolge setzen
+  die Fehlschläge eines Schutzschalters nicht mehr zurück. Speicher
+  `openwrt_router.self_healing` jetzt Version 1.2: der Versuchsdatensatz bekommt nur das Feld
+  `recent` dazu; eine Datei des bisherigen Stands lädt weiter (ihre Versuche gelten als zum
+  letzten Versuch gemacht).
+- Kleineres: `diag.refresh` höchstens einmal je 5 Minuten je Router; das Löschen von
+  DHCP-Leases (`dhcp.*`) steht nie im Katalog; `PolicyLimits` meldet Fehler als
+  `PolicyError`; `limits` muss genau `PolicyLimits` sein; Doppelte werden aus der Prüfung des
+  Katalogs abgeleitet.
+- Die Auswahl der Aktionen (Fragen Q5–Q7) ist als **vorläufige strenge Voreinstellung**
+  beschrieben, nicht als Entscheidung des Eigentümers.
+- Mutationsprüfung: die 32 Mutationen des Reviewers (darunter die zehn, die das Review
+  überlebt hatten) und 44 eigene an den neuen Regeln lassen jede mindestens einen Test
   scheitern.
 
 ## [1.52.3] - 2026-11-27

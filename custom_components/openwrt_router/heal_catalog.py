@@ -21,14 +21,16 @@ Closed means:
   with a :class:`CatalogError` whose message and ``code`` never repeat the
   value.
 
-Owner decisions (2026-11-27): ``service.restart`` for dnsmasq and odhcpd is
-the only write intended for the first write release (Risk 2, approval
-only). Radio restart, reboot, restore and interface up/down are modelled
-but disabled. Client actions (deauth, block, forced roaming), firewall,
-VLAN, management IP, routing and firmware changes, ``network reload`` and a
-``wpad`` restart are not in the catalog at all. Release 1.53.0 is Observe
-only: :data:`EXECUTABLE_IN_RELEASE` names the only action that may "run",
-and it makes no router call.
+PROVISIONAL strict defaults (the order of package D; the owner has not
+answered the open questions Q5-Q7 of docs §16 yet): ``service.restart`` for
+dnsmasq and odhcpd is the only write intended for the first write release
+(Risk 2, approval only). Radio restart, reboot, restore and interface
+up/down are modelled but disabled. Client actions (deauth, block, forced
+roaming), firewall, VLAN, management IP, routing and firmware changes,
+``network reload``, a ``wpad`` restart and deleting DHCP leases are not in
+the catalog at all. Release 1.53.0 is Observe only (owner decision):
+:data:`EXECUTABLE_IN_RELEASE` names the only action that may "run", and it
+makes no router call.
 """
 
 from __future__ import annotations
@@ -154,15 +156,45 @@ class CatalogEntry:
     rollback: RollbackKind
     rollback_statement: str
     est_outage_s: int = 0
+    # the shortest time between two runs on one router (0: no limit here;
+    # the loop protection applies to writes)
+    min_interval_s: int = 0
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ValidatedAction:
-    """An action type and parameters that passed the catalog."""
+    """An action type and parameters that passed the catalog.
+
+    Built only around the catalog's own entry object (an equal copy is
+    refused: ``entry_not_in_catalog``); the parameters are validated again
+    and frozen, and the components are derived from them (given components
+    must match). ``dataclasses.replace`` runs the same checks (review of
+    PR #77).
+    """
 
     entry: CatalogEntry
     params: Mapping[str, str] = field(default_factory=dict)
     components: tuple[Component, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Refuse anything that is not exactly what the catalog allows."""
+        found = self.entry
+        if (
+            type(found) is not CatalogEntry
+            or type(found.action_type) is not str
+            or CATALOG.get(found.action_type) is not found
+        ):
+            raise CatalogError("entry_not_in_catalog")
+        clean = validate_params(found, self.params)
+        derived: tuple[Component, ...] = ()
+        if found.target_param is not None and found.target_kind is not None:
+            derived = (
+                Component(kind=found.target_kind, name=clean[found.target_param]),
+            )
+        if self.components != () and tuple(self.components) != derived:
+            raise CatalogError("components_invalid")
+        object.__setattr__(self, "params", MappingProxyType(clean))
+        object.__setattr__(self, "components", derived)
 
     @property
     def action_type(self) -> str:
@@ -224,6 +256,7 @@ _ENTRIES: Final = (
         verification_probes=("poll_arrived",),
         rollback=RollbackKind.READ_ONLY,
         rollback_statement="read_only_nothing_changes",
+        min_interval_s=300,  # at most one per 5 minutes per router (design)
     ),
     _entry(
         action_type="diag.ha_probes",
@@ -258,7 +291,15 @@ _ENTRIES: Final = (
         disruption=Disruption.SERVICE,
         target_kind=ComponentKind.SERVICE,
         target_param="service",
-        needs_facts=(*_WRITE_FACTS, "service_enabled", "clients_on_router"),
+        needs_facts=(
+            *_WRITE_FACTS,
+            "service_enabled",
+            "service_config_unapplied",
+            "clients_on_router",
+            "dependants",
+            "service_dependant_routers",
+            "service_dependant_clients",
+        ),
         verification_probes=(
             "service_running_new_pid",
             "service_stable_two_polls",
@@ -267,7 +308,9 @@ _ENTRIES: Final = (
             "ha_dns_probe_if_configured",
         ),
         rollback=RollbackKind.MANUAL_RECOVERY,
-        rollback_statement="no_config_change_manual_if_not_back",
+        # a restart loads the SAVED configuration: if it differs from the
+        # running one, the restart puts that change into effect; no undo
+        rollback_statement="applies_saved_config_no_undo_manual_if_not_back",
         est_outage_s=5,
     ),
     _entry(
@@ -391,6 +434,7 @@ NEVER_IN_CATALOG: Final[Mapping[str, str]] = MappingProxyType(
         "sysupgrade.": "never_firmware",
         "network.": "never_network_reload",
         "wpad.": "never_wpad_restart",
+        "dhcp.": "never_dhcp_lease_delete",
         "uci.": "never_config_write",
         "shell.": "never_shell",
         "ssh.": "never_shell",
@@ -405,6 +449,8 @@ REFUSAL_CODES: Final = frozenset(
         "param_unknown",
         "param_missing",
         "param_value_invalid",
+        "entry_not_in_catalog",
+        "components_invalid",
         *NEVER_IN_CATALOG.values(),
     }
 )
@@ -448,18 +494,22 @@ def validate_params(
     ``subset``: missing parameters are allowed (an allowlist entry names a
     subset); unknown names and values outside the sets never are.
     """
-    raw = _params(params)
+    # read every value exactly once: the checked value is the kept value,
+    # even from a mapping that answers differently on each read
+    items = list(_params(params).items())
     specs = {p.name: p for p in found.params}
-    out: dict[str, str] = {}
-    for key in raw:
-        if type(key) is not str or key not in specs:
+    seen: dict[str, Any] = {}
+    for key, value in items:
+        if type(key) is not str or key not in specs or key in seen:
             raise CatalogError("param_unknown")
+        seen[key] = value
+    out: dict[str, str] = {}
     for name, spec in specs.items():
-        if name not in raw:
+        if name not in seen:
             if subset:
                 continue
             raise CatalogError("param_missing")
-        value = raw[name]
+        value = seen[name]
         if not spec.accepts(value):
             raise CatalogError("param_value_invalid")
         out[name] = value
@@ -472,16 +522,7 @@ def validate(action_type: Any, params: Any) -> ValidatedAction:
     Validation is about shape only: a disabled action validates (the policy
     refuses it as Unsupported with its reason).
     """
-    found = entry(action_type)
-    clean = validate_params(found, params)
-    components: tuple[Component, ...] = ()
-    if found.target_param is not None and found.target_kind is not None:
-        components = (
-            Component(kind=found.target_kind, name=clean[found.target_param]),
-        )
-    return ValidatedAction(
-        entry=found, params=MappingProxyType(clean), components=components
-    )
+    return ValidatedAction(entry=entry(action_type), params=params)
 
 
 def try_validate(
@@ -532,6 +573,7 @@ def catalog_table() -> list[dict[str, Any]]:
                 "rollback": e.rollback.value,
                 "rollback_statement": e.rollback_statement,
                 "est_outage_s": e.est_outage_s,
+                "min_interval_s": e.min_interval_s,
                 "executable_in_release": e.action_type in EXECUTABLE_IN_RELEASE,
             }
         )

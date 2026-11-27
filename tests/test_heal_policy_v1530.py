@@ -69,6 +69,9 @@ def ctx(**over: Any) -> hp.RiskContext:
         "target_is_wireless_uplink": False,
         "target_carries_dependants": False,
         "service_enabled": True,
+        "service_dependant_routers": 0,
+        "service_dependant_clients": 12,
+        "service_config_unapplied": False,
         "clients_on_router": 12,
         "clients_on_target": 4,
         "open_security_findings": 0,
@@ -93,6 +96,7 @@ def inc(**over: Any) -> hp.IncidentFacts:
         "temporal_only": False,
         "evidence_fresh": True,
         "target_fact": hp.TargetFact.DIRECT,
+        "cause_outside_router": False,
     }
     base.update(over)
     return hp.IncidentFacts(**base)
@@ -108,6 +112,7 @@ def dinput(
 ) -> hp.DecisionInput:
     if params is None and action_type == "service.restart":
         params = DNSMASQ
+    over.setdefault("prior_failed_attempts", 0)  # a known, clean history
     return hp.DecisionInput(
         action_type=action_type,
         params=params,
@@ -122,21 +127,21 @@ def decide(*args: Any, **kwargs: Any) -> hp.PolicyDecision:
 
 
 def gate(
-    decision: hp.PolicyDecision,
+    inp: hp.DecisionInput,
     *,
     mode: hm.HealMode = M.OBSERVE,
     allowlist: tuple[hm.AllowEntry, ...] = (),
     **over: Any,
 ) -> hp.GateVerdict:
+    """The gate decides itself: it takes the input, never a decision."""
     kwargs: dict[str, Any] = {
         "module_enabled": True,
         "held": False,
         "fleet_paused": False,
-        "in_maintenance": False,
         "guards_green": True,
     }
     kwargs.update(over)
-    return hp.gate(decision, mode=mode, allowlist=allowlist, **kwargs)
+    return hp.gate(inp, mode=mode, allowlist=allowlist, **kwargs)
 
 
 def allow(action_type: str, max_risk: int = 1, **params: Any) -> hm.AllowEntry:
@@ -166,14 +171,64 @@ def risk(action_type: str, params: Any = None, **over: Any) -> hp.RiskAssessment
 
 
 def test_the_same_service_restart_on_different_roles_has_different_risk() -> None:
-    # the gateway: dnsmasq is enabled and serves the network
-    gw = risk("service.restart", DNSMASQ, role="gateway", service_enabled=True)
-    assert gw.risk_class is RC.MEDIUM and gw.assessed
+    """Role and topology change what the decision says, never lowering it.
+
+    The gateway serves DNS/DHCP for the whole fleet (five routers behind it,
+    their clients on its dnsmasq); a leaf AP serves only its own clients.
+    The owner keeps the restart at Risk 2 on the gateway (approval), but the
+    gateway's decision names the routers that depend on it and carries the
+    numbers for the approval; the leaf AP's does not.
+    """
+    gateway_ctx = ctx(
+        role="gateway",
+        dependants=5,
+        service_dependant_routers=5,
+        service_dependant_clients=60,
+        clients_on_router=12,
+    )
+    leaf_ctx = ctx(
+        role="access_point",
+        dependants=0,
+        service_dependant_routers=0,
+        service_dependant_clients=4,
+        clients_on_router=4,
+    )
+    gw = risk("service.restart", DNSMASQ, **dataclasses.asdict(gateway_ctx))
+    leaf = risk("service.restart", DNSMASQ, **dataclasses.asdict(leaf_ctx))
+    base = hc.CATALOG["service.restart"].base_risk
+    assert gw.assessed and leaf.assessed
+    assert gw.risk_class >= base and leaf.risk_class >= base  # never lowered
+    assert "service_serves_other_routers" in gw.reasons
+    assert "service_serves_other_routers" not in leaf.reasons
+    assert gw.reasons != leaf.reasons
+    d_gw = hp.decide(dinput(context=gateway_ctx, config_change_24h=False))
+    d_leaf = hp.decide(dinput(context=leaf_ctx, config_change_24h=False))
+    assert d_gw.impact != d_leaf.impact
+    assert d_gw.impact["service_dependant_routers"] == 5
+    assert d_gw.impact["service_dependant_clients"] == 60
+    assert d_leaf.impact["service_dependant_routers"] == 0
+    hits_gw = {h.code for h in d_gw.hits} | set(d_gw.risk.reasons)
+    hits_leaf = {h.code for h in d_leaf.hits} | set(d_leaf.risk.reasons)
+    assert hits_gw != hits_leaf
+    # an unknown role or topology is never a lower risk either
+    for fact in ("role", "dependants", "service_dependant_routers"):
+        unknown = risk(
+            "service.restart",
+            DNSMASQ,
+            **{**dataclasses.asdict(gateway_ctx), fact: None},
+        )
+        assert unknown.risk_class is RC.HIGH and not unknown.assessed
+
+
+def test_a_service_disabled_on_purpose_is_never_restarted() -> None:
     # an AP where dnsmasq is disabled on purpose: starting it would put a
     # second DHCP/DNS server on the LAN, and "not running" is no fault
     ap = risk("service.restart", DNSMASQ, role="access_point", service_enabled=False)
     assert ap.risk_class is RC.HIGH
     assert "service_disabled_on_purpose" in ap.reasons
+    d = hp.decide(dinput(context=ctx(role="access_point", service_enabled=False)))
+    assert d.outcome is O.NOT_SAFE
+    assert d.why_not == "service_disabled_on_purpose"
 
 
 def test_the_same_radio_restart_on_different_topologies_has_different_risk() -> None:
@@ -489,7 +544,7 @@ def test_unauthorised_actions_are_unsupported(
     assert d.why_not == why_not
     for mode in M:
         v = gate(
-            d,
+            dinput(action_type, params),
             mode=mode,
             allowlist=(allow("diag.refresh"),),
         )
@@ -518,18 +573,20 @@ def test_risk_3_can_never_be_authorised_by_a_general_switch() -> None:
         ("router.reboot", {}),
         ("config.restore", {"version_id": "bkp_" + "e" * 32}),
     ):
-        d = decide(action_type, params)
-        v = gate(d, mode=M.AUTO_HEAL, allowlist=(sneaky,))
+        v = gate(dinput(action_type, params), mode=M.AUTO_HEAL, allowlist=(sneaky,))
         assert v.permission is P.NONE
     # context-raised Risk 3 of a ready action: Not Safe, nothing may happen
-    d = decide(context=ctx(role="access_point", service_enabled=False))
+    inp = dinput(context=ctx(role="access_point", service_enabled=False))
+    d = hp.decide(inp)
     assert d.risk.risk_class is RC.HIGH and d.outcome is O.NOT_SAFE
     for mode in M:
-        assert gate(d, mode=mode).permission is P.NONE
+        v = gate(inp, mode=mode)
+        assert v.permission is P.NONE
+        assert "risk_high_never_authorised" in v.reasons
 
 
-def test_a_spoofed_decision_with_risk_3_is_still_refused_by_the_gate() -> None:
-    """Defence in depth: the gate checks the risk itself."""
+def test_a_spoofed_decision_with_risk_3_cannot_reach_the_gate() -> None:
+    """The gate takes no decision object: a relabelled one is refused."""
     d = decide()
     spoofed = dataclasses.replace(
         d,
@@ -537,9 +594,8 @@ def test_a_spoofed_decision_with_risk_3_is_still_refused_by_the_gate() -> None:
         risk=dataclasses.replace(d.risk, risk_class=RC.HIGH),
     )
     for mode in M:
-        v = gate(spoofed, mode=mode, allowlist=(allow("diag.refresh"),))
-        assert v.permission is P.NONE
-        assert "risk_high_never_authorised" in v.reasons
+        with pytest.raises(hp.PolicyError):
+            gate(spoofed, mode=mode, allowlist=(allow("diag.refresh"),))  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -633,10 +689,10 @@ def test_a_stricter_score_threshold_is_configurable_a_looser_one_is_not() -> Non
     strict = hp.PolicyLimits(score_min=100)
     assert hp.decide(dinput(), strict).outcome is O.INSUFFICIENT_EVIDENCE
     for bad in (59, 0, 101, -1, True, 60.5):
-        with pytest.raises(hm.HealModelError):
+        with pytest.raises(hp.PolicyError):
             hp.PolicyLimits(score_min=bad)
     for name, bad in (("manual_failures_to_open", 3), ("auto_failures_to_open", 2)):
-        with pytest.raises(hm.HealModelError):
+        with pytest.raises(hp.PolicyError):
             hp.PolicyLimits(**{name: bad})
 
 
@@ -661,21 +717,20 @@ def test_temporal_only_never_yields_more_than_diagnose(seed: int) -> None:
             is_root=rng.choice([True, False, None]),
             evidence_fresh=rng.choice([True, False, None]),
         )
-        d = hp.decide(
-            hp.DecisionInput(
-                action_type=action_type,
-                params=_VALID[action_type],
-                incident=facts,
-                context=_random_context(rng),
-                prior_failed_attempts=rng.randint(0, 2),
-                config_change_24h=rng.choice([True, False, None]),
-            )
+        inp = hp.DecisionInput(
+            action_type=action_type,
+            params=_VALID[action_type],
+            incident=facts,
+            context=_random_context(rng),
+            prior_failed_attempts=rng.choice([0, 1, 2, None]),
+            config_change_24h=rng.choice([True, False, None]),
         )
+        d = hp.decide(inp)
         if hc.CATALOG[action_type].writes:
             assert d.outcome not in (O.RECOMMENDED, O.REQUIRES_APPROVAL)
             for mode in M:
                 v = gate(
-                    d,
+                    inp,
                     mode=mode,
                     allowlist=(allow("diag.refresh"),),
                 )
@@ -697,23 +752,23 @@ def test_temporal_only_never_yields_more_than_diagnose(seed: int) -> None:
 
 
 def test_observe_mode_only_recommends() -> None:
-    assert gate(decide()).permission is P.RECOMMEND
-    assert gate(decide("diag.refresh", {})).permission is P.RECOMMEND
-    v = gate(decide("observe.evaluate", {}))
+    assert gate(dinput()).permission is P.RECOMMEND
+    assert gate(dinput("diag.refresh", {})).permission is P.RECOMMEND
+    v = gate(dinput("observe.evaluate", {}))
     assert v.permission is P.RUN_READ_ONLY and v.executable_now
 
 
 def test_approval_mode_requires_an_explicit_approval() -> None:
-    v = gate(decide(), mode=M.APPROVAL)
+    v = gate(dinput(), mode=M.APPROVAL)
     assert v.permission is P.NEEDS_APPROVAL
     assert not v.executable_now  # 1.53.0: no write path
     assert not v.in_release
-    v = gate(decide("diag.refresh", {}), mode=M.APPROVAL)
+    v = gate(dinput("diag.refresh", {}), mode=M.APPROVAL)
     assert v.permission is P.NEEDS_APPROVAL
 
 
 def test_auto_heal_runs_only_allowlisted_low_risk_with_all_guards_green() -> None:
-    refresh = decide("diag.refresh", {})
+    refresh = dinput("diag.refresh", {})
     entry = allow("diag.refresh")
     v = gate(refresh, mode=M.AUTO_HEAL, allowlist=(entry,))
     assert v.permission is P.AUTO_RUN
@@ -730,13 +785,13 @@ def test_auto_heal_runs_only_allowlisted_low_risk_with_all_guards_green() -> Non
         assert "guards_not_green" in v.reasons
     # Risk 2 can never run by itself, even with a (crafted) matching entry
     crafted = dataclasses.replace(entry, action_type="service.restart")
-    v = gate(decide(), mode=M.AUTO_HEAL, allowlist=(crafted,))
+    v = gate(dinput(), mode=M.AUTO_HEAL, allowlist=(crafted,))
     assert v.permission is P.NEEDS_APPROVAL
     assert "risk_above_auto_limit" in v.reasons
 
 
 def test_an_allowlist_entry_with_params_matches_only_those_params() -> None:
-    refresh = decide("diag.refresh", {})
+    refresh = dinput("diag.refresh", {})
     # an entry with a parameter the action does not have never matches
     odd = hm.AllowEntry(action_type="diag.refresh", params={"service": "dnsmasq"})
     v = gate(refresh, mode=M.AUTO_HEAL, allowlist=(odd,))
@@ -744,7 +799,7 @@ def test_an_allowlist_entry_with_params_matches_only_those_params() -> None:
 
 
 def test_an_entry_whose_max_risk_is_below_the_actions_risk_does_not_match() -> None:
-    refresh = decide("diag.refresh", {})
+    refresh = dinput("diag.refresh", {})
     low = allow("diag.refresh", max_risk=0)
     v = gate(refresh, mode=M.AUTO_HEAL, allowlist=(low,))
     assert v.permission is P.NEEDS_APPROVAL
@@ -752,9 +807,9 @@ def test_an_entry_whose_max_risk_is_below_the_actions_risk_does_not_match() -> N
 
 def test_auto_heal_outcomes_below_recommended_permit_nothing() -> None:
     for d in (
-        decide(context=ctx(breaker_open=True)),
-        decide(incident=inc(temporal_only=True)),
-        decide("router.reboot", {}),
+        dinput(context=ctx(breaker_open=True)),
+        dinput(incident=inc(temporal_only=True)),
+        dinput("router.reboot", {}),
     ):
         v = gate(d, mode=M.AUTO_HEAL, allowlist=(allow("diag.refresh"),))
         assert v.permission in (P.NONE, P.RECOMMEND)
@@ -763,25 +818,25 @@ def test_auto_heal_outcomes_below_recommended_permit_nothing() -> None:
 
 def test_a_held_router_counts_as_observe_for_risk_1_and_more() -> None:
     for mode in M:
-        v = gate(decide(), mode=mode, held=True)
+        v = gate(dinput(), mode=mode, held=True)
         assert v.effective_mode is M.OBSERVE
         assert v.permission is P.RECOMMEND
         v = gate(
-            decide("diag.refresh", {}),
+            dinput("diag.refresh", {}),
             mode=mode,
             allowlist=(allow("diag.refresh"),),
             held=True,
         )
         assert v.permission is P.RECOMMEND
         # read-only diagnostics keep running
-        v = gate(decide("observe.evaluate", {}), mode=mode, held=True)
+        v = gate(dinput("observe.evaluate", {}), mode=mode, held=True)
         assert v.permission is P.RUN_READ_ONLY
 
 
 def test_a_paused_fleet_counts_as_observe_for_risk_1_and_more() -> None:
     for mode in (M.APPROVAL, M.AUTO_HEAL):
         v = gate(
-            decide("diag.refresh", {}),
+            dinput("diag.refresh", {}),
             mode=mode,
             allowlist=(allow("diag.refresh"),),
             fleet_paused=True,
@@ -789,31 +844,31 @@ def test_a_paused_fleet_counts_as_observe_for_risk_1_and_more() -> None:
         assert v.effective_mode is M.OBSERVE
         assert v.permission is P.RECOMMEND
         assert "fleet_paused" in v.reasons
-    v = gate(decide("observe.evaluate", {}), mode=M.AUTO_HEAL, fleet_paused=True)
+    v = gate(dinput("observe.evaluate", {}), mode=M.AUTO_HEAL, fleet_paused=True)
     assert v.permission is P.RUN_READ_ONLY
 
 
 def test_maintenance_blocks_auto_heal_but_not_proposals() -> None:
-    refresh = decide("diag.refresh", {})
+    # one source of truth: the context's maintenance fact
     for maint in (True, None):
         v = gate(
-            refresh,
+            dinput("diag.refresh", {}, context=ctx(in_maintenance=maint)),
             mode=M.AUTO_HEAL,
             allowlist=(allow("diag.refresh"),),
-            in_maintenance=maint,
         )
         assert v.permission is P.NEEDS_APPROVAL
         assert "in_maintenance" in v.reasons
     # a write in maintenance: risk at least Medium, still a proposal
-    d = decide(context=ctx(in_maintenance=True))
+    inp = dinput(context=ctx(in_maintenance=True))
+    d = hp.decide(inp)
     assert d.outcome is O.REQUIRES_APPROVAL
     assert "in_maintenance_window" in d.risk.reasons
-    assert gate(d, mode=M.APPROVAL, in_maintenance=True).permission is P.NEEDS_APPROVAL
+    assert gate(inp, mode=M.APPROVAL).permission is P.NEEDS_APPROVAL
 
 
 def test_the_module_switched_off_permits_nothing() -> None:
     for name in ("observe.evaluate", "diag.refresh"):
-        v = gate(decide(name, {}), mode=M.AUTO_HEAL, module_enabled=False)
+        v = gate(dinput(name, {}), mode=M.AUTO_HEAL, module_enabled=False)
         assert v.permission is P.NONE
         assert v.effective_mode is M.OBSERVE
 
@@ -869,13 +924,12 @@ def test_gate_for_router_reads_settings_holds_and_pause_from_the_state() -> None
     )
     loop = hm.LoopState()
     loop.clock = hm.SafetyClock().observe(T0)
-    refresh = decide("diag.refresh", {})
+    refresh = dinput("diag.refresh", {})
     v = hp.gate_for_router(
         refresh,
         settings=settings,
         loop=loop,
         router_id=R1,
-        in_maintenance=False,
         guards_green=True,
     )
     assert v.permission is P.AUTO_RUN
@@ -885,7 +939,6 @@ def test_gate_for_router_reads_settings_holds_and_pause_from_the_state() -> None
         settings=settings,
         loop=loop,
         router_id=R2,
-        in_maintenance=False,
         guards_green=True,
     )
     assert v.permission is P.RECOMMEND
@@ -898,7 +951,6 @@ def test_gate_for_router_reads_settings_holds_and_pause_from_the_state() -> None
         settings=settings,
         loop=loop,
         router_id=R1,
-        in_maintenance=False,
         guards_green=True,
     )
     assert v.permission is P.RECOMMEND and "router_held" in v.reasons
@@ -910,7 +962,6 @@ def test_gate_for_router_reads_settings_holds_and_pause_from_the_state() -> None
         settings=settings,
         loop=loop,
         router_id=R1,
-        in_maintenance=False,
         guards_green=True,
     )
     assert v.permission is P.RECOMMEND and "fleet_paused" in v.reasons
@@ -921,7 +972,6 @@ def test_gate_for_router_reads_settings_holds_and_pause_from_the_state() -> None
         settings=settings,
         loop=loop,
         router_id=R1,
-        in_maintenance=False,
         guards_green=True,
     )
     assert v.permission is P.AUTO_RUN
@@ -1052,10 +1102,17 @@ def test_cooldown_then_attempt_limit_then_a_new_window() -> None:
     assert not v.allowed and v.reason == "max_attempts"
     assert v.retry_at == T0 + 86400
     assert verdict(att, safe=T0 + 86399).reason == "max_attempts"
-    # the 24 h window is over: a fresh count starts
+    # sliding window: the first attempt has left the 24 h span, the second
+    # (at T0 + 1800) is still in it
     assert verdict(att, safe=T0 + 86400).allowed
     att[KEY] = hp.book_attempt(att[KEY], LIMITS, T0 + 86400)
-    assert att[KEY].count == 1 and att[KEY].window_start == T0 + 86400
+    assert att[KEY].count == 2 and att[KEY].window_start == T0 + 1800
+    assert att[KEY].recent == (T0 + 1800, T0 + 86400)
+    # cooldown after the 2nd attempt in the span: 3600 s
+    v = verdict(att, safe=T0 + 86401)
+    assert v.reason == "cooling_down" and v.retry_at == T0 + 86400 + 3600
+    # by then the attempt at T0 + 1800 has left the span: one more is allowed
+    assert verdict(att, safe=T0 + 86400 + 3600).allowed
 
 
 def test_limits_are_configurable_within_bounds_only() -> None:
@@ -1254,11 +1311,12 @@ def test_a_resolved_outcome_never_closes_an_open_breaker() -> None:
     up = outcome(EV.UNKNOWN, automatic=False)
     up = outcome(EV.RESOLVED, automatic=False, state=up, safe=T0 + 5)
     assert up.breakers[KEY].state is hm.BreakerState.OPEN
-    # a resolved outcome on a closed breaker resets its failure count
+    # a resolved outcome keeps the failure count of a closed breaker
+    # (review of PR #77: refusals between successes still add up)
     up = outcome(EV.REJECTED, automatic=False)
     up = outcome(EV.RESOLVED, automatic=False, state=up, safe=T0 + 5)
     assert up.breakers[KEY].state is hm.BreakerState.CLOSED
-    assert up.breakers[KEY].failures == 0
+    assert up.breakers[KEY].failures == 1
 
 
 def test_the_outcome_is_noted_on_the_attempt_record() -> None:
@@ -1452,7 +1510,6 @@ def test_dedupe_verdicts_follow_the_model_ids() -> None:
         action_type="service.restart",
         params=DNSMASQ,
         incident_id="inc-8",
-        components=(comp,),
     )
     assert same.duplicate_of == open_action.action_id and same.kind == "action"
     by_incident = hp.dedupe_verdict(
@@ -1461,16 +1518,26 @@ def test_dedupe_verdicts_follow_the_model_ids() -> None:
         action_type="diag.refresh",
         params={},
         incident_id="inc-7",
-        components=(),
     )
     assert by_incident.kind == "incident"
-    by_component = hp.dedupe_verdict(
+    # the component comes from the catalog (odhcpd is another component)
+    other = hp.dedupe_verdict(
         loop,
         router_id=R1,
         action_type="service.restart",
         params={"service": "odhcpd"},
         incident_id=None,
-        components=(comp,),
+    )
+    assert other.duplicate_of is None
+    only_component = hm.LoopState()
+    for d in open_action.component_dedupes:
+        only_component.component_dedupe[d] = open_action.action_id
+    by_component = hp.dedupe_verdict(
+        only_component,
+        router_id=R1,
+        action_type="service.restart",
+        params=DNSMASQ,
+        incident_id=None,
     )
     assert by_component.kind == "component"
     fresh = hp.dedupe_verdict(
@@ -1479,7 +1546,6 @@ def test_dedupe_verdicts_follow_the_model_ids() -> None:
         action_type="service.restart",
         params=DNSMASQ,
         incident_id="inc-9",
-        components=(comp,),
     )
     assert fresh.duplicate_of is None and fresh.kind is None
 
@@ -1561,15 +1627,24 @@ def test_the_policy_is_never_looser_than_the_stores_effective_mode() -> None:
     assert mine is M.OBSERVE
 
 
-def test_a_spoofed_risk_below_the_catalog_is_refused_by_the_gate() -> None:
-    d = decide()
-    spoofed = dataclasses.replace(
-        d,
-        outcome=O.RECOMMENDED,
-        risk=dataclasses.replace(d.risk, risk_class=RC.LOW),
-    )
+def test_a_risk_below_the_catalog_is_refused_by_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: even if ``decide`` ever lowered a risk below the
+    catalog's base, the gate refuses (it compares with the catalog itself)."""
+    real = hp.decide
+
+    def lowered(inp: hp.DecisionInput, limits: Any = hp.DEFAULT_POLICY_LIMITS):
+        d = real(inp, limits)
+        return dataclasses.replace(
+            d,
+            outcome=O.RECOMMENDED,
+            risk=dataclasses.replace(d.risk, risk_class=RC.LOW),
+        )
+
+    monkeypatch.setattr(hp, "decide", lowered)
     for mode in M:
-        v = gate(spoofed, mode=mode, allowlist=(allow("diag.refresh"),))
+        v = gate(dinput(), mode=mode, allowlist=(allow("diag.refresh"),))
         assert v.permission is P.NONE
         assert v.reasons == ("risk_below_catalog",)
 

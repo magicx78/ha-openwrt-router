@@ -103,6 +103,7 @@ from .heal_model import (
     IN_FLIGHT_STATES,
     LOCK_SOURCE_ENGINE,
     LOCKING_STATES,
+    RECENT_ATTEMPTS_MAX,
     TERMINAL_STATES,
     TIME_MAX,
     TRANSITIONS,
@@ -135,7 +136,9 @@ _LOGGER = logging.getLogger(__name__)
 
 HEAL_STORE_KEY: Final = f"{DOMAIN}.self_healing"
 HEAL_STORE_VERSION: Final = 1
-HEAL_STORE_MINOR_VERSION: Final = 1
+# minor 2 (review of PR #77): attempt records carry ``recent`` (additive;
+# records of minor 1 load with their attempts at ``last_at``)
+HEAL_STORE_MINOR_VERSION: Final = 2
 
 STORE_MAX_BYTES: Final = 1_000_000
 MAX_ACTIONS: Final = 500
@@ -252,8 +255,8 @@ _SAVED_AT_SLACK: Final = 16
 
 
 def _in_window(att: AttemptRecord, safe: float) -> bool:
-    """The attempt record's 24 h window is still open at ``safe``."""
-    return att.window_start is not None and safe < att.window_start + ATTEMPT_WINDOW_S
+    """An attempt of the record lies in the sliding 24 h span ending at ``safe``."""
+    return bool(att.times_in_window(safe, ATTEMPT_WINDOW_S))
 
 
 _IN_FLIGHT_NAMES: Final = frozenset(state.value for state in IN_FLIGHT_STATES)
@@ -991,8 +994,8 @@ class SelfHealingStore:
             att = self.loop.attempts.get(key)
             if (
                 att is not None
-                and _in_window(att, safe)
-                and att.count >= limits.max_attempts_24h
+                and len(att.times_in_window(safe, ATTEMPT_WINDOW_S))
+                >= limits.max_attempts_24h
             ):
                 return "max_attempts"
         return None
@@ -1002,23 +1005,32 @@ class SelfHealingStore:
     ) -> tuple[dict[LoopKey, AttemptRecord], int]:
         """The attempt records after one more attempt of ``action``, and its
         attempt number (cooldown: the longer of the cooldown and the
-        exponential backoff, capped)."""
+        exponential backoff, capped). Attempts count in a sliding 24 h span;
+        a running cooldown is never shortened; the new attempt's result is
+        pending (None) until its outcome is recorded (review of PR #77)."""
         limits = self.settings.limits
         out: dict[LoopKey, AttemptRecord] = {}
         number = 1
         for key in action.loop_keys:
-            att = self.loop.attempts.get(key) or AttemptRecord()
-            fresh = not _in_window(att, safe)
-            count = 1 if fresh else min(att.count + 1, 1000)
+            att = self.loop.attempts.get(key)
+            if att is None:
+                att = AttemptRecord()
+            recent = (*att.times_in_window(safe, ATTEMPT_WINDOW_S), safe)
+            count = min(len(recent), 1000)
             step = min(count - 1, BACKOFF_STEP_MAX)
             backoff = min(limits.backoff_base_s * 2**step, limits.backoff_cap_s)
+            until = safe + max(limits.cooldown_s, backoff)
+            if att.cooldown_until is not None and att.cooldown_until > until:
+                until = att.cooldown_until
+            kept = recent[-RECENT_ATTEMPTS_MAX:]
             out[key] = AttemptRecord(
                 count=count,
-                window_start=safe if fresh else att.window_start,
+                window_start=kept[0],
                 last_at=safe,
-                cooldown_until=safe + max(limits.cooldown_s, backoff),
+                cooldown_until=until,
                 backoff_step=step,
-                last_result=att.last_result,
+                last_result=None,
+                recent=kept,
             )
             number = max(number, count)
         return out, min(number, 100)
