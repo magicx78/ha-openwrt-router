@@ -166,6 +166,9 @@
 .tm-radios__band { font-weight: 600; }
 .tm-value--unknown, .tm-reason { color: var(--text-secondary); }
 .tm-value--warn { color: var(--amber); font-weight: 600; }
+/* 1.52.2: a disabled router (one line instead of four unknown rows; the badge next to a name) */
+.tm-disabled { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.tm-disabled-now { font-weight: 400; vertical-align: 1px; }
 
 /* Sections below the cards */
 .tm-section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

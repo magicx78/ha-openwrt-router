@@ -514,6 +514,32 @@ export const PART_STATE_TEXT: Record<string, string> = {
   'unreadable': 'nicht lesbar',
 };
 
+/**
+ * 1.52.2: the config entry of a router now (`entry` of a router in /state and
+ * in the blocks of /compare, tm_sources.ENTRY_*; checked by
+ * tests/test_tm_panel_texts_v1520.py).
+ */
+export const ENTRY_TEXT: Record<string, string> = {
+  'enabled': 'aktiv',
+  'disabled': 'deaktiviert',
+};
+
+/** 1.52.2: a disabled router with nothing known at the moment (one line instead of four unknown rows). */
+export const DISABLED_NOTE = 'in Home Assistant ausgeschaltet, zu diesem Zeitpunkt nichts bekannt';
+/** 1.52.2: a disabled router whose values of the moment are known (it was enabled then). */
+export const DISABLED_NOW = 'derzeit deaktiviert';
+/** 1.52.2: a radio of the comparison that one side's complete list does not have. */
+export const RADIO_NOT_SEEN = 'zu diesem Zeitpunkt nicht gesehen';
+/**
+ * 1.52.2 (review): the summary of "Vergleich" when disabled routers are not
+ * listed and nothing else is known to differ. It never says "nothing changed"
+ * about routers nothing is known of: first the hidden ones, then the rest.
+ */
+export const DISABLED_SUMMARY_ONE = 'Über 1 deaktivierten Router ist nichts bekannt';
+export const DISABLED_SUMMARY_MANY = 'Über {n} deaktivierte Router ist nichts bekannt';
+export const DISABLED_SUMMARY_SAME = 'sonst hat sich zwischen diesen Zeitpunkten nichts geändert.';
+export const DISABLED_SUMMARY_EVENTS = 'sonst sind die Zustände zu beiden Zeitpunkten gleich, und dazwischen gab es Ereignisse.';
+
 /** Role of a router in the mesh (`role.value`). */
 export const ROLE_TEXT: Record<string, string> = {
   'gateway': 'Gateway',

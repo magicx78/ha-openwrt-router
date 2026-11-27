@@ -23,6 +23,8 @@ const F = JSON.parse(readFileSync(join(here, 'tmFixture.json'), 'utf8'));
 const FC = JSON.parse(readFileSync(join(here, 'tmFixtureClients.json'), 'utf8'));
 // Phases D-F: state, compare, export (tests/test_tm_panel_fixture_v1520.py)
 const FS = JSON.parse(readFileSync(join(here, 'tmFixtureState.json'), 'utf8'));
+// 1.52.2: after the update from 1.51.0, a disabled router (tests/test_tm_compare_display_v1522.py)
+const FX = JSON.parse(readFileSync(join(here, 'tmFixtureCompare.json'), 'utf8'));
 
 const inlineCss = {
   name: 'inline-css',
@@ -866,6 +868,8 @@ const FS_NOW = FS.state.body.generated_at * 1000;
 const RS1 = 'rtr_11111111111111111111111111111111';
 const RS2 = 'rtr_22222222222222222222222222222222';
 const RNAMES = { [RS1]: 'Router 1', [RS2]: 'Router 2' };
+const RS3 = 'rtr_33333333333333333333333333333333';
+const RNAMES3 = { ...RNAMES, [RS3]: 'Router 3' };
 const BKP = 'bkp_' + 'a'.repeat(32);
 const errS = name => new M.TmApiError(FS[name].status, FS[name].body.code, FS[name].body.details ?? {});
 
@@ -963,6 +967,14 @@ function stateScreens(sw) {
     compareTooLarge: compareHtml(cmpView(null, { error: errS('compare_too_large') })),
     compareOff: compareHtml(cmpView('compare_off')),
     compareLoading: compareHtml(cmpView(null)),
+    // 1.52.2: each side's own value, a disabled router, an emptied field
+    compareAfterUpdate: compareHtml(cmpView(FX.compare_after_update), { routers: RNAMES3 }),
+    compareRouterDown: compareHtml(cmpView(FX.compare_router_down), { routers: RNAMES3, showSame: { [RS1]: true, [RS2]: true } }),
+    compareDisabled: compareHtml(cmpView(FX.compare_disabled), { routers: RNAMES3 }),
+    compareDisabledBoth: compareHtml(cmpView(FX.compare_disabled_both), { routers: RNAMES3 }),
+    compareFromEmptied: compareHtml(cmpView('compare'), { from: '' }),
+    stateDisabled: stateHtml(stView(FX.state_disabled), { routers: RNAMES3 }),
+    stateDisabledEarlier: stateHtml(stView(FX.compare_disabled.before), { routers: RNAMES3 }),
     timelineCustom: screenC(loadedC('timeline'), {
       viewSwitch: sw('timeline'), isAdmin: true,
       filters: { ...M.DEFAULT_FILTERS, window: M.CUSTOM_WINDOW, custom: { from: 1800000000, until: 1800003600 }, client: 'tmc_f3e24c9bafa1ce4d' },
@@ -1137,6 +1149,14 @@ test('compare: quiet, one side unknown, a user, refused pairs at their field, of
     r.role.state = 'same'; r.uplink.state = 'same'; r.radios = [];
     for (const k of ['reachable', 'role', 'uplink']) { r[k].reason = null; r[k].before ??= r[k].after; }
   }
+  // 1.52.2: the cells come from the two blocks; there too every value known and the same
+  for (const side of [b.before, b.after]) {
+    for (const r of side.routers) {
+      r.role = { value: 'gateway', derived: true, reason: null };
+      r.uplink = { value: null, derived: true, reason: null };
+      r.radios = { state: 'ok', reason: null, derived: true, items: [{ key: '5g0', band: '5g', channel: 44, width: 80, state: 'up', reason: null }] };
+    }
+  }
   b.changes.marks = { count: 0, by_group: {} };
   const honest = text(compareHtml(cmpView(b)));
   assert.ok(honest.includes(M.TS.NOTHING_CHANGED), honest);
@@ -1229,8 +1249,10 @@ test('1.52.1: before the first answer the hint shows only for an empty field (br
   assert.ok(cGap.includes(M.TS.LOCAL_GAP_TEXT));
   assert.ok(!cGap.includes(M.TS.COMPARE_PICK_TEXT));
   assert.ok(!cGap.includes(M.TS.COMPARE_LOADING_TEXT));
-  // an answer stays shown after a field is cleared (the hint replaces no result)
-  assert.ok(!text(stateHtml(stView('state'), { input: '' })).includes(M.TS.STATE_PICK_TEXT));
+  // 1.52.2 (owner's decision): a field cleared after an answer shows the hint, not the old result
+  const cleared = text(stateHtml(stView('state'), { input: '' }));
+  assert.ok(cleared.includes(M.TS.STATE_PICK_TEXT));
+  assert.ok(!cleared.includes('Zustand am'));
 });
 
 // ── foreign tabs: an entry selects, without one they start as before ────
@@ -1500,4 +1522,161 @@ test('export without a mark: no file is saved, the message says why, never "Expo
   // busy or failed: the message waits
   const busy = screenC(loadedC('timeline'), { isAdmin: true, exportState: { ...none.state, busy: true }, onExport: on });
   assert.ok(!busy.includes('tm-export__empty'));
+});
+
+// ── 1.52.2: each cell of "Vergleich" its own side, an emptied field, a disabled router ──
+
+const tx = html => text(html).trim();
+
+/** The rows of the compare table of one router: [label, Vorher cell, Nachher cell, row class]. */
+function tableRows(html, name) {
+  const table = html.split(`aria-label="Vergleich ${name}"`)[1]?.split('</section>')[0] ?? '';
+  return [...table.matchAll(/<div class="tm-crow tm-crow--(\w+)" role="row">([\s\S]*?)<\/span><\/div>/g)]
+    .filter(m => m[1] !== 'head')
+    .map(m => {
+      const cells = m[2].split('<span role="cell">').slice(1);
+      return { state: m[1], label: text(m[2].split('</span>')[0]).trim(), before: cells[0] ?? '', after: cells[1] ?? '' };
+    });
+}
+
+test('1.52.2 compare: "Vorher" unknown, "Nachher" known: the known values in Nachher, the reason only in Vorher', () => {
+  const sc = stateScreens(() => null);
+  const html = sc.compareAfterUpdate;
+  for (const [name, uplink, role] of [['Router 1', 'kein vorgeschalteter Router', 'Gateway'], ['Router 2', 'über Router 1', 'Mesh-Knoten']]) {
+    const rows = tableRows(html, name);
+    assert.deepEqual(rows.map(r => r.label), ['Erreichbar', 'Rolle', 'Uplink', 'Funk 5 GHz'], name);
+    const after = Object.fromEntries(rows.map(r => [r.label, tx(r.after)]));
+    assert.deepEqual(after, {
+      'Erreichbar': 'Nachher: erreichbar', 'Rolle': `Nachher: ${role}`, 'Uplink': `Nachher: ${uplink}`,
+      'Funk 5 GHz': 'Nachher: Kanal 36 · 80 MHz · an',
+    }, name);
+    for (const r of rows) {
+      assert.equal(r.state, 'unknown');
+      assert.equal(tx(r.before), 'Vorher: unbekannt · noch kein Wert beobachtet', `${name} ${r.label}`);
+      assert.ok(!r.after.includes('tm-reason') && !r.after.includes('tm-value--unknown'), `${name} ${r.label}`);
+      assert.ok(!r.after.includes('geändert') && !r.before.includes('geändert'));
+    }
+  }
+  const t = text(html);
+  assert.ok(t.includes('Keine bekannte Änderung; 8 Merkmale sind zu einem der Zeitpunkte unbekannt.'), t);
+  // the disabled Router 3 (unknown at both moments): no table, one line
+  assert.ok(!html.includes('aria-label="Vergleich Router 3"'));
+  assert.ok(t.includes('1 Router ist deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von ihm nichts bekannt.'), t);
+  assert.ok(!PRIVATE.test(t));
+});
+
+test('1.52.2 compare: the mirror: "Vorher" known, "Nachher" unknown with its own reason', () => {
+  const html = stateScreens(() => null).compareRouterDown;
+  const rows = Object.fromEntries(tableRows(html, 'Router 2').map(r => [r.label, r]));
+  assert.equal(tx(rows.Uplink.before), 'Vorher: über Router 1');
+  assert.equal(tx(rows.Uplink.after), 'Nachher: unbekannt · Router nicht erreichbar');
+  assert.equal(tx(rows['Funk 5 GHz'].before), 'Vorher: Kanal 36 · 80 MHz · an');
+  assert.equal(tx(rows['Funk 5 GHz'].after), 'Nachher: unbekannt · Router nicht erreichbar');
+  assert.equal(rows.Erreichbar.state, 'changed');
+  assert.ok(!rows.Uplink.before.includes('tm-reason'));
+  // "Von" unknown as a whole: the known "Bis" values of the fixture of 1.52.0
+  const one = compareHtml(cmpView('compare_one_unknown'));
+  const r1 = Object.fromEntries(tableRows(one, 'Router 1').map(r => [r.label, r]));
+  assert.equal(tx(r1['Funk 5 GHz'].after), 'Nachher: Kanal 44 · 80 MHz · an');
+  assert.equal(tx(r1['Funk 5 GHz'].before), 'Vorher: unbekannt · nicht aufgezeichnet');
+  assert.equal(tx(r1.Erreichbar.after), 'Nachher: erreichbar');
+});
+
+test('1.52.2: "Von" or "Bis" emptied after an answer: the hint, no table; the reducer drops the result', () => {
+  const sc = stateScreens(() => null);
+  for (const html of [sc.compareFromEmptied, compareHtml(cmpView('compare'), { until: '' })]) {
+    const t = text(html);
+    assert.ok(t.includes(M.TS.COMPARE_PICK_TEXT), t);
+    assert.ok(!html.includes('tm-ctable') && !t.includes('Merkmale haben sich geändert'));
+  }
+  // the container's step: the cleared state shows the hint too, a late answer does not bring the table back
+  let s = M.TS.compareReducer(cmpView('compare'), { type: 'start', seq: 2 });
+  s = M.TS.compareReducer(s, { type: 'clear', seq: 3 });
+  s = M.TS.compareReducer(s, { type: 'done', seq: 2, answer: M.TS.parseCompare(FS.compare.body) });
+  const cleared = compareHtml(s, { from: '' });
+  assert.ok(text(cleared).includes(M.TS.COMPARE_PICK_TEXT) && !cleared.includes('tm-ctable'));
+  // a skipped hour: its field error, no old table, no hint
+  const gap = compareHtml(M.TS.compareReducer(cmpView('compare'), { type: 'clear', seq: 3 }), { from: '2027-03-28T02:30' });
+  assert.ok(text(gap).includes(M.TS.LOCAL_GAP_TEXT) && !gap.includes('tm-ctable') && !text(gap).includes(M.TS.COMPARE_PICK_TEXT));
+  // "Zustand" the same
+  let z = M.TS.stateReducer(stView('state'), { type: 'clear', seq: 9 });
+  const zt = text(stateHtml(z, { input: '' }));
+  assert.ok(zt.includes(M.TS.STATE_PICK_TEXT) && !zt.includes('Zustand am'));
+  z = M.TS.stateReducer(z, { type: 'done', seq: 1, answer: M.TS.parseState(FS.state.body), query: { at: 1, routerId: null, clientsCursor: null } });
+  assert.equal(z.answer, null);
+});
+
+test('1.52.2: a disabled router is "deaktiviert" in "Zustand" and no difference in "Vergleich"', () => {
+  const sc = stateScreens(() => null);
+  const html = sc.stateDisabled;
+  const card = name => html.split(`<section class="tm-card" aria-label="${name}">`)[1]?.split('</section>')[0] ?? '';
+  for (const name of ['Router 2', 'Router 3']) {
+    const c = card(name);
+    assert.ok(c, name);
+    // one line instead of four unknown rows
+    assert.equal(count(c, '<dt>'), 0, name);
+    assert.equal(count(c, 'deaktiviert'), 1, name);
+    assert.ok(!c.includes('noch kein Wert beobachtet'), name);
+    assert.match(text(c), /deaktiviert · in Home Assistant ausgeschaltet, zu diesem Zeitpunkt nichts bekannt/);
+  }
+  assert.equal(count(card('Router 1'), '<dt>'), 4);
+  assert.ok(!card('Router 1').includes('deaktiviert'));
+  // known values of a moment before the disable: shown, the router marked as disabled now
+  const earlier = sc.stateDisabledEarlier;
+  const r2 = earlier.split('<section class="tm-card" aria-label="Router 2">')[1].split('</section>')[0];
+  assert.equal(count(r2, '<dt>'), 4);
+  assert.ok(text(r2).includes('derzeit deaktiviert') && text(r2).includes('über Router 1'));
+  // "Vergleich": both disabled and unknown at both moments: no table, not counted, one line
+  const both = sc.compareDisabledBoth;
+  assert.equal(count(both, 'role="table"'), 0);
+  assert.ok(text(both).includes('2 Router sind deaktiviert und nicht aufgeführt'), text(both));
+  assert.ok(!/Merkmale? (sind|ist) zu einem der Zeitpunkte unbekannt/.test(text(both)));
+  // with known history at "Von": listed as usual and marked
+  const once = sc.compareDisabled;
+  assert.equal(count(once, 'role="table"'), 1);
+  const head = once.split('aria-label="Router 2">')[1].split('role="table"')[0];
+  assert.ok(text(head).includes('derzeit deaktiviert'), head);
+  assert.ok(text(once).includes('1 Router ist deaktiviert und nicht aufgeführt'));
+  // an answer of 1.52.1 (no field): nobody is disabled
+  assert.ok(!stateHtml(stView('state')).includes('deaktiviert'));
+  assert.ok(!compareHtml(cmpView('compare_quiet')).includes('deaktiviert'));
+});
+
+// ── 1.52.2 review: hidden routers in the summary, "deaktiviert" only for not_observed ──
+
+const cloneJ = v => JSON.parse(JSON.stringify(v));
+const rawR = (side, name) => side.routers.find(r => r.router_name === name);
+
+test('1.52.2 review: with hidden disabled routers the summary qualifies "nothing changed"', () => {
+  const a = cloneJ(FX.compare_disabled_both);
+  a.changes.other_sources = { state: 'ok', reason: null, count: 0, truncated: false, unreadable: [] };
+  const t = text(compareHtml(cmpView(a), { routers: RNAMES3 }));
+  assert.ok(t.includes('Über 2 deaktivierte Router ist nichts bekannt; sonst hat sich zwischen diesen Zeitpunkten nichts geändert.'), t);
+  assert.ok(!t.includes(M.TS.NOTHING_CHANGED), t);
+  assert.ok(t.includes('2 Router sind deaktiviert und nicht aufgeführt'), t);
+  assert.equal(count(compareHtml(cmpView(a), { routers: RNAMES3 }), 'role="table"'), 0);
+});
+
+test('1.52.2 review: a disabled router with another reason keeps its card and its table, with the real reasons', () => {
+  const st = cloneJ(FX.state_disabled);
+  rawR(st, 'Router 2').reachable.reason = 'evicted';
+  const html = stateHtml(stView(st), { routers: RNAMES3 });
+  const card = html.split('<section class="tm-card" aria-label="Router 2">')[1]?.split('</section>')[0] ?? '';
+  assert.equal(count(card, '<dt>'), 4);
+  assert.ok(text(card).includes('derzeit deaktiviert'), text(card));
+  assert.ok(text(card).includes('Aufzeichnung verdrängt'), text(card));
+  assert.ok(!text(card).includes('in Home Assistant ausgeschaltet'), text(card));
+  // Router 3 (not_observed only) stays one line
+  const r3 = html.split('<section class="tm-card" aria-label="Router 3">')[1]?.split('</section>')[0] ?? '';
+  assert.equal(count(r3, '<dt>'), 0);
+  // "Vergleich": listed with its reasons and the badge; the summary counts its rows
+  const a = cloneJ(FX.compare_disabled_both);
+  rawR(a.after, 'Router 2').uplink.reason = 'observation_gap';
+  const c = compareHtml(cmpView(a), { routers: RNAMES3 });
+  const rows = Object.fromEntries(tableRows(c, 'Router 2').map(r => [r.label, r]));
+  assert.equal(tx(rows.Uplink.after), 'Nachher: unbekannt · nicht beobachtet');
+  assert.equal(tx(rows.Uplink.before), 'Vorher: unbekannt · noch kein Wert beobachtet');
+  const head = c.split('aria-label="Router 2">')[1].split('role="table"')[0];
+  assert.ok(text(head).includes('derzeit deaktiviert'), head);
+  assert.ok(text(c).includes('1 Router ist deaktiviert und nicht aufgeführt'), text(c));
 });

@@ -1,0 +1,2228 @@
+{
+ "state_after_update": {
+  "v": 1,
+  "status": "partial",
+  "reason": null,
+  "generated_at": 1800004440.0,
+  "at": 1800004439.0,
+  "known": true,
+  "unknown_reason": null,
+  "basis": {
+   "retention_from": 1798794840.0,
+   "recorded_from": 1800000000.0,
+   "marks_applied": 0,
+   "intervals": 0
+  },
+  "routers": [
+   {
+    "router_id": "rtr_11111111111111111111111111111111",
+    "router_name": "Router 1",
+    "entry": "enabled",
+    "reachable": {
+     "value": true,
+     "derived": true,
+     "reason": null
+    },
+    "role": {
+     "value": "gateway",
+     "derived": true,
+     "reason": null
+    },
+    "uplink": {
+     "value": null,
+     "derived": true,
+     "reason": null
+    },
+    "radios": {
+     "state": "ok",
+     "reason": null,
+     "derived": true,
+     "items": [
+      {
+       "key": "5g0",
+       "band": "5g",
+       "channel": 36,
+       "width": 80,
+       "state": "up",
+       "reason": null
+      }
+     ]
+    },
+    "traffic": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800003600.0,
+     "wan": []
+    },
+    "utilization": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800003600.0,
+     "radios": []
+    }
+   },
+   {
+    "router_id": "rtr_22222222222222222222222222222222",
+    "router_name": "Router 2",
+    "entry": "enabled",
+    "reachable": {
+     "value": true,
+     "derived": true,
+     "reason": null
+    },
+    "role": {
+     "value": "node",
+     "derived": true,
+     "reason": null
+    },
+    "uplink": {
+     "value": {
+      "router_id": "rtr_11111111111111111111111111111111",
+      "router_name": "Router 1"
+     },
+     "derived": true,
+     "reason": null
+    },
+    "radios": {
+     "state": "ok",
+     "reason": null,
+     "derived": true,
+     "items": [
+      {
+       "key": "5g0",
+       "band": "5g",
+       "channel": 36,
+       "width": 80,
+       "state": "up",
+       "reason": null
+      }
+     ]
+    },
+    "traffic": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800003600.0,
+     "wan": []
+    },
+    "utilization": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800003600.0,
+     "radios": []
+    }
+   },
+   {
+    "router_id": "rtr_33333333333333333333333333333333",
+    "router_name": "Router 3",
+    "entry": "disabled",
+    "reachable": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "role": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "uplink": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "radios": {
+     "state": "unknown",
+     "reason": "not_observed",
+     "derived": false,
+     "items": []
+    },
+    "traffic": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800003600.0,
+     "wan": []
+    },
+    "utilization": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800003600.0,
+     "radios": []
+    }
+   }
+  ],
+  "routers_truncated": false,
+  "intervals": [],
+  "intervals_total": 0,
+  "intervals_truncated": false,
+  "incidents": {
+   "state": "unreadable",
+   "reason": "unreadable",
+   "items": [],
+   "total": 0,
+   "truncated": false
+  },
+  "config": {
+   "state": "off",
+   "reason": "module_off",
+   "items": []
+  },
+  "clients": {
+   "state": "off",
+   "reason": "clients_off",
+   "items": [],
+   "per_router": [],
+   "total": 0,
+   "truncated": false,
+   "next_cursor": null
+  }
+ },
+ "compare_after_update": {
+  "v": 1,
+  "status": "partial",
+  "reason": null,
+  "generated_at": 1800004440.0,
+  "t1": 1800000660.0,
+  "t2": 1800004439.0,
+  "before": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800004440.0,
+   "at": 1800000660.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798794840.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800000000.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800000000.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "enabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800000000.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800000000.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800000000.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800000000.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "after": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800004440.0,
+   "at": 1800004439.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798794840.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "node",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "changes": {
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "reachable": {
+      "from": null,
+      "to": true,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": null
+     },
+     "role": {
+      "from": null,
+      "to": "gateway",
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": null
+     },
+     "uplink": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": null
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "reachable": {
+      "from": null,
+      "to": true,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": null
+     },
+     "role": {
+      "from": null,
+      "to": "node",
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": null
+     },
+     "uplink": {
+      "from": null,
+      "to": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": null
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "reachable": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "role": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "uplink": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    }
+   ],
+   "marks": {
+    "count": 4,
+    "by_group": {
+     "infrastructure": 2,
+     "radio": 2
+    }
+   },
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "opened": [],
+    "resolved": [],
+    "truncated": false
+   },
+   "config_versions": {
+    "state": "off",
+    "reason": "module_off",
+    "items": [],
+    "total": 0,
+    "truncated": false,
+    "diffs": []
+   },
+   "other_sources": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "count": 0,
+    "truncated": false,
+    "unreadable": [
+     "core_audit",
+     "ni_events",
+     "ni_incidents"
+    ]
+   }
+  }
+ },
+ "compare_router_down": {
+  "v": 1,
+  "status": "partial",
+  "reason": null,
+  "generated_at": 1800005940.0,
+  "t1": 1800004439.0,
+  "t2": 1800005939.0,
+  "before": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800005940.0,
+   "at": 1800004439.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798796340.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "node",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "after": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800005940.0,
+   "at": 1800005939.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798796340.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 1
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "enabled",
+     "reachable": {
+      "value": false,
+      "derived": false,
+      "reason": null
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "router_down"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "router_down"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "router_down",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [
+    {
+     "id": "tmm_cc4c960bee4b8644",
+     "ts": 1800005640.0,
+     "source": "tm_index",
+     "kind": "router_down",
+     "group": "infrastructure",
+     "severity": "warning",
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "fleet": false,
+     "title_key": "tm_index.router_down",
+     "text": null,
+     "params": {},
+     "ref": {
+      "module": "time_machine",
+      "type": "mark",
+      "id": "m13",
+      "version_id": null
+     },
+     "derived": false,
+     "code": "timeout",
+     "end": null,
+     "end_state": "open",
+     "client": null,
+     "client_name": null,
+     "peers": null,
+     "spans_in": false
+    }
+   ],
+   "intervals_total": 1,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "changes": {
+   "routers": [
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "reachable": {
+      "from": true,
+      "to": false,
+      "state": "changed",
+      "from_reason": null,
+      "to_reason": null
+     },
+     "role": {
+      "from": "node",
+      "to": null,
+      "state": "unknown",
+      "from_reason": null,
+      "to_reason": "router_down"
+     },
+     "uplink": {
+      "from": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "to": null,
+      "state": "unknown",
+      "from_reason": null,
+      "to_reason": "router_down"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "router_down"
+      }
+     ],
+     "clients": null
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "reachable": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "role": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "uplink": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    }
+   ],
+   "marks": {
+    "count": 1,
+    "by_group": {
+     "infrastructure": 1
+    }
+   },
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "opened": [],
+    "resolved": [],
+    "truncated": false
+   },
+   "config_versions": {
+    "state": "off",
+    "reason": "module_off",
+    "items": [],
+    "total": 0,
+    "truncated": false,
+    "diffs": []
+   },
+   "other_sources": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "count": 0,
+    "truncated": false,
+    "unreadable": [
+     "core_audit",
+     "ni_events",
+     "ni_incidents"
+    ]
+   }
+  }
+ },
+ "state_disabled": {
+  "v": 1,
+  "status": "partial",
+  "reason": null,
+  "generated_at": 1800007740.0,
+  "at": 1800007739.0,
+  "known": true,
+  "unknown_reason": null,
+  "basis": {
+   "retention_from": 1798798140.0,
+   "recorded_from": 1800000000.0,
+   "marks_applied": 0,
+   "intervals": 0
+  },
+  "routers": [
+   {
+    "router_id": "rtr_11111111111111111111111111111111",
+    "router_name": "Router 1",
+    "entry": "enabled",
+    "reachable": {
+     "value": true,
+     "derived": true,
+     "reason": null
+    },
+    "role": {
+     "value": "gateway",
+     "derived": true,
+     "reason": null
+    },
+    "uplink": {
+     "value": null,
+     "derived": true,
+     "reason": null
+    },
+    "radios": {
+     "state": "ok",
+     "reason": null,
+     "derived": true,
+     "items": [
+      {
+       "key": "5g0",
+       "band": "5g",
+       "channel": 36,
+       "width": 80,
+       "state": "up",
+       "reason": null
+      }
+     ]
+    },
+    "traffic": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800007200.0,
+     "wan": []
+    },
+    "utilization": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800007200.0,
+     "radios": []
+    }
+   },
+   {
+    "router_id": "rtr_22222222222222222222222222222222",
+    "router_name": "Router 2",
+    "entry": "disabled",
+    "reachable": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "role": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "uplink": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "radios": {
+     "state": "unknown",
+     "reason": "not_observed",
+     "derived": false,
+     "items": []
+    },
+    "traffic": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800007200.0,
+     "wan": []
+    },
+    "utilization": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800007200.0,
+     "radios": []
+    }
+   },
+   {
+    "router_id": "rtr_33333333333333333333333333333333",
+    "router_name": "Router 3",
+    "entry": "disabled",
+    "reachable": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "role": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "uplink": {
+     "value": null,
+     "derived": false,
+     "reason": "not_observed"
+    },
+    "radios": {
+     "state": "unknown",
+     "reason": "not_observed",
+     "derived": false,
+     "items": []
+    },
+    "traffic": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800007200.0,
+     "wan": []
+    },
+    "utilization": {
+     "state": "off",
+     "reason": "not_running",
+     "hour": 1800007200.0,
+     "radios": []
+    }
+   }
+  ],
+  "routers_truncated": false,
+  "intervals": [],
+  "intervals_total": 0,
+  "intervals_truncated": false,
+  "incidents": {
+   "state": "unreadable",
+   "reason": "unreadable",
+   "items": [],
+   "total": 0,
+   "truncated": false
+  },
+  "config": {
+   "state": "off",
+   "reason": "module_off",
+   "items": []
+  },
+  "clients": {
+   "state": "off",
+   "reason": "clients_off",
+   "items": [],
+   "per_router": [],
+   "total": 0,
+   "truncated": false,
+   "next_cursor": null
+  }
+ },
+ "compare_disabled": {
+  "v": 1,
+  "status": "partial",
+  "reason": null,
+  "generated_at": 1800007740.0,
+  "t1": 1800004439.0,
+  "t2": 1800007739.0,
+  "before": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800007740.0,
+   "at": 1800004439.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798798140.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "disabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "node",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "after": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800007740.0,
+   "at": 1800007739.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798798140.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "changes": {
+   "routers": [
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "reachable": {
+      "from": true,
+      "to": null,
+      "state": "unknown",
+      "from_reason": null,
+      "to_reason": "not_observed"
+     },
+     "role": {
+      "from": "node",
+      "to": null,
+      "state": "unknown",
+      "from_reason": null,
+      "to_reason": "not_observed"
+     },
+     "uplink": {
+      "from": {
+       "router_id": "rtr_11111111111111111111111111111111",
+       "router_name": "Router 1"
+      },
+      "to": null,
+      "state": "unknown",
+      "from_reason": null,
+      "to_reason": "not_observed"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "reachable": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "role": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "uplink": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    }
+   ],
+   "marks": {
+    "count": 1,
+    "by_group": {
+     "infrastructure": 1
+    }
+   },
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "opened": [],
+    "resolved": [],
+    "truncated": false
+   },
+   "config_versions": {
+    "state": "off",
+    "reason": "module_off",
+    "items": [],
+    "total": 0,
+    "truncated": false,
+    "diffs": []
+   },
+   "other_sources": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "count": 0,
+    "truncated": false,
+    "unreadable": [
+     "core_audit",
+     "ni_events",
+     "ni_incidents"
+    ]
+   }
+  }
+ },
+ "compare_disabled_both": {
+  "v": 1,
+  "status": "partial",
+  "reason": null,
+  "generated_at": 1800007740.0,
+  "t1": 1800007140.0,
+  "t2": 1800007739.0,
+  "before": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800007740.0,
+   "at": 1800007140.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798798140.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800003600.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "after": {
+   "v": 1,
+   "status": "partial",
+   "reason": null,
+   "generated_at": 1800007740.0,
+   "at": 1800007739.0,
+   "known": true,
+   "unknown_reason": null,
+   "basis": {
+    "retention_from": 1798798140.0,
+    "recorded_from": 1800000000.0,
+    "marks_applied": 0,
+    "intervals": 0
+   },
+   "routers": [
+    {
+     "router_id": "rtr_11111111111111111111111111111111",
+     "router_name": "Router 1",
+     "entry": "enabled",
+     "reachable": {
+      "value": true,
+      "derived": true,
+      "reason": null
+     },
+     "role": {
+      "value": "gateway",
+      "derived": true,
+      "reason": null
+     },
+     "uplink": {
+      "value": null,
+      "derived": true,
+      "reason": null
+     },
+     "radios": {
+      "state": "ok",
+      "reason": null,
+      "derived": true,
+      "items": [
+       {
+        "key": "5g0",
+        "band": "5g",
+        "channel": 36,
+        "width": 80,
+        "state": "up",
+        "reason": null
+       }
+      ]
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "radios": []
+     }
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "entry": "disabled",
+     "reachable": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "role": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "uplink": {
+      "value": null,
+      "derived": false,
+      "reason": "not_observed"
+     },
+     "radios": {
+      "state": "unknown",
+      "reason": "not_observed",
+      "derived": false,
+      "items": []
+     },
+     "traffic": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "wan": []
+     },
+     "utilization": {
+      "state": "off",
+      "reason": "not_running",
+      "hour": 1800007200.0,
+      "radios": []
+     }
+    }
+   ],
+   "routers_truncated": false,
+   "intervals": [],
+   "intervals_total": 0,
+   "intervals_truncated": false,
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "items": [],
+    "total": 0,
+    "truncated": false
+   },
+   "config": {
+    "state": "off",
+    "reason": "module_off",
+    "items": []
+   },
+   "clients": {
+    "state": "off",
+    "reason": "clients_off",
+    "items": [],
+    "per_router": [],
+    "total": 0,
+    "truncated": false,
+    "next_cursor": null
+   }
+  },
+  "changes": {
+   "routers": [
+    {
+     "router_id": "rtr_22222222222222222222222222222222",
+     "router_name": "Router 2",
+     "reachable": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "role": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "uplink": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    },
+    {
+     "router_id": "rtr_33333333333333333333333333333333",
+     "router_name": "Router 3",
+     "reachable": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "role": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "uplink": {
+      "from": null,
+      "to": null,
+      "state": "unknown",
+      "from_reason": "not_observed",
+      "to_reason": "not_observed"
+     },
+     "radios": [
+      {
+       "key": null,
+       "band": null,
+       "from": null,
+       "to": null,
+       "state": "unknown",
+       "reason": "not_observed"
+      }
+     ],
+     "clients": null
+    }
+   ],
+   "marks": {
+    "count": 0,
+    "by_group": {}
+   },
+   "incidents": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "opened": [],
+    "resolved": [],
+    "truncated": false
+   },
+   "config_versions": {
+    "state": "off",
+    "reason": "module_off",
+    "items": [],
+    "total": 0,
+    "truncated": false,
+    "diffs": []
+   },
+   "other_sources": {
+    "state": "unreadable",
+    "reason": "unreadable",
+    "count": 0,
+    "truncated": false,
+    "unreadable": [
+     "core_audit",
+     "ni_events",
+     "ni_incidents"
+    ]
+   }
+  }
+ }
+}

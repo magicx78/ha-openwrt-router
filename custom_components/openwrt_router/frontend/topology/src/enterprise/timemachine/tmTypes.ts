@@ -226,6 +226,8 @@ export interface UtilizationRadio {
 export interface RouterState {
   routerId: string;
   routerName: string | null;
+  /** 1.52.2: the config entry now (`enabled` / `disabled`); null without one or in an older answer. */
+  entry: string | null;
   reachable: Known<boolean>;
   role: Known<string>;
   uplink: Known<UplinkValue>;
@@ -309,6 +311,9 @@ export interface Change<T> {
   to: T | null;
   /** changed | same | unknown */
   state: string;
+  /** 1.52.2: why `from` / `to` is unknown (a state reason token); null when known or in an older answer. */
+  fromReason: string | null;
+  toReason: string | null;
 }
 
 export interface RadioChange {

@@ -1134,7 +1134,7 @@ gelesen wird (er erfährt also nicht, ob ein Cursor gültig wäre). Ein Cursor n
  "basis": {"retention_from": 1798790760.0, "recorded_from": 1800000000.0,
            "marks_applied": 0, "intervals": 0},
  "routers": [{
-   "router_id": "rtr_1111…", "router_name": "Router 1",
+   "router_id": "rtr_1111…", "router_name": "Router 1", "entry": "enabled",
    "reachable": {"value": true, "derived": true, "reason": null},
    "role":   {"value": null, "derived": false, "reason": "not_observed"},
    "uplink": {"value": null, "derived": false, "reason": "not_observed"},
@@ -1168,6 +1168,15 @@ Felder:
 - je Router `reachable`, `role` (`gateway` / `ap` / …), `uplink` (`{"router_id",
   "router_name"}` des Elternrouters oder null = direkt am Gateway): jeweils `{"value",
   "derived", "reason"}`.
+- je Router `entry` (1.52.2, additiv): der Konfigurationseintrag des Routers **jetzt**,
+  `"enabled"`, `"disabled"` (`disabled_by` des Eintrags ist gesetzt; `ConfigEntryDisabler`
+  kennt nur `user`, also hat ein Benutzer ihn ausgeschaltet; HA richtet ihn nicht ein) oder null (kein Eintrag, nur Verlauf). Es ist der Stand beim
+  Abfragen, nicht der zu `at`; in beiden Blöcken von `/compare` steht derselbe Wert
+  (`tm_sources.ENTRY_*`, `RouterMap.disabled`, gelesen in `build_router_map`). Ein
+  deaktivierter Eintrag behält seine Kennung in der Router-Registry und erscheint deshalb in
+  der Tabelle; seine Werte sind ab dem Deaktivieren unbekannt (`not_observed`), der Verlauf
+  davor bleibt. Ein Panel bis 1.52.1 liest das Feld nicht und zeigt die Antwort wie bisher
+  (`tests/test_tm_compare_display_v1522.py`).
 - `radios.items`: je Funk `key` (Band + Nummer, **nie** ein Netdev- oder phy-Name), `band`,
   `channel`, `width` (MHz; null = unbekannt), `state` (`up` / `down` / null), `reason`.
   `radios.state`: `ok`, `partial` (einzelne Funks unbekannt) oder `unknown` (Grund in
@@ -1224,7 +1233,8 @@ Ein Wert ist nie geraten. Es gilt:
   (`beyond_retention`), in doppelt belegter Wanduhrzeit nach einem Rücksprung der Uhr
   (`clock_shift`, Review A, unten), in einer HA-Neustartlücke (`ha_gap`), in einer Beobachtungslücke der
   ganzen Flotte (`observation_gap`), außerhalb jeder Abdeckung des Verlaufs
-  (`not_recorded`, auch: vor dem Update auf 1.2 und vor „Verlauf löschen“), bis zu einer
+  (`not_recorded`, auch: vor dem ersten Lauf der Time Machine und vor „Verlauf löschen“;
+  die Zeit, die 1.51.0 aufzeichnete, ist **nicht** `not_recorded`, siehe Abschnitt 24), bis zu einer
   verlorenen Marke (`evicted`: eine Marke derselben Quote wurde vor Ablauf der Aufbewahrung
   verdrängt, gekürzt oder gelöscht).
 - **Uhrsprung zurück** (Review A, feine Regel seit dem zweiten Review): Springt die Wanduhr
@@ -1472,7 +1482,16 @@ Beispiel aus `test_compare_route_names_only_the_differences` (`changes`, gekürz
 ```
 
 - `changes.routers[]`: nur Router mit einem Unterschied. Je Wert `state` `same`, `changed`
-  oder `unknown` (mindestens eine Seite unbekannt, **nie** als Änderung gezählt). `radios`
+  oder `unknown` (mindestens eine Seite unbekannt, **nie** als Änderung gezählt). Seit 1.52.2
+  (additiv) tragen `reachable`, `role` und `uplink` zusätzlich `from_reason` und
+  `to_reason`: den Grund der jeweiligen Seite (null, wenn diese Seite bekannt ist). `from` und
+  `to` sind wie bisher null auf einer unbekannten Seite; ein bekanntes null (Uplink: „kein
+  vorgeschalteter Router“) ist nur an `to_reason: null` bzw. `from_reason: null` zu erkennen.
+  Die Werte selbst stehen vollständig in `before` und `after`; der `after`-Block ist genau die
+  Antwort von `/state` für `t2` (`test_the_after_block_of_compare_is_the_state_at_the_same_moment`),
+  und das Panel liest jede Zelle seit 1.52.2 von dort (Abschnitt 25.3). Ein deaktivierter
+  Router (`entry: "disabled"`) steht hier wie jeder andere (unbekannte Werte: `unknown`); das
+  Panel blendet ihn aus, wenn er zu beiden Zeitpunkten unbekannt ist. `radios`
   nur Funks, die nicht `same` sind: `changed` (Kanal, Zustand oder Breite anders),
   `unknown` (Funk nur auf einer Seite, eine Seite unbekannt oder eine Breite nach „Funk an“
   unbekannt). Ist der ganze Funk-Block einer Seite unbekannt, steht dort ein Eintrag mit
@@ -1601,8 +1620,13 @@ und jede Audit-Art in `KIND_TABS` oder `KIND_NO_TAB`.
 **Speicher 1.2** (`.storage/openwrt_router.time_machine`, `minor_version` 1 → 2, rein
 additiv): `seen` (je Router höchstens 64 verfolgte Abschnitte mit Basis), `clients_cov`
 (wann der Client-Recorder lief), `lost` (je Quote: bis wann Marken vor Ablauf fehlen). Eine
-1.51.0-Datei lädt unverändert (die Marken bleiben, die drei Schlüssel fehlen); die Zeit davor
-ist dann `not_recorded`. Beim nächsten Speichern wird sie als 1.2 geschrieben, und genau diese
+1.51.0-Datei lädt unverändert (die Marken bleiben, die drei Schlüssel fehlen). Die Zeit, die
+1.51.0 aufzeichnete, ist danach **global bekannt** (ihre Abdeckung `coverage` bleibt), aber kein
+Router war darin verfolgt (kein `seen`): Erreichbarkeit, Rolle, Uplink und Funk sind je Router
+`not_observed`, außer was eine aufgezeichnete Marke selbst ergibt (ein laufender Ausfall: „nicht
+erreichbar“), Clients `not_recorded`. `not_recorded` (global) ist nur die Zeit außerhalb jeder
+Abdeckung. (Bis 1.52.1 stand hier, die Zeit davor sei `not_recorded`; der Test unten prüft das
+Obige.) Beim nächsten Speichern wird sie als 1.2 geschrieben, und genau diese
 drei Schlüssel kommen dazu (Test mit einer echten 1.51.0-Datei,
 `test_a_real_1510_file_loads_unchanged_and_saves_as_12`). Seit dem
 Review kommen hinzu, ebenfalls additiv: `lost_routers` (je Router: bis wann seine
@@ -1610,8 +1634,8 @@ Infrastruktur-Marken fehlen, Review J; nur geschrieben, wenn nicht leer) und in 
 `seen`-Abschnitt ein optionales achtes Feld (Zahl der Funks, die über einen Neustart aus
 blieben, Review E; nur wenn > 0). Zurück auf 1.51.0 (vom Review bestätigt): Die Datei lädt
 ohne Verlust; die zusätzlichen Schlüssel bleiben in der Datei stehen, bis 1.51.0 selbst
-speichert (dann fallen sie weg); nach einem erneuten Update ist die Zeit davor
-`not_recorded`. Bei ausgeschalteter Time Machine: kein Lesen, kein
+speichert (dann fallen sie weg); nach einem erneuten Update ist die Zeit davor wie oben
+global bekannt mit unbekannten Router-Werten (`not_observed`). Bei ausgeschalteter Time Machine: kein Lesen, kein
 Schreiben (unverändert).
 
 Die Engine schreibt dafür zusätzlich (nur bei eingeschalteter Time Machine, ohne
@@ -1716,7 +1740,8 @@ quadratisch in der Zahl der Marken. Harte Grenzen: 64 Router, 100 Intervalle, 10
 
 ## 25. Panel für D bis F (1.52.0)
 
-`_PANEL_VERSION` `20261126-timemachine9`. Das Panel liest die Routen `timeline`, `sessions`,
+`_PANEL_VERSION` `20261126-timemachine9` (1.52.1: `20261127-timemachine10`, 1.52.2:
+`20261127-timemachine11`). Das Panel liest die Routen `timeline`, `sessions`,
 `state`, `compare` und `export` und fügt nichts hinzu. Dateien unter
 `frontend/topology/src/enterprise/timemachine/`: `tmState.ts` (Zerlegen der Antworten,
 Reducer, Texte und Werte in Worten, Vergleichszeilen, Sprungziele; ohne React),
@@ -1748,6 +1773,21 @@ Ansicht) und lädt höchstens alle 60 s neu, solange die Seite sichtbar ist; unt
 der Wert des Felds selbst kein Anlass zum Laden. Antworten einer älteren Abfrage werden
 verworfen.
 
+**Leeres Feld nach einer Antwort (1.52.2, Entscheidung des Eigentümers):** Bis 1.52.1 blieb
+das alte Ergebnis stehen, wenn ein Feld danach geleert wurde: `load()` kehrte ohne Aktion
+zurück, und die Reducer kannten kein Leeren. Jetzt steht sofort der Hinweis („Einen Zeitpunkt
+wählen.“ bzw. „„Von“ und „Bis“ wählen.“) statt des alten Ergebnisses (`StateScreen` /
+`CompareScreen` prüfen `waitingBody` auch bei einer Antwort), und nach der Eingabepause löscht
+die Aktion `clear` beider Reducer (`stateReducer`, `compareReducer`) das Ergebnis und erhöht
+`seq`, sodass eine Antwort, die noch unterwegs war, verworfen wird (auch eine Seite „Weitere
+laden“). Ein Feld mit einer übersprungenen Uhrzeit ist nicht leer: Es zeigt weiter seinen
+eigenen Fehler, die Aktion `clear` nimmt aber auch dort das alte Ergebnis weg (entschieden in
+diesem PR: es gehört nicht mehr zum Feld). Ob ein Laden leert oder fragt, entscheiden die
+reinen Funktionen `stateLoadStep` und `compareLoadStep` (Aktion `clear` oder `start` und die
+Anfrage); beide Container schicken deren Aktion sofort und ohne Bedingung ab (ein Test hält
+das am Quelltext fest, die Container laufen in den Tests ohne DOM nicht). Laden beim Öffnen, 400 ms Pause beim Tippen und
+Laden einer verborgenen Seite, sobald sie sichtbar ist, bleiben wie in 1.52.1.
+
 Ortszeit an einer Zeitumstellung (`parseLocalInput`, Tests mit Europe/Berlin): Eine Uhrzeit
 der übersprungenen Stunde ist kein Zeitpunkt, sondern ein Fehler am Feld („Diese Uhrzeit gibt
 es wegen der Zeitumstellung nicht.“, es wird nicht geladen); eine der doppelten Stunde gilt
@@ -1768,6 +1808,16 @@ gezeigt wird die erste.“ Gleiches gilt für „Von“ und „Bis“ des Vergle
   zurückgesprungen; diese Zeit kommt im Verlauf doppelt vor.“ und den Kurztext „Uhr
   zurückgesprungen, Zeit doppelt“. Uplink- und Rollenwechsel mit Parameter `since` zeigen
   „zuerst gesehen HH:MM:SS“.
+- **Deaktivierter Router** (1.52.2, `entry: "disabled"`, `disabledView`): Ist zu diesem
+  Zeitpunkt nichts von ihm bekannt, und zwar nur, weil nichts beobachtet wurde (Erreichbar,
+  Rolle, Uplink und Funk unbekannt, jeder Grund `not_observed`), zeigt die Karte statt der
+  vier Zeilen „unbekannt · noch kein Wert beobachtet“ eine Zeile „deaktiviert · in Home
+  Assistant ausgeschaltet, zu diesem Zeitpunkt nichts bekannt“. Sind Werte bekannt (er war
+  damals eingeschaltet) oder hat ein unbekannter Wert einen anderen Grund (`evicted`,
+  `observation_gap`, `clock_shift`, …), steht die Karte wie sonst mit diesen Gründen, mit dem
+  Abzeichen „derzeit deaktiviert“ am Namen (Review 1.52.2: ein anderer Grund ist eine eigene
+  Tatsache). Ohne das Feld (Antwort bis
+  1.52.1) ist kein Router deaktiviert.
 - Marken mit Datum in der Zeitspalte (`MarkRow` mit `start`: laufende Ausfälle und Lücken,
   Block „Läuft seit vor dem Zeitfenster“) tragen `tm-mark--start`: Zeitspalte 9.5em statt
   5em, ab 920 px Breite der Liste (Container `tmlist`) Karten. Ein Strukturtest in
@@ -1790,8 +1840,52 @@ automatisches Nachladen. Fehler von `t1`, `t2` und dem Fenster (leer, mehr als 1
 Feld. Je Router eine Tabelle „Merkmal | Vorher | Nachher“ (`role="table"`), unter 560 px
 Breite der Liste Karten. `changed` mit „geändert“, Clients zusätzlich „von 2 auf 1 (−1)“,
 `same` hinter „Unverändertes zeigen (n)“, `unknown` ohne Farbe mit Grund. Ist eine Seite
-`known: false`, ein Hinweisband mit ihrem Grund, und die davon abhängigen Zeilen sind
-unbekannt. Darunter „Ereignisse dazwischen“ (Zahl je Art, „In der Zeitleiste zeigen“ mit
+`known: false`, ein Hinweisband mit ihrem Grund, und die davon abhängigen Zellen sind
+unbekannt.
+
+**Jede Zelle ist der Wert ihrer Seite (1.52.2).** Bis 1.52.1 baute `compareRows` die Zeilen
+aus `changes`: War eine Seite unbekannt, stand auch die bekannte Seite als „unbekannt“ da (ein
+bekannter Uplink null wurde zu „unbekannt“; ein Funk-Block mit einer unbekannten Seite war eine
+Zeile „Funk unbekannt“ in beiden Spalten) und beide Zellen trugen denselben Grund (oft den
+der anderen Seite oder keinen). Gefunden nach einem Update von 1.51.0: „Vorher“ in der Zeit von
+1.51.0 (`not_observed`), „Nachher“ jetzt; „Zustand“ zeigte für denselben Zeitpunkt die Werte.
+Jetzt nimmt `compareRows` jede Zelle aus `before.routers` bzw. `after.routers` der Antwort,
+mit denselben Ansichten wie „Zustand“ (`reachableView`, `roleView`, `uplinkView`,
+`radiosView`/`radioView`), und jede unbekannte Zelle hat den Grund **ihrer** Seite
+(`beforeReason`, `afterReason`). Funk: eine Zeile je Funk der Seiten, deren Liste bekannt ist
+(ein Funk, den die vollständige Liste einer Seite nicht hat: „unbekannt · zu diesem Zeitpunkt
+nicht gesehen“; eine unvollständige Liste nennt stattdessen ihren eigenen Grund); nur wenn
+beide Listen unbekannt sind, eine Zeile „Funk“ mit dem Grund je Seite. Eine Liste `partial`
+mit `not_observed` ohne Einträge hat keinen eigenen Grund; ihre Zelle trägt den Satz „Nicht
+alle Funkmodule sind bekannt: …“, keine unbekannte Zelle steht ohne Grund da. Unveränderte Funks stehen jetzt ebenfalls hinter „Unverändertes zeigen“. Eine Zeile
+mit einer unbekannten Seite ist `unknown` und nie eine Änderung; ob beide bekannte Seiten
+`same` oder `changed` sind, sagt weiter der Server (`changes`, etwa eine Breite nach „Funk
+an“). Ausnahme „Erreichbar“: Der Server vergleicht nur wahr/falsch, die Zelle sagt auch
+„(LAN)“ (`cause: lan_down`); sagen beide bekannten Zellen Verschiedenes, ist die Zeile
+`changed` und zählt als Änderung. Ohne Block (eine Antwort ohne Blöcke oder ein Router, der in
+einem Block fehlt) gilt der Weg über `changes`; eine unbekannte Zelle nennt dann
+`from_reason` bzw. `to_reason` des Servers, ohne diese Felder den Grund ihrer Seite wie
+bisher. `_radio_diff` hat keine Gründe je Seite. Die
+Zusammenfassung zählt genau die Zeilen der Tabellen („Keine bekannte Änderung; n Merkmale
+sind …“ = Zahl der Zeilen `unknown`).
+
+**Deaktivierter Router (1.52.2).** Ein Router mit `entry: "disabled"`, von dem zu beiden
+Zeitpunkten nichts bekannt ist, weil nichts beobachtet wurde (`disabledView` `only` auf beiden
+Seiten, siehe 25.2; `compareRouters`), steht nicht unter den Unterschieden, zählt
+nicht in „n Merkmale … unbekannt“ und nicht als „Router ohne Unterschied“; darunter steht „1
+Router ist deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von ihm nichts
+bekannt.“ (mehrere: „n Router sind …“). Ist er zu einem der Zeitpunkte bekannt (vorher
+eingeschaltet) oder trägt ein unbekannter Wert einen anderen Grund als `not_observed`, steht
+seine Tabelle wie sonst, mit dem Abzeichen „derzeit deaktiviert“. Wären ohne die nicht
+aufgeführten Router die Sätze „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ oder
+„Die Zustände … sind gleich; …“ fällig, sagt die Zusammenfassung stattdessen „Über 1
+deaktivierten Router ist nichts bekannt; sonst hat sich zwischen diesen Zeitpunkten nichts
+geändert.“ (mehrere: „Über n deaktivierte Router …“; mit Ereignissen: „…; sonst sind die
+Zustände zu beiden Zeitpunkten gleich, und dazwischen gab es Ereignisse.“,
+`disabledSummaryText`, Texte in `tmTexts.ts`), nie einen Satz über Router, von denen nichts
+bekannt ist.
+
+Darunter „Ereignisse dazwischen“ (Zahl je Art, „In der Zeitleiste zeigen“ mit
 dem Fenster `t1`–`t2`, höchstens 14 Tage), Vorfälle, für Administratoren
 Konfigurationsänderungen (gezählt werden Versionen; das Backend liefert keine Zahl geänderter
 Einstellungen). `changes.other_sources` (Einträge der anderen Module mit `t1 ≤ ts < t2`)
@@ -1887,7 +1981,12 @@ höchstens zwei Zeilen, der volle Name im `title`; in Karten ganz.
 ### 25.7 Testdaten und Tests
 
 `tmFixtureState.json` sind echte Antworten der Routen (Admin und Benutzer), geschrieben von
-`tests/test_tm_panel_fixture_v1520.py` (neu erzeugen mit `TM_WRITE_FIXTURE=1`). JS-Tests:
+`tests/test_tm_panel_fixture_v1520.py` (neu erzeugen mit `TM_WRITE_FIXTURE=1`).
+`tmFixtureCompare.json` (1.52.2) sind Antworten von `tm_state.async_state` /
+`async_compare` (die Körper der Routen) aus einer Welt mit drei Routern nach dem Update von
+einer 1.51.0-Datei, einem Neustart und Polls, Router 3 deaktiviert, Router 2 hinter Router 1,
+danach Router 2 ausgefallen und deaktiviert; geschrieben von
+`tests/test_tm_compare_display_v1522.py` (ebenfalls `TM_WRITE_FIXTURE=1`). JS-Tests:
 `tmState.test.mjs` (Logik und Client mit nachgebildetem Fetch), `tmRender.test.mjs`
 (Darstellung aller Zustände beider Rollen, Sprünge, fremde Tabs, die zwei strukturellen
 Stiltests über alle Bildschirme der neuen Ansichten), `tmLayout.test.mjs`.

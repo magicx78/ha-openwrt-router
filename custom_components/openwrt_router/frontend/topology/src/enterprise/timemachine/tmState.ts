@@ -27,8 +27,9 @@ import {
   routerOptionLabel, startText,
 } from './tmLogic.ts';
 import {
+  DISABLED_SUMMARY_EVENTS, DISABLED_SUMMARY_MANY, DISABLED_SUMMARY_ONE, DISABLED_SUMMARY_SAME,
   EXPORT_UNAVAILABLE_TEXT, GLOBAL_REASON_TEXT, JUMP_KIND_TAB, JUMP_OBJECT, JUMP_REF_TAB, JUMP_TAB_TEXT, PART_STATE_TEXT, RADIO_BAND_TEXT,
-  RADIO_STATE_TEXT, ROLE_TEXT, SOURCE_TEXT, STATE_REASON_TEXT, TITLE_TEXT,
+  RADIO_NOT_SEEN, RADIO_STATE_TEXT, ROLE_TEXT, SOURCE_TEXT, STATE_REASON_TEXT, TITLE_TEXT,
 } from './tmTexts.ts';
 import type {
   Change, ClientItem, ClientsPart, CompareAnswer, CompareQuery, ConfigItem, IncidentItem, JumpTarget, Known, Mark,
@@ -265,6 +266,7 @@ function routerState(v: unknown): RouterState | null {
   return {
     routerId,
     routerName: str(r.router_name),
+    entry: token(r.entry),
     reachable: known(r.reachable, x => (typeof x === 'boolean' ? x : null)),
     role: known(r.role, token),
     uplink: known(r.uplink, uplinkOf),
@@ -390,7 +392,7 @@ export function parseState(v: unknown): StateAnswer {
 function change<T>(v: unknown, value: (x: unknown) => T | null): Change<T> {
   const c = obj(v);
   const state = c.state === 'changed' || c.state === 'same' ? c.state : 'unknown';
-  return { from: value(c.from), to: value(c.to), state };
+  return { from: value(c.from), to: value(c.to), state, fromReason: token(c.from_reason), toReason: token(c.to_reason) };
 }
 
 function radioSide(v: unknown): RadioChange['from'] {
@@ -561,6 +563,28 @@ export function stateLoadAt(live: boolean, input: string, nowS: number): { at: n
   return { at, input: toLocalInput(at) };
 }
 
+/**
+ * One load of "Zustand" (1.52.2, review): the action its container
+ * dispatches and the query it asks (null: nothing to ask). A field without a
+ * moment (empty, or a skipped hour) clears: the old result goes and an answer
+ * still on its way is dropped (`seq` is the new one).
+ */
+export function stateLoadStep(live: boolean, input: string, routerId: string | null, nowS: number, seq: number):
+  { action: StateAction; query: StateQuery | null; input: string } {
+  const { at, input: shown } = stateLoadAt(live, input, nowS);
+  if (at === null) return { action: { type: 'clear', seq }, query: null, input: shown };
+  return { action: { type: 'start', seq }, query: { at, routerId, clientsCursor: null }, input: shown };
+}
+
+/** One load of "Vergleich" (1.52.2, review): like stateLoadStep; "Von" or "Bis" without a moment clears. */
+export function compareLoadStep(from: string, until: string, routerId: string | null, seq: number):
+  { action: CompareAction; query: CompareQuery | null } {
+  const t1 = fromLocalInput(from);
+  const t2 = fromLocalInput(until);
+  if (t1 === null || t2 === null) return { action: { type: 'clear', seq }, query: null };
+  return { action: { type: 'start', seq }, query: { t1, t2, routerId } };
+}
+
 // ── Loading when a view opens (1.52.1) ───────────────────────────────────
 
 /** The pause after a change of a field (typing) before "Zustand" or "Vergleich" loads. */
@@ -617,6 +641,8 @@ export const STATE_INIT: StateView = {
 
 export type StateAction =
   | { type: 'start'; seq: number }
+  /** 1.52.2: a field is empty or no moment: the result goes, a late answer is dropped. */
+  | { type: 'clear'; seq: number }
   | { type: 'done'; seq: number; answer: StateAnswer; query: StateQuery }
   | { type: 'fail'; seq: number; error: unknown }
   | { type: 'moreStart'; seq: number }
@@ -629,6 +655,9 @@ export function stateReducer(s: StateView, a: StateAction): StateView {
     case 'start':
       // a new moment drops a pending "Weitere laden"
       return { ...s, seq: a.seq, moreSeq: -1, loading: true, loadingMore: false, moreError: null };
+    case 'clear':
+      // the field holds no moment: nothing of the old one stays, a pending answer or page is dropped
+      return { ...STATE_INIT, seq: a.seq, moreSeq: -1 };
     case 'done':
       if (a.seq !== s.seq) return s;
       return {
@@ -663,6 +692,8 @@ export const COMPARE_INIT: CompareView = { seq: 0, answer: null, loading: false,
 
 export type CompareAction =
   | { type: 'start'; seq: number }
+  /** 1.52.2: "Von" or "Bis" holds no moment: the result goes, a late answer is dropped. */
+  | { type: 'clear'; seq: number }
   | { type: 'done'; seq: number; answer: CompareAnswer }
   | { type: 'fail'; seq: number; error: unknown };
 
@@ -670,6 +701,8 @@ export function compareReducer(s: CompareView, a: CompareAction): CompareView {
   switch (a.type) {
     case 'start':
       return { ...s, seq: a.seq, loading: true };
+    case 'clear':
+      return { ...COMPARE_INIT, seq: a.seq };
     case 'done':
       return a.seq !== s.seq ? s : { ...s, answer: a.answer, loading: false, error: null };
     case 'fail':
@@ -844,8 +877,27 @@ export interface CompareRow {
   after: string;
   /** changed | same | unknown */
   state: string;
-  /** Why a side is unknown, in words (null when both are known). */
+  /**
+   * 1.52.2: why "Vorher" / "Nachher" is unknown, in words; null when that side
+   * is known. Each cell has its own side's reason (before: one reason for both).
+   */
+  beforeReason: string | null;
+  afterReason: string | null;
+}
+
+interface Cell {
+  text: string;
+  /** Only for an unknown cell. */
   reason: string | null;
+  unknown: boolean;
+}
+
+function cellOf(v: ValueView): Cell {
+  return v.unknown ? { text: UNKNOWN, reason: v.reason, unknown: true } : { text: v.text, reason: null, unknown: false };
+}
+
+function unknownCell(reason: string | null): Cell {
+  return { text: UNKNOWN, reason, unknown: true };
 }
 
 function sideReason(side: StateAnswer | null): string | null {
@@ -856,46 +908,163 @@ function boolText(v: boolean | null): string {
   return v === null ? UNKNOWN : v ? 'erreichbar' : 'nicht erreichbar';
 }
 
+/** One router in one block of the comparison (null: no block, or the router is not in it). */
+function sideRouter(side: StateAnswer | null, routerId: string): RouterState | null {
+  return side?.routers.find(x => x.routerId === routerId) ?? null;
+}
+
 /**
- * The rows of one router: Erreichbar, Rolle, Uplink, each radio, and (for
- * administrators) the client count. A side that is unknown says
- * "unbekannt"; an unknown row is never a change.
+ * A cell without a block (an answer without one, or a router missing from
+ * it): what `changes` says, with the server's reason of that side
+ * (`from_reason` / `to_reason`, 1.52.2), else the side's own as before.
  */
-export function compareRows(r: RouterChange, a: CompareAnswer, isAdmin: boolean): CompareRow[] {
-  const reason = [sideReason(a.before), sideReason(a.after)].filter(Boolean).join(' / ') || null;
-  const row = <T>(key: string, label: string, c: Change<T>, text: (v: T | null) => string): CompareRow => ({
-    key, label,
-    before: c.state === 'unknown' && c.from === null ? UNKNOWN : text(c.from),
-    after: c.state === 'unknown' && c.to === null ? UNKNOWN : text(c.to),
-    state: c.state,
-    reason: c.state === 'unknown' ? reason : null,
-  });
-  const rows: CompareRow[] = [
-    row('reachable', 'Erreichbar', r.reachable, boolText),
-    row('role', 'Rolle', r.role, v => roleText(v)),
-    row('uplink', 'Uplink', r.uplink, v => uplinkText(v)),
-  ];
-  for (const x of r.radios) {
-    if (x.key === null) {
-      rows.push({ key: 'radios', label: 'Funk', before: UNKNOWN, after: UNKNOWN, state: 'unknown', reason: stateReasonText(x.reason) });
-      continue;
-    }
-    rows.push({
-      key: `radio-${x.key}`,
-      label: `Funk ${radioBandText(x.band)}`,
-      before: x.from ? radioValueText(x.from) : UNKNOWN,
-      after: x.to ? radioValueText(x.to) : UNKNOWN,
-      state: x.state,
-      reason: x.state === 'unknown' ? (x.reason ? stateReasonText(x.reason) : reason) : null,
+function changeCell<T>(c: Change<T>, value: T | null, reason: string | null, side: StateAnswer | null, text: (v: T | null) => string): Cell {
+  if (c.state === 'unknown' && value === null) return unknownCell(reason ? stateReasonText(reason) : sideReason(side));
+  return { text: text(value), reason: null, unknown: false };
+}
+
+function row(key: string, label: string, before: Cell, after: Cell, state: string): CompareRow {
+  return {
+    key, label, before: before.text, after: after.text,
+    // a row with an unknown side is unknown, never a change
+    state: before.unknown || after.unknown ? 'unknown' : state,
+    beforeReason: before.unknown ? before.reason : null,
+    afterReason: after.unknown ? after.reason : null,
+  };
+}
+
+/** The radio rows: one per radio of a side whose list is known; one "Funk" row when neither side's is. */
+function radioRows(r: RouterChange, a: CompareAnswer, rb: RouterState | null, ra: RouterState | null): CompareRow[] {
+  if (rb === null || ra === null) {
+    // no blocks: the radios of `changes` (before 1.52.2)
+    return r.radios.map(x => {
+      if (x.key === null) {
+        const why = unknownCell(stateReasonText(x.reason));
+        return row('radios', 'Funk', why, why, 'unknown');
+      }
+      const known = (v: NonNullable<RadioChange['from']>): Cell => ({ text: radioValueText(v), reason: null, unknown: false });
+      const why = (side: StateAnswer | null) => unknownCell(x.reason ? stateReasonText(x.reason) : sideReason(side));
+      return row(`radio-${x.key}`, `Funk ${radioBandText(x.band)}`,
+        x.from ? known(x.from) : why(a.before), x.to ? known(x.to) : why(a.after), x.state);
     });
   }
+  const vb = radiosView(rb.radios);
+  const va = radiosView(ra.radios);
+  // a list unknown as a whole: its reason, or its note (partial / not_observed without items
+  // has no reason of its own, the card says the note; review 1.52.2: never a cell without one)
+  const whyWhole = (v: { reason: string | null; note: string | null }) => unknownCell(v.reason ?? v.note);
+  if (vb.whole && va.whole) {
+    return [row('radios', 'Funk', whyWhole(vb), whyWhole(va), 'unknown')];
+  }
+  const items = (side: RouterState, whole: boolean) => (whole ? [] : side.radios.items);
+  const keys = [...new Set([...items(rb, vb.whole), ...items(ra, va.whole)].map(i => i.key))].sort();
+  const cell = (side: RouterState, v: { whole: boolean; reason: string | null; note: string | null }, key: string): Cell => {
+    if (v.whole) return whyWhole(v);
+    const item = side.radios.items.find(i => i.key === key);
+    if (item) return cellOf(radioView(item, side.radios.derived));
+    // a radio this side's list does not have: unknown, with the list's own reason if it is incomplete
+    return unknownCell(side.radios.reason ? stateReasonText(side.radios.reason) : RADIO_NOT_SEEN);
+  };
+  return keys.map(key => {
+    const band = (rb.radios.items.find(i => i.key === key) ?? ra.radios.items.find(i => i.key === key))?.band ?? null;
+    // the server lists every radio that is not the same (a width after "Funk an" is unknown)
+    const server = r.radios.find(x => x.key === key);
+    return row(`radio-${key}`, `Funk ${radioBandText(band)}`, cell(rb, vb, key), cell(ra, va, key), server ? server.state : 'same');
+  });
+}
+
+/**
+ * The rows of one router: Erreichbar, Rolle, Uplink, each radio, and (for
+ * administrators) the client count. Each cell is its side's value from the
+ * `before` / `after` block of the answer, in the words of "Zustand" (1.52.2:
+ * a known side is never shown as unknown because the other one is), and an
+ * unknown cell has its own side's reason. A row with an unknown side is
+ * unknown, never a change.
+ */
+export function compareRows(r: RouterChange, a: CompareAnswer, isAdmin: boolean): CompareRow[] {
+  const rb = sideRouter(a.before, r.routerId);
+  const ra = sideRouter(a.after, r.routerId);
+  const pair = <T>(c: Change<T>, view: ((s: RouterState) => ValueView), text: (v: T | null) => string): [Cell, Cell] => [
+    rb ? cellOf(view(rb)) : changeCell(c, c.from, c.fromReason, a.before, text),
+    ra ? cellOf(view(ra)) : changeCell(c, c.to, c.toReason, a.after, text),
+  ];
+  // the server compares reachable as true / false; the cells also say "(LAN)" (lan_down):
+  // two known cells with different words are a change (review 1.52.2), never "the same"
+  const [reachB, reachA] = pair(r.reachable, x => reachableView(x.reachable), boolText);
+  const reachState = !reachB.unknown && !reachA.unknown && reachB.text !== reachA.text ? 'changed' : r.reachable.state;
+  const rows: CompareRow[] = [
+    row('reachable', 'Erreichbar', reachB, reachA, reachState),
+    row('role', 'Rolle', ...pair(r.role, x => roleView(x.role), v => roleText(v)), r.role.state),
+    row('uplink', 'Uplink', ...pair(r.uplink, x => uplinkView(x.uplink), v => uplinkText(v)), r.uplink.state),
+    ...radioRows(r, a, rb, ra),
+  ];
   if (isAdmin && r.clients) {
     rows.push({
       key: 'clients', label: 'Clients', before: num(r.clients.from), after: num(r.clients.to),
-      state: r.clients.delta === 0 ? 'same' : 'changed', reason: null,
+      state: r.clients.delta === 0 ? 'same' : 'changed', beforeReason: null, afterReason: null,
     });
   }
   return rows;
+}
+
+// ── A disabled router (1.52.2) ───────────────────────────────────────────
+
+/** The reason of a value never seen: what a disabled config entry leaves at every moment. */
+const NOT_OBSERVED = 'not_observed';
+
+/**
+ * Nothing of the router is known at this moment, and only because it was
+ * never observed: every value and the radios unknown with the reason
+ * not_observed (review 1.52.2: any other reason, such as evicted,
+ * observation_gap or clock_shift, is a fact of its own and stays visible).
+ */
+function onlyNotObserved(r: RouterState): boolean {
+  const radios = r.radios;
+  return r.reachable.reason === NOT_OBSERVED && r.role.reason === NOT_OBSERVED && r.uplink.reason === NOT_OBSERVED
+    && radiosView(radios).whole && radios.reason === NOT_OBSERVED
+    && radios.items.every(i => i.reason === null || i.reason === NOT_OBSERVED);
+}
+
+/**
+ * A router whose config entry is disabled now: 'only' when nothing of it is
+ * known at the moment because it was never observed (one line "deaktiviert"),
+ * 'now' otherwise (its values or its real reasons are shown, marked); null
+ * when enabled, without an entry, or in an answer without the field (1.52.1
+ * and older).
+ */
+export function disabledView(r: RouterState | null): 'only' | 'now' | null {
+  if (!r || r.entry !== 'disabled') return null;
+  return onlyNotObserved(r) ? 'only' : 'now';
+}
+
+/**
+ * The routers of the comparison's tables: every router of `changes`, except
+ * a disabled one that is unknown at both moments (no difference, not counted;
+ * `disabled` says how many).
+ */
+export function compareRouters(a: CompareAnswer): { shown: RouterChange[]; disabled: number } {
+  const shown: RouterChange[] = [];
+  let disabled = 0;
+  for (const r of a.routers) {
+    const rb = sideRouter(a.before, r.routerId);
+    const ra = sideRouter(a.after, r.routerId);
+    if (disabledView(rb) === 'only' && disabledView(ra) === 'only') disabled += 1;
+    else shown.push(r);
+  }
+  return { shown, disabled };
+}
+
+/** Whether a listed router is disabled now (its entry in either block). */
+export function disabledNow(r: RouterChange, a: CompareAnswer): boolean {
+  return [a.before, a.after].some(side => sideRouter(side, r.routerId)?.entry === 'disabled');
+}
+
+/** The line under the tables for the disabled routers not listed; null for none. */
+export function disabledText(n: number): string | null {
+  if (!(n > 0)) return null;
+  return n === 1
+    ? '1 Router ist deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von ihm nichts bekannt.'
+    : `${num(n)} Router sind deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von ihnen nichts bekannt.`;
 }
 
 /** "von 2 auf 1 (−1)" of the client count. */
@@ -910,7 +1079,8 @@ export function deltaText(c: { from: number; to: number; delta: number }): strin
  * happened in between; else what is true.
  */
 export function compareSummary(a: CompareAnswer, isAdmin: boolean): string {
-  const rows = a.routers.flatMap(r => compareRows(r, a, isAdmin));
+  // the rows the tables show (1.52.2: a disabled router unknown at both moments is not one of them)
+  const rows = compareRouters(a).shown.flatMap(r => compareRows(r, a, isAdmin));
   const changed = rows.filter(r => r.state === 'changed').length;
   const unknown = rows.filter(r => r.state === 'unknown').length;
   const bothKnown = !!a.before?.known && !!a.after?.known;
@@ -925,10 +1095,23 @@ export function compareSummary(a: CompareAnswer, isAdmin: boolean): string {
   const other = a.otherSources;
   const happened = a.marks.count > 0 || a.incidents.opened.length > 0 || a.incidents.resolved.length > 0
     || a.configVersions.items.length > 0 || (other !== null && other.count > 0);
-  if (happened) return SAME_BUT_EVENTS;
+  // 1.52.2 (review): disabled routers not listed are unknown, never "the same"
+  const hidden = compareRouters(a).disabled;
+  if (happened) return disabledSummaryText(hidden, true) ?? SAME_BUT_EVENTS;
   // "nothing changed" only when the other modules were read and are empty too (review F)
   if (other === null || other.state !== 'ok' || other.truncated) return otherUnknownText(other);
-  return NOTHING_CHANGED;
+  return disabledSummaryText(hidden, false) ?? NOTHING_CHANGED;
+}
+
+/**
+ * 1.52.2 (review): the summary instead of "nothing changed" / "the same, with
+ * events" when `n` disabled routers are not listed: nothing is known of them,
+ * the rest is the same. null for none (the sentences of 1.52.1 stay).
+ */
+export function disabledSummaryText(n: number, events: boolean): string | null {
+  if (!(n > 0)) return null;
+  const head = n === 1 ? DISABLED_SUMMARY_ONE : DISABLED_SUMMARY_MANY.replace('{n}', num(n));
+  return `${head}; ${events ? DISABLED_SUMMARY_EVENTS : DISABLED_SUMMARY_SAME}`;
 }
 
 /** Why it is unknown whether anything happened in between, with the names of the sources not read. */

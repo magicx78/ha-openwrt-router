@@ -20,7 +20,9 @@ The tab shows its texts from tables in ``tmTexts.ts``. This test reads them
   the same title, and every registered tab a jump may name has a text;
 * ``EXPORT_UNAVAILABLE_TEXT`` (browser check before the merge): exactly the
   reasons of an ``unavailable`` export answer (``tm_export.async_export``),
-  whole sentences after "Nichts zu exportieren, …".
+  whole sentences after "Nichts zu exportieren, …";
+* ``ENTRY_TEXT`` (1.52.2): exactly the ``tm_sources.ENTRY_*`` states of a
+  router's config entry (``entry`` in ``/state`` and ``/compare``).
 """
 
 from __future__ import annotations
@@ -160,3 +162,13 @@ def test_every_unavailable_reason_of_the_export_has_a_text() -> None:
     for key, text in table.items():
         assert text[0].isupper() and text.endswith("."), (key, text)
         assert "_" not in text, key
+
+
+def test_every_entry_state_of_a_router_has_a_text() -> None:
+    """1.52.2: ``entry`` of a router (``tm_sources.ENTRY_*``) has a German word."""
+    table = _table("ENTRY_TEXT")
+    assert set(table) == _consts(tm_sources, "ENTRY_")
+    assert set(table) == {"enabled", "disabled"}
+    assert table["disabled"] == "deaktiviert"
+    for key, text in table.items():
+        assert "_" not in text and not text.endswith("."), (key, text)
