@@ -2056,6 +2056,232 @@ def test_manual_radio_advice_follows_the_catalog_status(
     assert f.proposal is None  # C never proposes, catalog or not
 
 
+# Outside signals per playbook, written from the inputs (not the code): a
+# finding never says "on the router" (False) next to one of these (decided
+# by the coordinator on PR #79, second round).
+_NOT_FINE = ("failed", "degraded")
+_OUTSIDE_BY_CAUSE: dict[str, frozenset[str]] = {
+    "dns_recovery": frozenset(
+        {"uplink_down", "lan_unreachable", "router_unreachable", "wan_down"}
+    ),
+    "dhcp_recovery": frozenset(
+        {
+            "uplink_down",
+            "lan_unreachable",
+            "router_unreachable",
+            "ip_conflict",
+            "client_side",
+            "client_driver",
+            "client_power_save",
+            "psk_wrong",
+            "sae_mismatch",
+            "wrong_network",
+            "static_ip",
+            "mac_filter",
+        }
+    ),
+    "radio_recovery": frozenset({"interference", "power_supply"}),
+    "interface_recovery": frozenset(),
+    "wan_recovery": frozenset(),
+    "client_recovery": frozenset(
+        {
+            "client_side",
+            "client_driver",
+            "client_power_save",
+            "psk_wrong",
+            "sae_mismatch",
+            "wrong_network",
+            "static_ip",
+            "mac_filter",
+        }
+    ),
+}
+
+
+def _signal_seen(pid: str, inc: pb.IncidentInput, ev: pb.Evidence) -> bool:
+    if inc.cause in _OUTSIDE_BY_CAUSE[pid]:
+        return True
+    chain = ev.chain
+    if pid == "dns_recovery":
+        return (
+            ev.wan_up is False
+            or ev.dns.upstream_ok is False
+            or any(chain.get(s) in _NOT_FINE for s in ("gateway", "wan", "internet"))
+        )
+    if pid == "dhcp_recovery":
+        return inc.incident_type == "dhcp_conflict"
+    if pid == "radio_recovery":
+        return ev.radio.interference is True
+    if pid == "interface_recovery":
+        return ev.interface.upstream_router_down is True
+    if pid == "wan_recovery":
+        w = ev.wan
+        return (
+            w.link_up is False
+            or w.interface_up is False
+            or w.has_address is False
+            or any(chain.get(s) in _NOT_FINE for s in ("gateway", "internet"))
+        )
+    return False
+
+
+def _check_no_false_next_to_a_signal(
+    a: pb.Assessment, inc: pb.IncidentInput, ev: pb.Evidence
+) -> None:
+    """For all seven playbooks: False never next to an outside signal; F's
+    False is checked against the signals of the playbook it replaced."""
+    f = a.finding
+    if f is None:
+        return
+    pid = f.playbook_id
+    if pid == "drift_recovery":
+        pid = a.match.original_playbook_id or pid
+        assert a.match.drift_overlay is True
+    if pid == "drift_recovery":
+        return
+    seen = _signal_seen(pid, inc, ev)
+    assert pb.outside_signal(pid, inc, ev) is seen, pid
+    out = f.incident_facts.cause_outside_router
+    if seen:
+        assert out is not False, (pid, a.match)
+    if out is True:
+        assert seen, pid  # True is always one of the signals
+
+
+def _assess_checked(inc: pb.IncidentInput, ev: pb.Evidence) -> pb.Assessment:
+    a = pb.assess(inc, ev)
+    _check_no_false_next_to_a_signal(a, inc, ev)
+    return a
+
+
+def test_drift_never_overrides_an_outside_signal_wan_down_and_local_resolver() -> None:
+    """Decided on PR #79 (round 2): WAN down (outside) and the local resolver
+    failing while upstream answers (inside) give None for A; a proven
+    earlier change in the area must not turn that into F's False."""
+    cfg = pb.ConfigFact(diff_proven=True, changed_areas=("dhcp",), changed_at=T_BEFORE)
+    ev = evidence(
+        wan_up=False,
+        dns=pb.DnsFact(local_ok=False, upstream_ok=True, log_hint=True),
+        config=cfg,
+    )
+    inc = incident()
+    assert pb.dns_cause_outside(inc, ev) is None  # both signals: unknown
+    assert pb.match(inc, ev).drift_overlay is True  # the matcher would overlay
+    a = pb.assess(inc, ev)
+    assert a.match.playbook_id == "dns_recovery", a.match  # was F with False
+    assert a.match.reason == "drift_hint_outside_signal"
+    assert a.match.drift_overlay is False and a.match.drift_hint is True
+    assert a.finding is not None
+    assert a.finding.incident_facts.cause_outside_router is None
+    assert "drift_hint_outside_signal" in a.finding.reasons
+    assert "drift_overlay" not in a.finding.reasons
+    assert "rec_review_diff" in a.finding.recommendations
+    assert a.finding.proposal is None
+    _check_no_false_next_to_a_signal(a, inc, ev)
+    # the control: no outside signal, F takes over
+    a = _assess_checked(inc, evidence(config=cfg))
+    assert a.match.playbook_id == "drift_recovery"
+    assert a.finding is not None
+    assert a.finding.incident_facts.cause_outside_router is False
+
+
+def test_a_failing_upstream_resolver_is_a_signal_even_with_internet_healthy() -> None:
+    """Round 2: the upstream resolver failing is an outside signal; with an
+    inside one (dnsmasq down) too, A says None, never False."""
+    ev = evidence(
+        dns=pb.DnsFact(local_ok=False, upstream_ok=False),
+        chain={"router": "healthy", "gateway": "healthy", "internet": "healthy"},
+    )
+    a = pb.assess(incident(), ev)
+    assert a.finding is not None
+    assert a.finding.incident_facts.cause_outside_router is None
+    assert a.finding.proposal is None
+    _check_no_false_next_to_a_signal(a, incident(), ev)
+
+
+@pytest.mark.parametrize(
+    ("pid", "inc", "ev"),
+    [
+        ("dns_recovery", {}, {"wan_up": False}),
+        ("dns_recovery", {}, {"chain": {"gateway": "degraded"}}),
+        ("dns_recovery", {}, {"dns": pb.DnsFact(local_ok=False, upstream_ok=False)}),
+        ("dhcp_recovery", {"incident_type": "dhcp_conflict", "service": None}, {}),
+        (
+            "radio_recovery",
+            {"service": "hostapd"},
+            {"radio": pb.RadioFact(interference=True)},
+        ),
+        (
+            "interface_recovery",
+            {"incident_type": "lan_port_flap", "service": None},
+            {"interface": pb.InterfaceFact(upstream_router_down=True)},
+        ),
+        (
+            "wan_recovery",
+            {"incident_type": "wan_down", "service": None},
+            {"wan": pb.WanFact(link_up=True, interface_up=False)},
+        ),
+        (
+            "client_recovery",
+            {
+                "incident_type": "wifi_reconnect_storm",
+                "service": None,
+                "cause": "psk_wrong",
+            },
+            {},
+        ),
+    ],
+)
+def test_outside_signal_per_playbook(
+    pid: str, inc: dict[str, Any], ev: dict[str, Any]
+) -> None:
+    i, e = incident(**inc), evidence(**ev)
+    assert pb.outside_signal(pid, i, e) is True
+    assert _signal_seen(pid, i, e) is True
+    # F inherits the signal of the playbook of the incident's type
+    assert pb.outside_signal("drift_recovery", i, e) is True
+    assert (
+        pb.outside_signal(pid, incident(), evidence()) is False or pid == "wan_recovery"
+    )
+
+
+@pytest.mark.parametrize("pid", pb.PLAYBOOK_IDS)
+def test_no_false_next_to_an_outside_signal_with_drift(pid: str) -> None:
+    """For each playbook: its False case plus an earlier proven change in the
+    area plus one outside signal never ends with False."""
+    signals: dict[str, dict[str, Any]] = {
+        "dns_recovery": {"wan_up": False},
+        "dhcp_recovery": {},
+        "radio_recovery": {
+            "radio": dataclasses.replace(radio_ev().radio, interference=True)
+        },
+        "interface_recovery": {
+            "interface": pb.InterfaceFact(
+                role="lan",
+                link_up=False,
+                on_mgmt_path=False,
+                carries_dependants=False,
+                upstream_router_down=True,
+            )
+        },
+        "wan_recovery": {"chain": {"gateway": "degraded"}},
+        "drift_recovery": {"wan_up": False},
+        "client_recovery": {},
+    }
+    inc, ev = _false_case(pid, None)
+    areas = sorted(pb.CONFIG_AREAS)
+    cfg = pb.ConfigFact(diff_proven=True, changed_areas=areas, changed_at=T_BEFORE)
+    over = dict(signals[pid])
+    if pid == "drift_recovery":
+        inc = incident(service="dnsmasq")
+    ev = dataclasses.replace(ev, config=cfg, **over)
+    a = _assess_checked(inc, ev)
+    assert a.finding is not None
+    if pid in ("dhcp_recovery", "client_recovery"):
+        return  # no measured signal of their own; covered by the cause tests
+    assert a.finding.incident_facts.cause_outside_router is not False, a.match
+
+
 def _random_case(rng: random.Random) -> tuple[pb.IncidentInput, pb.Evidence]:
     def b() -> bool | None:
         return rng.choice((True, False, None))
@@ -2320,7 +2546,7 @@ def test_invariants_over_random_cases_end_to_end() -> None:
     for i in range(6000):
         kind = "uniform" if i % 2 else "favourable"
         inc, ev = _random_case(rng) if kind == "uniform" else _favourable_case(rng)
-        a = pb.assess(inc, ev)
+        a = _assess_checked(inc, ev)
         f = a.finding
         if a.match.status is MS.NO_PLAYBOOK:
             assert f is None

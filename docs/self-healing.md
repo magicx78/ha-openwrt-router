@@ -924,9 +924,13 @@ gilt:
    Bereich belegt, den der Vorfall berührt, (b) die **Zeit der Änderung bekannt** ist und
    **vor dem Beginn des Vorfalls** liegt (`ConfigFact.changed_at` < `IncidentInput.started_at`,
    beide als Zeitstempel übergeben, keine Uhr im Modul), (c) F auf diesem Router passt und
-   (d) das ursprüngliche Playbook die Ursache **nicht** als außerhalb gemessen hat (True). Das
-   prüft `assess`: es lässt das ursprüngliche Playbook zuerst laufen; sagt es True, bleibt sein
-   Befund samt Wert (Grund `drift_hint_outside_measured`, Empfehlung `rec_review_diff`). Ist
+   (d) das ursprüngliche Playbook **keinen Hinweis** auf eine Ursache außerhalb gesehen hat
+   (`outside_signal`, siehe 8.3; zweite Review-Runde, entschieden vom Koordinator: nicht nur
+   ein gemessenes True sperrt, sondern jeder Hinweis). Das prüft `assess`: sieht das
+   ursprüngliche Playbook einen Hinweis, bleibt sein Befund samt Wert, die Änderung ist nur
+   ein Hinweis – Grund `drift_hint_outside_measured`, wenn es True gemessen hat, sonst
+   `drift_hint_outside_signal` (etwa WAN aus **und** lokaler Resolver scheitert: A sagt None,
+   F übernimmt nicht); Empfehlung `rec_review_diff`. Ist
    die Zeit unbekannt oder liegt sie nicht davor, bleibt das ursprüngliche Playbook, die
    Änderung ist nur ein **Hinweis** (`drift_hint`, `rec_review_diff`).
 
@@ -967,7 +971,18 @@ None. Die Liste ist im Test festgeschrieben:
 | G | – (nur ohne Ursache) | die Client-Ursachen |
 
 `dns_resolution` (aus dnsmasq-Logzeilen, nur Hypothese) steht bei A nicht auf der Liste
-(entschieden: eine Logzeile ist kein Beleg für „auf diesem Router“). `to_decision_input`
+(entschieden: eine Logzeile ist kein Beleg für „auf diesem Router“).
+
+**Kein False neben einem Hinweis nach außen (zweite Review-Runde).** `outside_signal(playbook,
+incident, evidence)` sammelt jeden genannten oder gemessenen Hinweis, dass der Fehler außerhalb
+liegen kann; ein Hinweis ist kein Urteil (äußerer und innerer Hinweis zusammen ergeben None).
+`_settle` macht aus False ein None, sobald ein Hinweis da ist; so steht
+`cause_outside_router` False bei **keinem** der sieben Playbooks neben einem Hinweis. Hinweise:
+jede Ursache aus `OUTSIDE_CAUSES`; A: WAN aus, Stufe Gateway/WAN/Internet gescheitert oder
+„degraded“, vorgelagerter Resolver scheitert; B: Adresskonflikt; C: Interferenz gemessen;
+D: vorgelagerter Router aus; E: WAN-Leitung unten, WAN-Schnittstelle unten, keine Adresse,
+Stufe Gateway/Internet gescheitert oder „degraded“ (alles kann auch beim Anbieter liegen);
+F: die Hinweise des Playbooks der Vorfallart; G: nur die genannte Ursache. `to_decision_input`
 macht aus einem Vorschlag den `DecisionInput` der Richtlinie; Fakten, die das Playbook
 gelesen hat, ergänzen den `RiskContext` nur dort, wo er nichts weiß – widersprechen sie
 ihm, wird das Feld unbekannt. Ein Befund ohne Vorschlag ergibt **keinen** `DecisionInput`.
@@ -1711,7 +1726,7 @@ Hold.
   (`_Run.propose` setzt die Konstante, M30) und die Gegenprüfung in `assess` (M25) erreicht
   **kein Test**: jeder Weg dorthin übergibt schon die Konstante. Sie sind Absicherung in der
   Tiefe, keine geprüfte Eigenschaft.
-- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 199 Tests):
+- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 216 Tests):
   Regressionstests aus den Proben des Reviews, jeder scheiterte auf dem Stand b32a393 (geprüft
   in einer Kopie mit dem alten Modul und zwei wirkungslosen Feldern `started_at`/`changed_at`,
   69 Tests rot): Erlaubnisliste `INSIDE_CAUSES` festgeschrieben; jede bekannte Ursache außer
@@ -1733,12 +1748,22 @@ Hold.
   Code. Gegen das alte Modul fand er 1807 Vorschläge, davon 201 mit Ursache außerhalb der
   Liste (P1-2), 42 ohne gemessenen Upstream (P1-2), 15 bei vollem oder unbekanntem Bereich
   (P1-1) und 92 ohne beobachtete Familie (P1-5); gegen das neue keinen Verstoß (1400
-  Vorschläge).
-- **Mutationsprüfung auf grünem Stand (zweite Runde):** 58 Änderungen – die 35 des Reviewers
+  Vorschläge). Dritte Ergänzung (Entscheidung des Koordinators zur Drift): für **jeden**
+  Befund beider Generatoren prüft der Test aus den Eingaben, dass False nie neben einem
+  Hinweis nach außen steht und True immer einer ist (bei F gegen das ersetzte Playbook);
+  benannte Tests: WAN aus plus lokaler Resolver scheitert plus belegte Änderung bleibt bei A
+  (vorher: F mit False), scheiternder vorgelagerter Resolver bei gesunder Internet-Stufe
+  (vorher: False und Vorschlag), Hinweise je Playbook, False-Fall jedes Playbooks plus
+  Änderung plus Hinweis. Gegen den Stand f9f514e: 2 der Zufallsbefunde mit False neben
+  einem Hinweis, gegen den neuen keiner.
+- **Mutationsprüfung auf grünem Stand (zweite Runde):** zuerst 58 Änderungen – die 35 des Reviewers
   (M01–M35, auf den neuen Code übertragen, M15 getrennt nach Abhängigen und Management-Weg)
   und 22 für die neuen Regeln (N01–N22: Erlaubnisliste, „degraded“, Drift-Zeit und
   -Übergabe, Fähigkeit, beobachtete Familie, kleinster AP, Belegung, C-Empfehlungen,
-  D-Rollen, E nie False, Neustart-Zähler). 56 lassen mindestens einen Test scheitern, darunter
+  D-Rollen, E nie False, Neustart-Zähler), dazu nach der Drift-Entscheidung drei weitere
+  (N23 `_settle` ohne Hinweisprüfung, N24 scheiternder Upstream kein Hinweis, N25 F erbt
+  die Hinweise nicht; N07 prüft jetzt die Hinweis-Sperre der Überlagerung): 61 Änderungen,
+  59 lassen mindestens einen Test scheitern, darunter
   die Überlebenden des Reviews M09 (90 %), M15 (Abhängige und Management-Weg getrennt), M31
   (Anbieter-Störung nur mit Adresse) und M34 (Schwelle der Neustarts). Es überleben **M25**
   und **M30**: Absicherung in der Tiefe, die kein Test erreicht (siehe Korrektur oben).

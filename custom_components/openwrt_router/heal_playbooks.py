@@ -1465,6 +1465,11 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
             "Eine Konfigurationsänderung ist belegt, die Messung legt die Ursache "
             "aber außerhalb des Routers; das ursprüngliche Playbook bleibt."
         ),
+        "drift_hint_outside_signal": (
+            "Eine Konfigurationsänderung ist belegt, es gibt aber auch einen "
+            "Hinweis auf eine Ursache außerhalb des Routers; das ursprüngliche "
+            "Playbook bleibt, die Änderung ist nur ein Hinweis."
+        ),
         "services_capability_unknown": (
             "Nicht bestätigt, dass dieser Router seine Dienste meldet."
         ),
@@ -2349,14 +2354,70 @@ OUTSIDE_CAUSES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
 )
 
 
-def _settle(playbook_id: str, inc: IncidentInput, raw: bool | None) -> bool | None:
+def _type_playbook(inc: IncidentInput) -> str | None:
+    """The playbook of the incident's type (or of its service)."""
+    if inc.incident_type == "system_service_restart":
+        return _SERVICE_PLAYBOOK.get(inc.service or "")
+    return _TYPE_PLAYBOOK.get(inc.incident_type or "")
+
+
+def outside_signal(playbook_id: str, inc: IncidentInput, ev: Evidence) -> bool:
+    """Any sign, named or measured, that the fault may lie outside the router.
+
+    A signal is not a verdict: an outside and an inside signal together give
+    None, never False. ``cause_outside_router`` False never stands next to a
+    signal (decided by the master on PR #79), and Playbook F never takes a
+    case over from a playbook that saw one. Per playbook: a cause from
+    :data:`OUTSIDE_CAUSES`; A: the WAN down, a gateway/WAN/internet stage
+    failed or degraded, the upstream resolver failing; B: an address
+    conflict; C: interference measured; D: the upstream router down; E: the
+    WAN link down, the WAN interface down, no address, or a gateway/internet
+    stage failed or degraded (each can be the provider's side); F: the
+    signals of the playbook of the incident's type; G: the named cause only.
+    """
+    if playbook_id == "drift_recovery":
+        orig = _type_playbook(inc)
+        return (
+            orig is not None and orig != playbook_id and outside_signal(orig, inc, ev)
+        )
+    if inc.cause is not None and inc.cause in OUTSIDE_CAUSES[playbook_id]:
+        return True
+    if playbook_id == "dns_recovery":
+        return (
+            ev.wan_up is False
+            or any(ev.chain.get(s) in _NOT_HEALTHY for s in _OUTSIDE_CHAIN_STAGES)
+            or ev.dns.upstream_ok is False
+        )
+    if playbook_id == "dhcp_recovery":
+        return inc.incident_type == "dhcp_conflict"
+    if playbook_id == "radio_recovery":
+        return ev.radio.interference is True
+    if playbook_id == "interface_recovery":
+        return ev.interface.upstream_router_down is True
+    if playbook_id == "wan_recovery":
+        wan = ev.wan
+        return (
+            wan.link_up is False
+            or wan.interface_up is False
+            or wan.has_address is False
+            or any(ev.chain.get(s) in _NOT_HEALTHY for s in ("gateway", "internet"))
+        )
+    return False
+
+
+def _settle(
+    playbook_id: str, inc: IncidentInput, ev: Evidence, raw: bool | None
+) -> bool | None:
     """The derived location checked against the cause Network Intelligence
-    names: an outside cause gives True; False only with no cause or one of
-    the playbook's :data:`INSIDE_CAUSES`; otherwise unknown (None)."""
+    names and every outside signal: an outside cause gives True; False only
+    with no cause or one of the playbook's :data:`INSIDE_CAUSES` and no
+    :func:`outside_signal`; otherwise unknown (None)."""
     cause = inc.cause
     if cause is not None and cause in OUTSIDE_CAUSES[playbook_id]:
         return True
     if raw is False and cause is not None and cause not in INSIDE_CAUSES[playbook_id]:
+        return None
+    if raw is False and outside_signal(playbook_id, inc, ev):
         return None
     return raw
 
@@ -2425,7 +2486,7 @@ def dns_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
         raw = True
     elif inside and not outside and outside_healthy:
         raw = False
-    return _settle("dns_recovery", inc, raw)
+    return _settle("dns_recovery", inc, ev, raw)
 
 
 def _analyze_dns(run: _Run) -> PlaybookFinding:
@@ -2525,7 +2586,7 @@ def dhcp_cause_outside(
         raw = True
     elif daemon is not None and ev.service(daemon).faulty is True:
         raw = False
-    return _settle("dhcp_recovery", inc, raw)
+    return _settle("dhcp_recovery", inc, ev, raw)
 
 
 def _dhcp_daemon(inc: IncidentInput, ev: Evidence) -> tuple[str | None, str | None]:
@@ -2698,7 +2759,7 @@ def radio_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
         and ev.service(inc.service or "").faulty is True
     ):
         raw = False
-    return _settle("radio_recovery", inc, raw)
+    return _settle("radio_recovery", inc, ev, raw)
 
 
 def _analyze_radio(run: _Run) -> PlaybookFinding:
@@ -2853,7 +2914,7 @@ def interface_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     """True only when the upstream router is known down; nothing on a port
     tells a cable from a peer, so False is never claimed."""
     raw = True if ev.interface.upstream_router_down is True else None
-    return _settle("interface_recovery", inc, raw)
+    return _settle("interface_recovery", inc, ev, raw)
 
 
 def _analyze_interface(run: _Run) -> PlaybookFinding:
@@ -2955,7 +3016,7 @@ def wan_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
         and (ev.stage("gateway") is False or ev.stage("internet") is False)
     ):
         raw = True
-    return _settle("wan_recovery", inc, raw)
+    return _settle("wan_recovery", inc, ev, raw)
 
 
 def _analyze_wan(run: _Run) -> PlaybookFinding:
@@ -3025,7 +3086,7 @@ def drift_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     """False when a diff proves a change on this router in the area the
     incident touches (the cause is on the router); otherwise None."""
     raw = False if _drift_in_area(inc, ev) else None
-    return _settle("drift_recovery", inc, raw)
+    return _settle("drift_recovery", inc, ev, raw)
 
 
 def _analyze_drift(run: _Run) -> PlaybookFinding:
@@ -3094,7 +3155,7 @@ def client_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
     and no cause is named; a full AP, weak signal, roaming or steering can be
     either: None."""
     raw = False if ev.client.ap_available is False else None
-    return _settle("client_recovery", inc, raw)
+    return _settle("client_recovery", inc, ev, raw)
 
 
 def _analyze_client(run: _Run) -> PlaybookFinding:
@@ -3196,26 +3257,36 @@ def assess(incident: IncidentInput, evidence: Evidence) -> Assessment:
     run = _Run(pb=PLAYBOOKS[m.playbook_id], inc=incident, ev=evidence)
     if m.status is MatchStatus.UNSUPPORTED:
         return Assessment(match=m, finding=_unsupported(run, m))
-    if m.drift_overlay and m.original_playbook_id is not None:
-        # the original playbook looks first: if it measures the cause outside
-        # the router, the drift is only a hint and its value stays (decided
-        # by the master on PR #79)
-        orig = _Run(pb=PLAYBOOKS[m.original_playbook_id], inc=incident, ev=evidence)
-        orig.why("drift_hint_outside_measured")
-        orig.rec("rec_review_diff")
-        orig_finding = _ANALYZERS[m.original_playbook_id](orig)
-        if orig_finding.incident_facts.cause_outside_router is True:
-            run = orig
-            finding = orig_finding
-            m = Match(
-                status=MatchStatus.MATCHED,
-                playbook_id=m.original_playbook_id,
-                reason="drift_hint_outside_measured",
-                drift_hint=True,
-            )
-        else:
-            run.why("drift_overlay")
-            finding = _ANALYZERS[m.playbook_id](run)
+    if (
+        m.drift_overlay
+        and m.original_playbook_id is not None
+        and outside_signal(m.original_playbook_id, incident, evidence)
+    ):
+        # the original playbook saw a sign of an outside cause: the drift is
+        # only a hint and the original finding, with its value, stays
+        # (decided by the master on PR #79; measured True or a signal only)
+        orig_id = m.original_playbook_id
+        probe = _ANALYZERS[orig_id](
+            _Run(pb=PLAYBOOKS[orig_id], inc=incident, ev=evidence)
+        )
+        code = (
+            "drift_hint_outside_measured"
+            if probe.incident_facts.cause_outside_router is True
+            else "drift_hint_outside_signal"
+        )
+        run = _Run(pb=PLAYBOOKS[orig_id], inc=incident, ev=evidence)
+        run.why(code)
+        run.rec("rec_review_diff")
+        finding = _ANALYZERS[orig_id](run)
+        m = Match(
+            status=MatchStatus.MATCHED,
+            playbook_id=orig_id,
+            reason=code,
+            drift_hint=True,
+        )
+    elif m.drift_overlay:
+        run.why("drift_overlay")
+        finding = _ANALYZERS[m.playbook_id](run)
     else:
         if m.drift_hint:
             run.why("drift_hint")
