@@ -39,6 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import full_router_kit as kit
 import pytest
 from core_testkit import SECRET, FakeDisks, FakeEntry, make_hass
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import Event
 from test_heal_store_v1530 import KEY, R1, R2, T0, Clock, disks, execute, new_action
 from test_heal_store_v1530 import to_approved as store_to_approved
@@ -154,12 +155,17 @@ class FakeNI:
         self.incidents: dict[str, Any] = {}
         self.ring: list[Any] = []
         self.maintenance: set[str] = set()
+        # incident id -> the reopen count it was announced with on the bus
+        self.announced: dict[str, int] = {}
         self.machine = SimpleNamespace(
             peek=lambda: list(self.incidents.values()), last_now=T0
         )
 
     def in_maintenance(self, entry_id: str) -> bool:
         return entry_id in self.maintenance
+
+    def announced_reopen_count(self, incident_id: str) -> int | None:
+        return self.announced.get(incident_id)
 
 
 def incident(iid: str, routers: list[str], **fields: Any) -> Any:
@@ -217,21 +223,27 @@ class World:
         kwargs.setdefault("monotonic", self.clock.mono)
         engine = he.HealEngine(self.hass, **kwargs)
         await engine.async_start()
-        for entry in self.hass.entries:
-            engine.add_entry(entry.entry_id)
+        await engine.async_add_entries(e.entry_id for e in self.hass.entries)
         self.hass.data[DATA_SELF_HEALING_ENGINE] = engine
         self.engine = engine
         return engine
 
     def open(self, iid: str, router: str = E1, **fields: Any) -> None:
-        """NI shows an active root and announces it."""
-        self.ni.incidents[iid] = incident(iid, [router], **fields)
+        """NI shows an active root and announces it (like ``_announce``)."""
+        inc = self.ni.incidents[iid] = incident(iid, [router], **fields)
+        self.ni.announced[iid] = inc.reopen_count
         self.bus.fire(EVENT_INCIDENT, payload(iid, entry_ids=[router]))
 
     def resolve(self, iid: str, *, reason: str | None = None) -> None:
+        """NI resolves (or ignores) an incident and announces that."""
         inc = self.ni.incidents.get(iid)
         if inc is not None:
-            inc.status = IncidentStatus.RESOLVED
+            inc.status = (
+                IncidentStatus.IGNORED
+                if reason == "ignored"
+                else IncidentStatus.RESOLVED
+            )
+        self.ni.announced.pop(iid, None)
         self.bus.fire(EVENT_INCIDENT, payload(iid, "resolved", reason=reason))
 
     def tick(self, seconds: float = he.TICK_S) -> None:
@@ -254,12 +266,22 @@ class World:
 
 
 def make_entries(*ids: str, **options: Any) -> list[FakeEntry]:
+    """Router entries that finished their setup (LOADED, runtime data)."""
     entries = []
     for entry_id in ids:
         entry = FakeEntry(entry_id, options=dict(options))
         entry.runtime_data = SimpleNamespace(coordinator=object())
+        entry.state = ConfigEntryState.LOADED
         entries.append(entry)
     return entries
+
+
+def heal_hass(entries: list[Any]) -> Any:
+    """A mocked hass with a configuration directory (the store itself is
+    on FakeDisks: nothing is written there)."""
+    hass = make_hass(entries)
+    hass.config.config_dir = "/config"
+    return hass
 
 
 @contextlib.contextmanager
@@ -277,7 +299,7 @@ def patched(ni: Any, registry: Registry, ticks: Ticks) -> Any:
 
 @pytest.fixture
 async def world(disks: FakeDisks) -> Any:
-    hass = make_hass(make_entries(E1, E2))
+    hass = heal_hass(make_entries(E1, E2))
     w = World(hass, Clock(), FakeNI(), Registry({E1: R1, E2: R2}))
     with patched(w.ni, w.registry, w.ticks):
         yield w
@@ -416,7 +438,7 @@ async def test_real_network_intelligence_root_makes_one_record(
 ) -> None:
     """Order test 34 end to end: NI's own bus announcement (root, after the
     settle time) makes one record; its resolution closes it."""
-    hass = make_hass(make_entries("gw", "ap1"))
+    hass = heal_hass(make_entries("gw", "ap1"))
     w = World(hass, Clock(), intel, Registry({"gw": R1, "ap1": R2}))
     intel.hass.bus.async_fire.side_effect = lambda t, d=None, **kw: w.bus.fire(t, d)
     with patched(intel, w.registry, w.ticks):
@@ -484,7 +506,8 @@ async def test_time_alone_is_never_an_acting_outcome(world: World) -> None:
 
 async def test_repeat_child_and_unclear_router_make_no_record(world: World) -> None:
     """Order test 34: one record per root; repeats, children, fleet and
-    multi-router incidents make none (counted, never raised)."""
+    multi-router incidents make none (counted, never raised). What counts
+    is what Network Intelligence holds, never the event's own fields."""
     engine = await world.start()
     world.open("inc-1")
     world.bus.fire(EVENT_INCIDENT, payload("inc-1"))  # announced again
@@ -493,32 +516,27 @@ async def test_repeat_child_and_unclear_router_make_no_record(world: World) -> N
     assert engine.counters["deduplicated"] == 2
     # a child of a known root stays silent
     world.ni.incidents["inc-2"] = incident("inc-2", [E2], parent_id="inc-1")
+    world.ni.announced["inc-2"] = 0
     with patch.object(net_rules, "suppressed_child", lambda inc, known, now: True):
         world.bus.fire(EVENT_INCIDENT, payload("inc-2", entry_ids=[E2]))
     assert engine.counters["skipped_child"] == 1
-    # the fleet, and two routers at once
+    # the fleet, and two routers at once (NI's routers, whatever the event says)
     world.ni.incidents["inc-3"] = incident("inc-3", ["fleet"])
-    world.bus.fire(EVENT_INCIDENT, payload("inc-3", entry_ids=["fleet"]))
+    world.ni.announced["inc-3"] = 0
+    world.bus.fire(EVENT_INCIDENT, payload("inc-3", entry_ids=[E1]))
     world.ni.incidents["inc-4"] = incident("inc-4", [E1, E2])
-    world.bus.fire(EVENT_INCIDENT, payload("inc-4", entry_ids=[E1, E2]))
+    world.ni.announced["inc-4"] = 0
+    world.bus.fire(EVENT_INCIDENT, payload("inc-4", entry_ids=[E2]))
     assert engine.counters["skipped_no_single_router"] == 2
-    # unknown to NI and no router in the event either
-    world.bus.fire(EVENT_INCIDENT, payload("inc-5", entry_ids=[]))
-    assert engine.counters["skipped_no_single_router"] == 3
+    # unknown to NI: nothing, whatever router the event names
+    world.bus.fire(EVENT_INCIDENT, payload("inc-5", entry_ids=[E2]))
+    assert engine.counters["skipped_unknown_incident"] == 1
     # malformed announcements
     for bad in (None, "x", {"state": "opened"}, payload("inc-6", "bogus")):
         world.bus.fire(EVENT_INCIDENT, bad)
     assert engine.counters["skipped_bad_event"] == 4
     assert len(world.records()) == 1
     assert engine.counters["errors"] == 0
-
-
-async def test_an_unknown_incident_uses_the_router_of_the_event(world: World) -> None:
-    """NI has not stored it (yet): the announcement's single router counts."""
-    await world.start()
-    world.bus.fire(EVENT_INCIDENT, payload("inc-9", entry_ids=[E2]))
-    [record] = world.records()
-    assert record.router_id == R2 and record.cause is None
 
 
 async def test_a_second_root_on_the_router_waits_for_the_first(world: World) -> None:
@@ -792,7 +810,7 @@ async def test_engine_starts_with_the_first_router_and_stops_with_the_last(
 async def test_module_off_creates_nothing(disks: FakeDisks) -> None:
     """The fleet switch off: no engine, no store, no listener, no tick, no
     route; an entry that says off wins over one that says on."""
-    hass = make_hass(make_entries(E1))
+    hass = heal_hass(make_entries(E1))
     hass.entries += make_entries(E2, **{OPTION_SELF_HEALING_ENABLED: False})
     w = World(hass, Clock(), FakeNI(), Registry({E1: R1, E2: R2}))
     with patched(w.ni, w.registry, w.ticks):
@@ -814,7 +832,7 @@ async def test_module_off_creates_nothing(disks: FakeDisks) -> None:
 
 
 async def test_a_disabled_entry_starts_nothing(disks: FakeDisks) -> None:
-    hass = make_hass(make_entries(E1))
+    hass = heal_hass(make_entries(E1))
     hass.entries[0].disabled_by = "user"
     w = World(hass, Clock(), FakeNI(), Registry({E1: R1}))
     with patched(w.ni, w.registry, w.ticks):
@@ -1056,7 +1074,7 @@ async def test_diagnostics_block_has_counts_and_no_ids(world: World) -> None:
 def test_options_switch_is_written_through_to_every_router() -> None:
     from custom_components.openwrt_router import config_flow
 
-    hass = make_hass(make_entries(E1, E2))
+    hass = heal_hass(make_entries(E1, E2))
     hass.entries.append(make_entries("e3", **{OPTION_SELF_HEALING_ENABLED: False})[0])
     hass.config_entries.async_update_entry = MagicMock()
     fields = config_flow._self_healing_option_fields(hass, {})
@@ -1074,6 +1092,6 @@ def test_options_switch_is_written_through_to_every_router() -> None:
     ]
     assert updated == ["e2"]
     # default on: no option anywhere
-    fresh = make_hass(make_entries(E1))
+    fresh = heal_hass(make_entries(E1))
     [(key, _type)] = config_flow._self_healing_option_fields(fresh, {}).items()
     assert key.default() is True

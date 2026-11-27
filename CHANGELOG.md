@@ -145,20 +145,25 @@ oder Refresh. Entwicklerdoku: `docs/self-healing.md` (Abschnitte 2.1 und 11).
   keine Engine, kein Speicher, kein Listener, kein Zeitgeber, keine Route.
 - `heal_engine.py`: eine Engine je HA-Instanz, gestartet mit dem ersten Router-Eintrag und
   gestoppt mit dem letzten. Sie lädt den Speicher (die Neustartregel zuerst), hört auf die
-  Vorfall-Meldungen von Network Intelligence (nur Wurzeln, nach der Beruhigungszeit) und liest
-  alle 5 Minuten die Sicherheitsuhr. Ein gemeldeter Wurzelvorfall auf genau einem geladenen,
-  aktiven Router mit Router-Kennung des Core wird ein Datensatz, der mit der Ursache von
-  Network Intelligence (nichts erfunden) bis „vorgeschlagen“ läuft und dort stehen bleibt.
-  Ein gelöster, ignorierter oder verschwundener Vorfall schließt ihn mit der Zeit der Engine.
-  Holds und Flotten-Pause werden beachtet und angezeigt. Ablehnungen werden gezählt, nie
-  geworfen.
+  Vorfall-Meldungen von Network Intelligence und liest alle 5 Minuten die Sicherheitsuhr.
+  Die Meldung ist nur ein Auslöser: Zustand, Router, Art und Ursache liest die Engine aus
+  Network Intelligence selbst; über die API gefeuerte Meldungen (`remote`) zählen nicht, eine
+  gefälschte Meldung legt nichts an und schließt nichts. Ein von Network Intelligence
+  gemeldeter Wurzelvorfall (nur Wurzeln, nach der Beruhigungszeit) auf genau einem geladenen
+  (`LOADED`), aktiven Router mit Router-Kennung des Core wird ein Datensatz je Öffnung, der mit
+  der Ursache von Network Intelligence (nichts erfunden) bis „vorgeschlagen“ läuft und dort
+  stehen bleibt. Ein gelöster, ignorierter oder verschwundener Vorfall schließt ihn mit der
+  Zeit der Engine. Gemeldete offene Vorfälle ohne Datensatz (etwa nach einem Neustart) holt
+  der Abgleich beim Start und in jedem Takt nach, höchstens 20 je Lauf. Holds und
+  Flotten-Pause werden beachtet und angezeigt. Ablehnungen werden gezählt, nie geworfen.
 - **Schnittstelle für Paket D** (Entscheidung und Risiko): `HealDecider` mit
   `DecisionContext` und `Proposal`. Bis dahin schlägt der Standard nichts Ausführbares vor
   („zu wenig Hinweise“, Risiko unbewertet). Zeitliche Nähe oder ein einzelner Hinweis führt
   nie zu einer handelnden Empfehlung; ausführbar ist in dieser Version nichts.
 - `heal_views.py`: fünf **lesende** Routen unter
   `/api/openwrt_router/enterprise/selfhealing/v1/`: `overview` (Administratoren; andere
-  Benutzer nur bei für alle geöffnetem Panel und nur Zähler), `actions` mit Filtern und
+  Benutzer nur bei für alle geöffnetem Panel und nur Zähler, die letzte Aktivität auf die
+  Minute abgerundet), `actions` mit Filtern und
   Seiten, `actions/{id}` mit Verlauf, `settings`, `plans` (Vorschau, ändert nichts) – diese
   vier nur für Administratoren. Keine schreibende Route.
 - Diagnose: neuer Block `self_healing` mit Zählern, Modi, Holds, Flotten-Pause,
@@ -166,21 +171,31 @@ oder Refresh. Entwicklerdoku: `docs/self-healing.md` (Abschnitte 2.1 und 11).
 
 #### Tests
 
-- Neu: `tests/test_heal_engine_v1530.py` (34 Tests) und `tests/test_heal_views_v1530.py`
+- Neu: `tests/test_heal_engine_v1530.py` (33 Tests) und `tests/test_heal_views_v1530.py`
   (29 Tests): Auftragstests 1 (Observe, nie ein Schreiben), 31 (Rechte der Routen, keine
   schreibende Route) und 34 (Vorfallkorrelation, mit dem echten Network-Intelligence-Motor),
   null zusätzliche Router-Aufrufe (Aufrufliste zweier Polls gleich), Start und Stopp,
   Neustart mit Datensätzen auf der Platte, Hold und Flotten-Pause, Modul aus, Takt und
   Sicherheitsuhr.
+- Neu: `tests/test_heal_c1_review_v1530.py` (52 Tests): die Punkte des Reviews von PR #78
+  (gefälschte und kaputte Meldungen, nur `LOADED`-Einträge, Schalter in der Sperre, keine
+  Engine ohne Konfigurationsverzeichnis, Optionsfluss ohne `heal_engine`, Nachholen offener
+  Vorfälle, gerundete letzte Aktivität) und Tests für vorhandene Schutzmechanismen, die bisher
+  keine Mutation entdeckte.
+- Der Testlauf scheitert, wenn danach ein Verzeichnis `MagicMock` steht (Hook in
+  `tests/conftest.py`); die Engine startet ohne echtes Konfigurationsverzeichnis nicht.
 - Angepasst: erwartete Optionsschlüssel (`test_config_flow.py`,
   `test_extended_sensors.py`) und die Reihenfolge der Diagnose-Hüllen
-  (`test_tm_diagnostics.py`).
+  (`test_tm_diagnostics.py`, Test umbenannt in
+  `test_self_healing_wraps_the_time_machine_block_of_the_download`).
 - Unverändert grün: der unique_id-Snapshot (`test_unique_ids_snapshot_v1494.py`).
 
 #### Bekannte Grenzen
 
-- Je Router höchstens ein offener Observe-Datensatz; weitere Vorfälle warten in der Engine
-  und gehen bei einem Neustart verloren.
+- Je Router höchstens ein offener Observe-Datensatz; weitere Vorfälle warten in der Engine.
+  Die Warteliste geht bei einem Neustart verloren; der Abgleich holt die Vorfälle nach.
+- Scheitert das Entladen eines Router-Eintrags, bleibt er wie bei der Time Machine in der
+  Engine, sie handelt für ihn aber nicht.
 - Vorfälle der ganzen Flotte oder mehrerer Router, Vorfälle unter `notify_min_severity` und
   Vorfälle in der Wartung erzeugen keinen Datensatz.
 - Nicht in einer laufenden HA-Instanz und nicht auf Routern geprüft.

@@ -740,3 +740,36 @@ def network_stub(request, monkeypatch):
     yield stub
     _current_stub = None
     assert not stub.violations, chr(10).join(stub.violations)
+
+
+# --- No stray directories --------------------------------------------------------------
+# HA's real Store writes below ``hass.config.config_dir``; on a MagicMock hass that
+# path is a MagicMock repr and the file lands in ``./MagicMock/...`` of the working
+# directory. The integration refuses to start a store without a real config dir
+# (``heal_engine._config_dir_usable``); this hook fails the run should any test
+# still leave such a directory behind (also one left by an earlier run).
+STRAY_DIRS: tuple[str, ...] = ("MagicMock",)
+
+
+def _stray_paths() -> list[Path]:
+    roots = dict.fromkeys((Path.cwd().resolve(), Path(_PROJECT_ROOT).resolve()))
+    return [
+        root / name for root in roots for name in STRAY_DIRS if (root / name).exists()
+    ]
+
+
+def pytest_sessionfinish(session: Any, exitstatus: Any) -> None:
+    """Fail the session when a stray directory exists after the tests."""
+    stray = _stray_paths()
+    if not stray:
+        return
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    message = (
+        "stray directory after the tests (a store on a mocked hass?): "
+        + ", ".join(str(p) for p in stray)
+    )
+    if reporter is not None:
+        reporter.write_line(message, red=True)
+    else:
+        print(message, file=sys.stderr)

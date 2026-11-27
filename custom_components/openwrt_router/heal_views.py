@@ -35,6 +35,7 @@ approval and no state.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -259,7 +260,7 @@ def overview_body(engine: HealEngine, *, admin: bool, now: float) -> dict[str, A
         routers.append(
             {
                 "router_id": rid,
-                "loaded": engine.entry_for_router(rid) in engine.entries,
+                "loaded": engine.router_loaded(rid),
                 "configured_mode": store.settings.router(rid).mode.value,
                 "effective_mode": store.effective_mode(rid).value,
                 "held": hold is not None,
@@ -291,6 +292,10 @@ def overview_body(engine: HealEngine, *, admin: bool, now: float) -> dict[str, A
         "last_activity": engine.last_activity(),
     }
     if not admin:
+        # to the minute: no second-exact trail of router events
+        last = body["last_activity"]
+        if last is not None:
+            body["last_activity"] = float(math.floor(last / 60) * 60)
         return body
     body["fleet"].update(
         {

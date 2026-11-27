@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from core_testkit import ADMIN_ID, SECRET, USER_ID, FakeDisks, add_users, make_hass
+from core_testkit import ADMIN_ID, SECRET, USER_ID, FakeDisks, add_users
 from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.helpers.http import KEY_AUTHENTICATED, KEY_HASS
 from test_heal_engine_v1530 import (
@@ -35,6 +35,7 @@ from test_heal_engine_v1530 import (
     FakeNI,
     Registry,
     World,
+    heal_hass,
     make_entries,
     patched,
 )
@@ -107,7 +108,7 @@ class Http:
 
 @pytest.fixture
 async def world(disks: FakeDisks) -> Any:
-    hass = make_hass(make_entries(E1, E2))
+    hass = heal_hass(make_entries(E1, E2))
     add_users(hass)
     w = World(hass, Clock(), FakeNI(), Registry({E1: R1, E2: R2}))
     with patched(w.ni, w.registry, w.ticks):

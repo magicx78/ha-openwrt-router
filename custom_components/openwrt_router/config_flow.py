@@ -220,9 +220,7 @@ class OpenWrtOptionsFlow(OptionsFlow):
                 heal_on = new_opts.get(OPTION_SELF_HEALING_ENABLED) is True
                 new_opts[OPTION_SELF_HEALING_ENABLED] = heal_on
                 _write_self_healing_through(self.hass, self.config_entry, heal_on)
-                from .heal_engine import async_apply_self_healing_option
-
-                await async_apply_self_healing_option(self.hass, on=heal_on)
+                await _apply_self_healing_option(self.hass, heal_on)
             # --- end Self-Healing
             return self.async_create_entry(title="", data=new_opts)
 
@@ -351,6 +349,18 @@ def _self_healing_option_fields(hass: Any, opts: Any) -> dict[Any, Any]:
         on = True
     on = on and opts.get(OPTION_SELF_HEALING_ENABLED) is not False
     return {vol.Optional(OPTION_SELF_HEALING_ENABLED, default=on): bool}
+
+
+async def _apply_self_healing_option(hass: Any, on: bool) -> None:
+    """Apply the switch to the running engine; the options are saved even
+    when ``heal_engine`` cannot be imported (the value takes effect with
+    the next setup then)."""
+    try:
+        from .heal_engine import async_apply_self_healing_option
+    except Exception as err:  # noqa: BLE001 - the form never fails because of it
+        _LOGGER.warning("Self-Healing option not applied (%s)", type(err).__name__)
+        return
+    await async_apply_self_healing_option(hass, on=on)
 
 
 def _write_self_healing_through(hass: Any, entry: Any, on: bool) -> None:

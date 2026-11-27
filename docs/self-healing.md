@@ -103,9 +103,16 @@ Engine und der gebundenen Routen. Audit-Präfix und Modulname im Audit gibt es n
 ### 2.1 Die Engine (Paket C1)
 
 **Lebenslauf** wie die Time Machine: `async_setup_self_healing` (am Ende von
-`async_setup_entry`) erzeugt die Engine mit dem ersten geladenen, nicht deaktivierten Eintrag,
-solange der Schalter an ist; `async_release_self_healing` (nach `async_unload_entry`) stoppt sie
-mit dem letzten. Fehler bleiben dort, werden nur mit ihrem Typ geloggt, und ein Router-Eintrag
+`async_setup_entry`, der Eintrag steht dann in `SETUP_IN_PROGRESS`) erzeugt die Engine mit dem
+ersten nicht deaktivierten Eintrag, solange der Schalter an ist; der Schalter wird nach dem
+Warten auf die Sperre noch einmal gelesen. `async_release_self_healing` (nach
+`async_unload_entry`) stoppt sie mit dem letzten. Scheitert das Entladen des Basis-Eintrags,
+bleibt der Router wie bei der Time Machine in der Engine (HA setzt `FAILED_UNLOAD`, Teile laufen
+bis zum Neustart weiter); die Engine handelt nur für Einträge im Zustand `LOADED`. Der
+Optionsschalter nimmt nur Einträge auf, die `LOADED` sind und Laufzeitdaten mit Coordinator
+haben. Ohne echtes Konfigurationsverzeichnis (`hass.config.config_dir` keine Zeichenkette,
+etwa ein nachgebildetes `hass`) startet keine Engine und kein Speicher; das wird einmal je
+Instanz gewarnt. Fehler bleiben dort, werden nur mit ihrem Typ geloggt, und ein Router-Eintrag
 scheitert nie an Self-Healing. Der Optionsfluss schreibt den Schalter auf alle Einträge durch
 und schaltet die laufende Engine direkt (ohne Neuladen); sagt ein Eintrag „aus“, ist das Modul
 aus (die strengere Lesart). Aus heißt: keine Engine, kein Speicher, kein Listener, kein
@@ -114,48 +121,74 @@ Zeitgeber, keine Route.
 **Start:** Speicher laden (die Neustartregel läuft dabei zuerst, Abschnitt 5), dann der
 Listener auf `openwrt_router_incident_event` (eine `@callback`-Methode, kein Lambda), der
 Zeitgeber alle **300 s**, die Bindung an den Core (Router Registry; fehlt der Core, versucht es
-jeder Takt wieder) und ein Abgleich mit Network Intelligence.
+jeder Takt wieder) und ein Abgleich mit Network Intelligence. Jeder hinzukommende Router
+gleicht noch einmal ab.
+
+**Die Meldung ist nur ein Auslöser** (Review PR #78). `openwrt_router_incident_event` kann in HA
+jeder feuern (eine Automation, eine andere Integration); über die REST- und WebSocket-API
+gefeuerte Meldungen haben den Ursprung `remote` und werden nur gezählt
+(`skipped_remote_event`). Von einer lokalen Meldung nimmt die Engine nur die Vorfallkennung;
+Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intelligence selbst.
 
 **Ein Vorfall, Schritt für Schritt** (`handle_incident`):
 
-1. Nur Meldungen mit `state` `opened`, `reopened` oder `resolved` und einer Vorfallkennung
-   zählen; alles andere wird gezählt (`skipped_bad_event`) und verworfen. Network Intelligence
-   meldet nur Wurzeln, erst nach seiner Beruhigungszeit, nie in der Wartung und nur ab
-   `notify_min_severity`.
-2. Modul im Speicher aus (`settings.enabled`): nichts (`skipped_module_disabled`).
-3. Kennt Network Intelligence den Vorfall und ist er ein stilles Kind
-   (`net_rules.suppressed_child`): nichts (`skipped_child`).
-4. Genau **ein** Router: die Router des Vorfalls (sonst die `entry_ids` der Meldung) ohne die
-   Flotte. Keiner, mehrere oder nur die Flotte: nichts (`skipped_no_single_router`).
-5. Der Eintrag muss geladen und nicht deaktiviert sein, und der Core muss ihm eine aktive
-   Router-Kennung geben (`rtr_…`; ein verwaister Datensatz zählt nicht). Sonst nichts
-   (`skipped_router_not_loaded`, `skipped_router_disabled`, `skipped_no_router_id`).
-6. `RemediationAction.new` mit Aktion `observe.evaluate`, Parameter `{"incident": "inc-N"}`,
+1. Nur Meldungen mit `state` `opened`, `reopened` oder `resolved`, einer Vorfallkennung von
+   1 bis 64 Zeichen und, falls vorhanden, `entry_ids` als Liste von Zeichenketten zählen;
+   alles andere wird gezählt (`skipped_bad_event`, ohne Warnung) und verworfen.
+2. Network Intelligence nicht geladen: nichts (`skipped_ni_unavailable`). Kennt es den Vorfall
+   nicht: nichts (`skipped_unknown_incident`). Gelöst oder ignoriert laut Network
+   Intelligence: die Datensätze schließen (unten). Bestätigt (`acknowledged`): kein neuer
+   Datensatz, ein offener bleibt.
+3. Modul im Speicher aus (`settings.enabled`): nichts (`skipped_module_disabled`).
+4. Ein neuer Datensatz nur, wenn Network Intelligence den Vorfall für seine **jetzige**
+   Öffnung selbst gemeldet hat (`NetIntelligence.announced_reopen_count`, gespeichert in NI):
+   Wurzel, nach der Beruhigungszeit, ab `notify_min_severity`, nicht nur auf Routern in der
+   Wartung. Sonst nichts (`skipped_not_announced`).
+5. Ist er ein stilles Kind (`net_rules.suppressed_child`): nichts (`skipped_child`).
+6. Genau **ein** Router: die Router des Vorfalls in Network Intelligence ohne die Flotte (die
+   `entry_ids` der Meldung zählen nie). Keiner, mehrere oder nur die Flotte: nichts
+   (`skipped_no_single_router`).
+7. Der Eintrag muss in der Engine, nicht deaktiviert und `LOADED` sein, und der Core muss ihm
+   eine aktive Router-Kennung geben (`rtr_…`; ein verwaister Datensatz zählt nicht). Sonst
+   nichts (`skipped_router_not_loaded`, `skipped_router_disabled`, `skipped_no_router_id`).
+8. Ein Datensatz je Öffnung: gibt es für Vorfall und Zahl der Wiedereröffnungen schon einen
+   Observe-Datensatz (in jedem Zustand, auch geschlossen), entsteht keiner (`deduplicated`).
+9. `RemediationAction.new` mit Aktion `observe.evaluate`, Parameter `{"incident": "inc-N"}`,
    Vorfallkennung, -art und Zahl der Wiedereröffnungen, Zeitpunkt = Wanduhr der Engine in
    diesem Moment; dann `SelfHealingStore.add()`. Doppelte erkennt der Speicher (je Vorfall,
    je Aktion, je Router-Bauteil); eine Ablehnung wegen Grenzen wird gezählt
    (`refused_capacity`), ein vom Modell abgelehnter Wert ebenfalls (`refused_invalid`), nie
    geworfen.
-7. Hat der Router schon einen offenen Datensatz eines **anderen** Vorfalls, wartet der neue
-   Vorfall im Speicher der Engine (höchstens 200, `deferred`) und bekommt seinen Datensatz,
-   sobald der erste geschlossen ist (Grund `incident_deferred`).
-8. Meldet Network Intelligence für den Router Wartung, bekommt der Datensatz die Markierung
-   `in_maintenance`.
-9. DETECTED → ANALYZED mit der Ursache, **wie Network Intelligence sie meldet** (Code, Status,
-   Stufe, Konfidenz, Quellenfamilien); ohne Ursache Grund `no_cause_reported`, nichts wird
-   erfunden.
-10. ANALYZED → PROPOSED mit dem Vorschlag der Entscheidungsschnittstelle (unten). Weiter geht
+10. Hat der Router schon einen offenen Datensatz eines **anderen** Vorfalls, wartet der neue
+    Vorfall im Speicher der Engine (höchstens 200, die ältesten fallen heraus, `deferred`) und
+    bekommt seinen Datensatz, sobald der erste geschlossen ist (Grund `incident_deferred`).
+11. Meldet Network Intelligence für den Router Wartung, bekommt der Datensatz die Markierung
+    `in_maintenance`.
+12. DETECTED → ANALYZED mit der Ursache, **wie Network Intelligence sie meldet** (Code, Status,
+    Stufe, Konfidenz, Quellenfamilien); ohne Ursache Grund `no_cause_reported`, nichts wird
+    erfunden.
+13. ANALYZED → PROPOSED mit dem Vorschlag der Entscheidungsschnittstelle (unten). Weiter geht
     die Engine nie.
 
-`resolved` schließt die offenen Datensätze des Vorfalls (DETECTED/ANALYZED/PROPOSED →
-CANCELLED, Akteur Engine, Zeitpunkt = Wanduhr der Engine, Grund `incident_cleared` oder
-`incident_ignored`). Der Takt alle 300 s liest die Sicherheitsuhr (`store.now()`), räumt auf
+Zeigt Network Intelligence den Vorfall gelöst oder ignoriert, schließen seine offenen
+Observe-Datensätze (DETECTED/ANALYZED/PROPOSED → CANCELLED, Akteur Engine, Zeitpunkt =
+Wanduhr der Engine, Grund `incident_cleared` oder `incident_ignored`); eine Meldung `resolved`
+allein schließt nichts. Der Takt alle 300 s liest die Sicherheitsuhr (`store.now()`), räumt auf
 (`prune()`) und gleicht mit den Vorfällen von Network Intelligence ab: verschwunden →
 `incident_gone`, gelöst → `incident_cleared`, ignoriert → `incident_ignored`, inzwischen stilles
 Kind → `incident_now_child`; ein Datensatz, der nach einem Neustart in DETECTED oder ANALYZED
 stand, läuft weiter. Ist Network Intelligence nicht geladen, wird nichts geschlossen
 (unbekannt ist nicht gelöst). Datensätze anderer Aktionen und Zustände ab PREFLIGHT fasst die
 Engine nie an (eine unterbrochene Ausführung bleibt „muss geprüft werden“).
+
+**Nachholen** (Review PR #78): Network Intelligence meldet einen Vorfall nur einmal je Öffnung
+(und merkt sich das über einen Neustart), die Warteliste der Engine lebt nur im Speicher. Damit
+ein offener Vorfall nach einem Neustart nicht ohne Datensatz bleibt, nimmt jeder Abgleich (Start,
+jeder hinzukommende Router, jeder Takt) gemeldete aktive Wurzeln auf genau einem geladenen
+Router ohne Datensatz ihrer Öffnung auf: derselbe Weg und dieselben Prüfungen wie oben (Grund
+`incident_reconciled`, Zähler `reconciled`), höchstens `RECONCILE_MAX` (20) neue Datensätze je
+Lauf, Überspringen wird dabei nicht gezählt, kein Router-Aufruf, nur Speicher. Ein Eintrag, der
+beim Start noch in `SETUP_IN_PROGRESS` steht, wird mit dem nächsten Takt nachgeholt.
 
 **Schnittstelle für Paket D** (`heal_engine.py`): `HealDecider` ist ein Protocol mit
 `propose(context: DecisionContext) -> Proposal`. `DecisionContext` (eingefroren) enthält den
@@ -185,14 +218,14 @@ zweier Polls ist mit laufender Engine, einem Vorfall und einem Takt gleich der o
 **DECIDED (C1):**
 
 - Ein Schalter für die Flotte, wie bei der Time Machine; ein Eintrag mit „aus“ schaltet aus.
-- Quelle ist die Bus-Meldung von Network Intelligence, nicht die Rohliste der Vorfälle: Kinder,
+- Quelle sind die von Network Intelligence gemeldeten Vorfälle, nicht die Rohliste: Kinder,
   kurze Störungen, Vorfälle unter `notify_min_severity` und Vorfälle in der Wartung erzeugen so
-  keinen Datensatz.
+  keinen Datensatz. Die Bus-Meldung ist nur der Auslöser; was gemeldet ist, sagt Network
+  Intelligence selbst (Review PR #78).
 - Je Router höchstens ein offener Observe-Datensatz (Bauteil-Doppelte des Speichers ohne
   Bauteil = der Router); weitere Wurzeln warten in der Engine. Die Warteliste geht bei einem
-  Neustart verloren; ein wartender Vorfall bekommt seinen Datensatz dann erst mit seiner
-  nächsten Meldung von Network Intelligence (ob es offene Vorfälle nach einem Neustart neu
-  meldet, ist nicht geprüft).
+  Neustart verloren; Network Intelligence meldet offene Vorfälle nach einem Neustart nicht neu
+  (geprüft: `_announced` ist gespeichert). Das Nachholen im Abgleich gibt ihnen ihren Datensatz.
 - Flotten- und Mehr-Router-Vorfälle erzeugen keinen Datensatz.
 - Zeitpunkte sind die Wanduhr der Engine, wenn sie handelt; geschlossen wird nur aus
   DETECTED, ANALYZED oder PROPOSED.
@@ -850,7 +883,7 @@ keine Entität, keine unique_id, kein Ereignis, kein Dienst.
 
 | Route (GET) | Recht | Inhalt |
 |---|---|---|
-| `…/v1/overview` | Administratoren; andere Benutzer nur, solange ein Eintrag das Panel für alle öffnet, und dann nur Zähler | Stand, `release_mode: observe_only`, `write_path: false`, `automatic_rollback: not_available`, Zähler je Zustand, Flotten-Pause und -Hold; für Administratoren dazu je Router Modus (eingestellt/geltend), Hold, offene Datensätze und wartende Vorfälle |
+| `…/v1/overview` | Administratoren; andere Benutzer nur, solange ein Eintrag das Panel für alle öffnet, und dann nur Zähler | Stand, `release_mode: observe_only`, `write_path: false`, `automatic_rollback: not_available`, Zähler je Zustand, Flotten-Pause und -Hold, `last_activity` (letzter Übergang eines Datensatzes; für andere Benutzer auf die Minute abgerundet); für Administratoren dazu je Router Modus (eingestellt/geltend), `loaded` (in der Engine, aktiviert und `LOADED`), Hold, offene Datensätze und wartende Vorfälle |
 | `…/v1/actions` | nur Administratoren | Datensätze, neueste zuerst; Filter `router_id`, `state` (Liste), `open` 0/1; `limit` 1–200 (Standard 50), `offset` bis 10 000 |
 | `…/v1/actions/{action_id}` | nur Administratoren | ein Datensatz mit ganzem Verlauf, Hold des Routers, geltender Modus |
 | `…/v1/settings` | nur Administratoren | Schalter, Einstellungen des Speichers, feste Grenzen |
@@ -1021,6 +1054,20 @@ Hold.
   an allen Routen außer der Übersicht, auch bei offenem Panel; Übersicht dann nur Zähler),
   410, 503, Rumpf abgelehnt, strenge Abfrage ohne Echo, Filter und Seiten, Verlauf, `plans`
   ändert nichts, Holds und Pause sichtbar, kein Geheimnis, keine Adresse, kein Name im Rumpf.
+- `tests/test_heal_c1_review_v1530.py` (C1): die Punkte des Reviews von PR #78 (vor der
+  Korrektur rot): nur `LOADED`-Einträge (Optionsschalter, Engine, Übersicht), der Eintrag in
+  seinem eigenen Setup startet die Engine, Schalter in der Sperre neu gelesen, keine Engine
+  ohne Konfigurationsverzeichnis, Optionsfluss speichert ohne `heal_engine`, gefälschte
+  Meldungen (`resolved` schließt nichts, unbekannter oder nie gemeldeter Vorfall erzeugt nichts
+  und blockiert nichts, `remote` ignoriert, ohne Network Intelligence nichts), kaputte
+  Meldungen ohne Warnung, `last_activity` für andere Benutzer auf die Minute, Nachholen nach
+  einem Neustart und im Takt (begrenzt, ein Datensatz je Öffnung, kein Router-Aufruf). Dazu
+  Tests für Schutzmechanismen, die schon da waren, aber ohne scheiternden Test (Mutationen des
+  Reviewers M06, M10, M15, M18, M20, M23, M27, M28): Ausnahme im Empfänger, Ausnahme im Takt,
+  Obergrenze der Warteliste, Abbruch der Core-Bindung beim Stopp, nur eigene Planungs-
+  Datensätze schließen, gescheitertes Entladen.
+- Nach dem ganzen Testlauf darf kein Verzeichnis `MagicMock` stehen (Hook
+  `pytest_sessionfinish` in `tests/conftest.py`, der Lauf scheitert sonst).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 

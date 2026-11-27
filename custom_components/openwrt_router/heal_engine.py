@@ -13,12 +13,26 @@ announcements of Network Intelligence (``EVENT_INCIDENT``, roots only, after
 NI's settle time) with a ``@callback`` receiver, and ticks every
 ``TICK_S`` (5 minutes) to read the safety clock, prune and reconcile.
 
-An announced root incident on exactly one loaded, enabled router with a
-router id becomes one record (``RemediationAction.new``, action
+**The event is a trigger only.** Anyone inside HA can fire
+``EVENT_INCIDENT`` (an automation, another integration); the REST and
+WebSocket APIs fire with origin remote, which the engine ignores. Of a
+local event only the incident id is used: state, routers, type and cause
+are read from Network Intelligence's own incident. NI not loaded, or the
+incident unknown to NI: nothing happens (counted). A new record needs NI's
+own record that it announced the incident for its current open period
+(``NetIntelligence.announced_reopen_count``); records close only when NI
+shows the incident resolved, ignored, gone or a silent child.
+
+An announced root incident on exactly one router that is in the engine,
+enabled and LOADED (``ConfigEntryState``) with a router id becomes one
+record per open period (``RemediationAction.new``, action
 ``observe.evaluate``, no router call) through ``SelfHealingStore.add``:
 dedupe and limits are the store's job, refusals are counted here, never
-raised. The record then moves through the read-only part of the state
-machine only:
+raised. NI announces an incident once per open period and deferred
+incidents live in memory only, so the start, every added router and every
+tick also adopt announced roots without a record (at most
+``RECONCILE_MAX`` per run, same path and guards). The record then moves
+through the read-only part of the state machine only:
 
 * DETECTED -> ANALYZED with the cause as Network Intelligence reported it
   (code, status, level, confidence, source families; never recomputed);
@@ -32,8 +46,8 @@ machine only:
 
 The engine never goes past PROPOSED: no PREFLIGHT, no approval, no
 execution, no router call, no HA service, no entity, no bus event. A record
-whose incident resolves (``resolved`` announcement, or NI shows it
-resolved, ignored, gone or re-parented as a child) is closed DETECTED /
+whose incident resolves (NI shows it resolved, ignored, gone or
+re-parented as a child) is closed DETECTED /
 ANALYZED / PROPOSED -> CANCELLED by the engine with the wall time at which
 the engine saw it. Holds and the fleet pause of the store are respected
 (the effective mode stays Observe) and shown (``heal_views``).
@@ -56,7 +70,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Final, Protocol, runtime_checkable
 
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import Event, EventOrigin, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
@@ -102,6 +117,11 @@ WRITE_PATH_AVAILABLE: Final = False
 # Deferred root incidents (the store returned the router's open record):
 # retried when that record closes or on the tick; the oldest drop first.
 PENDING_MAX: Final = 200
+# Announced root incidents without a record that one start or one tick
+# turns into records (the rest follow on the next ticks).
+RECONCILE_MAX: Final = 20
+# Longest incident id taken from an event (NI's ids are ``inc-N``).
+INCIDENT_ID_MAX: Final = 64
 # Independent source families a hypothesis needs (design §9, NI's
 # ``LIKELY_FAMILIES``): fewer is time or one indicator only.
 EVIDENCE_FAMILIES_MIN: Final = 2
@@ -110,8 +130,14 @@ EVIDENCE_FAMILIES_MIN: Final = 2
 _CLOSABLE: Final = frozenset(
     {ActionState.DETECTED, ActionState.ANALYZED, ActionState.PROPOSED}
 )
-_ANNOUNCED_STATES: Final = frozenset({"opened", "reopened"})
-_RESOLVED_STATE: Final = "resolved"
+# Event states that make the engine look at an incident (a trigger only).
+_EVENT_STATES: Final = frozenset({"opened", "reopened", "resolved"})
+_ACTIVE_STATUS: Final = "active"
+# NI incident status -> the reason its records close with
+_CLOSED_STATUS: Final[Mapping[str, str]] = {
+    "resolved": "incident_cleared",
+    "ignored": "incident_ignored",
+}
 
 # Engine-side blocker codes of a plan (``plan_for``), always codes.
 BLOCK_NO_WRITE_PATH: Final = "no_write_path"
@@ -140,6 +166,11 @@ _COUNTERS: Final = (
     "skipped_no_router_id",
     "skipped_module_disabled",
     "skipped_bad_event",
+    "skipped_remote_event",
+    "skipped_ni_unavailable",
+    "skipped_unknown_incident",
+    "skipped_not_announced",
+    "reconciled",
     "analyzed",
     "proposed",
     "closed",
@@ -290,6 +321,40 @@ def _confidence(raw: Any) -> float | None:
     return round(value, 4)
 
 
+def _reopen(inc: Any) -> int:
+    """The incident's reopen count (0 when missing or odd)."""
+    value = getattr(inc, "reopen_count", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _event_incident_id(data: Any) -> str | None:
+    """The incident id of a well-formed announcement, else None.
+
+    Only the shape is checked (state, id, the router list); the values are
+    never used beyond the id: the incident itself is read from NI.
+    """
+    if not isinstance(data, Mapping):
+        return None
+    try:
+        state = data.get("state")
+        incident_id = data.get("incident_id")
+        entry_ids = data.get("entry_ids", [])
+    except Exception:  # noqa: BLE001 - an odd mapping is a bad event
+        return None
+    if not isinstance(state, str) or state not in _EVENT_STATES:
+        return None
+    if not isinstance(incident_id, str) or not 0 < len(incident_id) <= INCIDENT_ID_MAX:
+        return None
+    if entry_ids is not None and (
+        not isinstance(entry_ids, list)
+        or not all(isinstance(e, str) for e in entry_ids)
+    ):
+        return None
+    return incident_id
+
+
 def _entries(hass: HomeAssistant) -> list[Any]:
     try:
         entries = hass.config_entries.async_entries(DOMAIN)
@@ -404,6 +469,15 @@ class HealEngine:
         """A router entry is loaded."""
         self.entries.add(entry_id)
 
+    async def async_add_entries(self, entry_ids: Iterable[str]) -> None:
+        """Routers are (being) loaded: bind the core, then reconcile, so an
+        announced incident of a router that is already LOADED gets its
+        record now and not only on the next tick."""
+        for entry_id in entry_ids:
+            self.add_entry(entry_id)
+        await self.async_bind_core()
+        self._guard("reconcile", self.reconcile)
+
     def remove_entry(self, entry_id: str) -> None:
         """A router entry is unloaded (its records stay)."""
         self.entries.discard(entry_id)
@@ -465,7 +539,9 @@ class HealEngine:
             return None, None
 
     def _entry_usable(self, entry_id: str) -> str | None:
-        """None when the entry is loaded and enabled, else the counter."""
+        """None when the entry is in the engine, enabled and LOADED, else
+        the counter. An entry still setting up, whose setup failed or whose
+        unload failed is no router to act on (review of PR #78)."""
         if entry_id not in self.entries:
             return "skipped_router_not_loaded"
         try:
@@ -474,7 +550,14 @@ class HealEngine:
             entry = None
         if entry is None or getattr(entry, "disabled_by", None) is not None:
             return "skipped_router_disabled"
+        if getattr(entry, "state", None) is not ConfigEntryState.LOADED:
+            return "skipped_router_not_loaded"
         return None
+
+    def router_loaded(self, router_id: str) -> bool:
+        """The router's entry is in the engine, enabled and LOADED."""
+        entry_id = self.entry_for_router(router_id)
+        return entry_id is not None and self._entry_usable(entry_id) is None
 
     def module_enabled(self) -> bool:
         """The module switch of the store's settings (default on)."""
@@ -492,33 +575,60 @@ class HealEngine:
 
     @callback
     def _on_incident(self, event: Event) -> None:
-        """A Network Intelligence announcement (roots only, after settle)."""
+        """A Network Intelligence announcement: a trigger, nothing more.
+
+        An event fired from outside HA (REST or WebSocket API: origin
+        remote) is not even a trigger. Inside HA anyone can fire the event
+        too (an automation, another integration), so its fields are never
+        trusted: :meth:`handle_incident` reads the incident from Network
+        Intelligence itself.
+        """
         if self.closed or not self.loaded:
+            return
+        origin = getattr(event, "origin", EventOrigin.local)
+        if origin is not EventOrigin.local:
+            self.counters["skipped_remote_event"] += 1
             return
         self._guard("incident", self.handle_incident, getattr(event, "data", None))
 
     def handle_incident(self, data: Any) -> None:
-        """Turn one announcement into a record, or close records."""
-        if not isinstance(data, Mapping):
-            self.counters["skipped_bad_event"] += 1
-            return
-        state = data.get("state")
-        incident_id = _str(data.get("incident_id"))
-        if incident_id is None or state not in (*_ANNOUNCED_STATES, _RESOLVED_STATE):
+        """Bring one incident in line with Network Intelligence.
+
+        The event names the incident and nothing else counts: its state,
+        routers, type and cause come from NI's own incident. NI not loaded,
+        or the incident unknown to NI: nothing (counted). Resolved or
+        ignored in NI: its records close. Active in NI and announced by NI
+        for its current open period: a record (:meth:`_detect`).
+        """
+        incident_id = _event_incident_id(data)
+        if incident_id is None:
             self.counters["skipped_bad_event"] += 1
             return
         self.counters["incidents_seen"] += 1
-        if state == _RESOLVED_STATE:
-            reason = (
-                "incident_ignored"
-                if data.get("reason") == "ignored"
-                else "incident_cleared"
-            )
-            self._pending.pop(incident_id, None)
-            if self._close_incident(incident_id, reason):
-                self._retry_pending()
+        ni = self._ni()
+        if ni is None:
+            self.counters["skipped_ni_unavailable"] += 1
             return
-        self._detect(incident_id, data, deferred=False)
+        known = self._incidents(ni)
+        inc = known.get(incident_id)
+        if inc is None:
+            self.counters["skipped_unknown_incident"] += 1
+            return
+        status = _value(getattr(inc, "status", None))
+        if status in _CLOSED_STATUS:
+            self._pending.pop(incident_id, None)
+            if self._close_incident(incident_id, _CLOSED_STATUS[status]):
+                self._retry_pending(ni, known)
+            return
+        if status != _ACTIVE_STATUS:
+            return  # acknowledged: no new record, an open one stays
+        reopen = _reopen(inc)
+        self._detect(
+            inc,
+            ni,
+            known,
+            reason="incident_reopened" if reopen else "incident_opened",
+        )
 
     @callback
     def _on_tick(self, _now: Any = None) -> None:
@@ -541,69 +651,108 @@ class HealEngine:
 
     # -- detect, analyse, propose ------------------------------------------------------
 
-    def _detect(
-        self, incident_id: str, data: Mapping[str, Any], *, deferred: bool
-    ) -> str:
-        """One root incident -> one record. Returns the outcome code."""
-        if not self.module_enabled():
-            self.counters["skipped_module_disabled"] += 1
-            return "module_disabled"
-        ni = self._ni()
-        known = self._incidents(ni) if ni is not None else {}
-        inc = known.get(incident_id)
-        if inc is not None and self._is_child(ni, inc, known):
-            self.counters["skipped_child"] += 1
-            return "child"
-        routers = (
-            [r for r in getattr(inc, "routers", ()) if isinstance(r, str)]
-            if inc is not None
-            else [r for r in data.get("entry_ids") or () if isinstance(r, str)]
+    @staticmethod
+    def _announced(ni: Any, inc: Any) -> bool:
+        """NI announced ``inc`` on the bus for its current open period.
+
+        NI's own record of what it announced: a root at or above
+        ``notify_min_severity``, after its settle time, not only on routers
+        in maintenance (``NetIntelligence._announce``). Unknown: no.
+        """
+        getter = getattr(ni, "announced_reopen_count", None)
+        if not callable(getter):
+            return False
+        try:
+            count = getter(inc.id)
+        except Exception:  # noqa: BLE001 - unknown is "not announced"
+            return False
+        return (
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and count == _reopen(inc)
         )
+
+    def _recorded(self, incident_id: str, reopen: int) -> bool:
+        """An observe record of this incident's open period exists (in any
+        state): one record per period, also after it closed."""
+        return any(
+            a.incident_id == incident_id
+            and a.incident_reopen == reopen
+            and a.action_type == OBSERVE_ACTION
+            for a in self.store.actions.values()
+        )
+
+    def _detect(
+        self,
+        inc: Any,
+        ni: Any,
+        known: Mapping[str, Any],
+        *,
+        reason: str,
+        deferred: bool = False,
+        count: bool = True,
+    ) -> str:
+        """One root incident of NI -> one record. Returns the outcome code.
+
+        ``count`` False (the reconcile of every tick): skips are not counted,
+        so the counters say what happened to announcements, not how often
+        the tick looked.
+        """
+
+        def skip(counter: str, outcome: str) -> str:
+            if count:
+                self.counters[counter] += 1
+            return outcome
+
+        incident_id = inc.id
+        if not self.module_enabled():
+            return skip("skipped_module_disabled", "module_disabled")
+        if not self._announced(ni, inc):
+            return skip("skipped_not_announced", "not_announced")
+        if self._is_child(ni, inc, known):
+            return skip("skipped_child", "child")
         from .net_engine import FLEET_ROUTER
 
-        routers = [r for r in dict.fromkeys(routers) if r != FLEET_ROUTER]
+        raw = getattr(inc, "routers", None)
+        routers = [
+            r
+            for r in dict.fromkeys(
+                r
+                for r in (raw if isinstance(raw, list | tuple) else ())
+                if isinstance(r, str)
+            )
+            if r != FLEET_ROUTER
+        ]
         if len(routers) != 1:
-            self.counters["skipped_no_single_router"] += 1
-            return "no_single_router"
+            return skip("skipped_no_single_router", "no_single_router")
         entry_id = routers[0]
         skipped = self._entry_usable(entry_id)
         if skipped is not None:
-            self.counters[skipped] += 1
-            return skipped
+            return skip(skipped, skipped)
         router_id = self.router_id_for_entry(entry_id)
         if router_id is None:
-            self.counters["skipped_no_router_id"] += 1
-            return "no_router_id"
-        incident_type = _str(getattr(inc, "type", None)) or _str(data.get("type"))
-        reopen = getattr(inc, "reopen_count", 0) if inc is not None else 0
-        if isinstance(reopen, bool) or not isinstance(reopen, int) or reopen < 0:
-            reopen = 0
+            return skip("skipped_no_router_id", "no_router_id")
+        reopen = _reopen(inc)
+        if self._recorded(incident_id, reopen):
+            return skip("deduplicated", "deduplicated")
         try:
             action = RemediationAction.new(
                 router_id=router_id,
                 action_type=OBSERVE_ACTION,
                 ts=self.clock(),
                 actor=Actor.ENGINE,
-                reason=(
-                    "incident_deferred"
-                    if deferred
-                    else "incident_reopened"
-                    if data.get("state") == "reopened"
-                    else "incident_opened"
-                ),
+                reason=reason,
                 params={"incident": incident_id},
                 incident_id=incident_id,
-                incident_type=incident_type,
+                incident_type=_str(getattr(inc, "type", None)),
                 incident_reopen=reopen,
             )
         except HealModelError:
-            self.counters["refused_invalid"] += 1
-            return "invalid"
+            return skip("refused_invalid", "invalid")
         try:
             result = self.store.add(action)
         except HealStoreError:
-            self.counters["refused_capacity"] += 1
-            return "refused"
+            return skip("refused_capacity", "refused")
         if not result.created:
             if (
                 result.dedupe == "component"
@@ -615,13 +764,12 @@ class HealEngine:
                 self._pending.move_to_end(incident_id)
                 while len(self._pending) > PENDING_MAX:
                     self._pending.popitem(last=False)
-                if not deferred:
+                if not deferred and count:
                     self.counters["deferred"] += 1
                 return "deferred"
-            self.counters["deduplicated"] += 1
-            return "deduplicated"
+            return skip("deduplicated", "deduplicated")
         self.counters["records_created"] += 1
-        if ni is not None and self._in_maintenance(ni, entry_id):
+        if self._in_maintenance(ni, entry_id):
             with contextlib.suppress(HealStoreError, HealModelError):
                 self.store.update_flags(action.action_id, in_maintenance=True)
         self._advance(action.action_id, inc, ni)
@@ -761,7 +909,7 @@ class HealEngine:
                 action.flags.in_maintenance
                 or (ni is not None and entry_id and self._in_maintenance(ni, entry_id))
             ),
-            router_loaded=entry_id is not None and entry_id in self.entries,
+            router_loaded=entry_id is not None and self._entry_usable(entry_id) is None,
             identity_status=status,
             role=role,
             cause=cause,
@@ -886,10 +1034,11 @@ class HealEngine:
     def reconcile(self) -> None:
         """Bring the open records in line with Network Intelligence.
 
-        Without a loaded NI nothing is closed (unknown is not "cleared").
-        A record whose incident resolved, was ignored, is gone or became a
-        silent child is closed; one left in DETECTED or ANALYZED (a restart
-        between the steps) moves on. Deferred incidents are retried.
+        Without a loaded NI nothing is closed or made (unknown is not
+        "cleared"). A record whose incident resolved, was ignored, is gone
+        or became a silent child is closed; one left in DETECTED or
+        ANALYZED (a restart between the steps) moves on. Deferred incidents
+        are retried, then announced roots without a record are adopted.
         """
         ni = self._ni()
         if ni is None:
@@ -904,15 +1053,51 @@ class HealEngine:
             status = _value(getattr(inc, "status", None))
             if inc is None:
                 self._close(action, "incident_gone")
-            elif status == "resolved":
-                self._close(action, "incident_cleared")
-            elif status == "ignored":
-                self._close(action, "incident_ignored")
+            elif status in _CLOSED_STATUS:
+                self._close(action, _CLOSED_STATUS[status])
             elif self._is_child(ni, inc, known):
                 self._close(action, "incident_now_child")
             elif action.state is not ActionState.PROPOSED:
                 self._advance(action.action_id, inc, ni)
         self._retry_pending(ni, known)
+        self._adopt(ni, known)
+
+    def _adopt(self, ni: Any, known: Mapping[str, Any]) -> None:
+        """Announced active roots on one loaded router without a record of
+        their open period get one (review of PR #78).
+
+        Deferred incidents are lost on a restart and NI announces an
+        incident once per open period (stored), so without this an open
+        incident would never get its record. The same path and guards as
+        an announcement (:meth:`_detect`), at most ``RECONCILE_MAX`` new
+        records per call, skips not counted. Memory only.
+        """
+        if not self.module_enabled():
+            return
+        recorded = {
+            (a.incident_id, a.incident_reopen)
+            for a in self.store.actions.values()
+            if a.action_type == OBSERVE_ACTION
+        }
+        created = 0
+        for inc in known.values():
+            if created >= RECONCILE_MAX:
+                return
+            incident_id = getattr(inc, "id", None)
+            if not isinstance(incident_id, str) or incident_id in self._pending:
+                continue
+            if _value(getattr(inc, "status", None)) != _ACTIVE_STATUS:
+                continue
+            if (incident_id, _reopen(inc)) in recorded:
+                continue
+            if not self._announced(ni, inc):
+                continue
+            outcome = self._detect(
+                inc, ni, known, reason="incident_reconciled", count=False
+            )
+            if outcome == "created":
+                created += 1
+                self.counters["reconciled"] += 1
 
     def _retry_pending(
         self, ni: Any = None, known: Mapping[str, Any] | None = None
@@ -927,10 +1112,12 @@ class HealEngine:
             known = self._incidents(ni)
         for incident_id in list(self._pending):
             inc = known.get(incident_id)
-            if inc is None or _value(getattr(inc, "status", None)) != "active":
+            if inc is None or _value(getattr(inc, "status", None)) != _ACTIVE_STATUS:
                 self._pending.pop(incident_id, None)
                 continue
-            outcome = self._detect(incident_id, {"state": "opened"}, deferred=True)
+            outcome = self._detect(
+                inc, ni, known, reason="incident_deferred", deferred=True
+            )
             if outcome != "deferred":
                 self._pending.pop(incident_id, None)
 
@@ -1009,11 +1196,21 @@ def _lock(hass: HomeAssistant) -> asyncio.Lock:
     return lock
 
 
+# The states of an entry whose own setup calls async_setup_self_healing:
+# SETUP_IN_PROGRESS while async_setup_entry runs, LOADED on a later call.
+_SETUP_STATES: Final = (ConfigEntryState.SETUP_IN_PROGRESS, ConfigEntryState.LOADED)
+_NO_CONFIG_DIR_KEY: Final = f"{DOMAIN}_self_healing_no_config_dir"
+
+
 def _loaded_entry_ids(hass: HomeAssistant) -> list[str]:
-    """Entries that have run their setup (runtime data with a coordinator)."""
+    """Entries that are LOADED and have run their setup (runtime data with a
+    coordinator). Runtime data alone is not enough: a setup that failed
+    after setting it leaves it behind (review of PR #78)."""
     out: list[str] = []
     for entry in _entries(hass):
         if getattr(entry, "disabled_by", None) is not None:
+            continue
+        if getattr(entry, "state", None) is not ConfigEntryState.LOADED:
             continue
         runtime = getattr(entry, "runtime_data", None)
         if getattr(runtime, "coordinator", None) is not None:
@@ -1021,9 +1218,24 @@ def _loaded_entry_ids(hass: HomeAssistant) -> list[str]:
     return out
 
 
-async def _async_engine(hass: HomeAssistant) -> HealEngine:
+def _config_dir_usable(hass: HomeAssistant) -> bool:
+    """HA's Store writes below ``hass.config.config_dir``; without a real
+    one (a mocked hass) it would write into the working directory. No
+    engine then, said once per instance."""
+    config_dir = getattr(getattr(hass, "config", None), "config_dir", None)
+    if isinstance(config_dir, str) and config_dir:
+        return True
+    if not hass.data.get(_NO_CONFIG_DIR_KEY):
+        hass.data[_NO_CONFIG_DIR_KEY] = True
+        _LOGGER.warning("Self-Healing not started: no configuration directory")
+    return False
+
+
+async def _async_engine(hass: HomeAssistant) -> HealEngine | None:
     engine = async_get_self_healing(hass)
     if engine is None:
+        if not _config_dir_usable(hass):
+            return None
         engine = HealEngine(hass)
         hass.data[DATA_SELF_HEALING_ENGINE] = engine
         try:
@@ -1040,15 +1252,28 @@ async def _async_engine(hass: HomeAssistant) -> HealEngine:
 
 
 async def async_setup_self_healing(hass: HomeAssistant, entry: Any) -> None:
-    """Add a loaded router; off, nothing is created (no store, no route)."""
+    """Add a router at the end of its own setup; off, nothing is created
+    (no store, no route).
+
+    Called from the entry's ``async_setup_entry``, so the entry is still in
+    SETUP_IN_PROGRESS (or LOADED on a later call); any other state is no
+    router to add. The engine acts on it once it is LOADED. The switch is
+    read again inside the lock: the options flow may have switched the
+    module off while this setup waited (review of PR #78).
+    """
     if not self_healing_enabled(hass):
         return
     if getattr(entry, "disabled_by", None) is not None:
         return
+    if getattr(entry, "state", None) not in _SETUP_STATES:
+        return
     async with _lock(hass):
+        if not self_healing_enabled(hass):
+            return
         engine = await _async_engine(hass)
-        engine.add_entry(entry.entry_id)
-        await engine.async_bind_core()
+        if engine is None:
+            return
+        await engine.async_add_entries([entry.entry_id])
 
 
 async def async_release_self_healing(hass: HomeAssistant, entry_id: str) -> None:
@@ -1078,9 +1303,9 @@ async def async_apply_self_healing_option(hass: HomeAssistant, *, on: bool) -> N
             if not loaded:
                 return
             engine = await _async_engine(hass)
-            for entry_id in loaded:
-                engine.add_entry(entry_id)
-            await engine.async_bind_core()
+            if engine is None:
+                return
+            await engine.async_add_entries(loaded)
     except Exception as err:  # noqa: BLE001 - the form never fails because of it
         _LOGGER.warning("Self-Healing option not applied (%s)", type(err).__name__)
 
