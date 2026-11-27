@@ -4,6 +4,104 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.52.3] - 2026-11-27
+
+WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
+wird wieder laufend gespeichert und nie mehr wegen seiner Größe geleert. Den Fehler gab es in
+jeder Version seit 1.48.0; auf einer echten Instanz war der ganze Verlauf nach einem
+Herunterfahren weg. Kein zusätzlicher Router-Aufruf, keine neue Entität, keine geänderte
+unique_id, Panel unverändert (`_PANEL_VERSION` bleibt). Speicherdatei
+`openwrt_router.wifi_rf` weiter Version 1; hinzu kommt nur der Zähler `trimmed`.
+
+### Behoben
+
+- **Der Funkverlauf wurde seit 1.48.0 nur beim Herunterfahren geschrieben und konnte dabei
+  ganz zurückgesetzt werden.** Drei Fehler wirkten zusammen:
+  1. Jede Abfrage jedes Routers schob das verzögerte Schreiben (5 Minuten) wieder nach hinten.
+     Solange Home Assistant lief, wurde darum nie geschrieben, nur beim Herunterfahren oder
+     beim Entladen des letzten Eintrags. Ein Absturz oder Stromausfall verlor alles seit dem
+     letzten sauberen Herunterfahren.
+  2. Lag der Verlauf über der Grenze von 2 MB, wurde er nicht gekürzt, sondern nicht
+     geschrieben. Die Grenze wird aber planmäßig erreicht: je Radio mit allen sieben Reihen
+     etwa 224 KB, ab etwa zehn Radios nach etwa einer Woche über 2 MB (13 Radios etwa 2,9 MB).
+  3. Statt des neuen Verlaufs sollte der letzte gute geschrieben werden. Ein Verlauf, der beim
+     Start aus der Datei gelesen war, zählte aber nicht als „letzter guter“, und wegen 1. gab
+     es vor dem Herunterfahren nie ein gutes Schreiben. Geschrieben wurde darum
+     `{"radios": {}}`: Alle Stunden- und Tagesbuckets aller Radios waren weg. Die Diagnose
+     zeigte danach `radios: 0`, `last_save_bytes: null` und `save_over_size: 1`.
+
+  **Der Verlauf vor einem solchen Zurücksetzen ist verloren und lässt sich nicht
+  wiederherstellen:** Die Diagramme und die Funkdaten der Time Machine („Zustand“,
+  „Vergleich“) zeigen für diese Zeit „unbekannt“. Eine Sicherung `.bak` gibt es nur bei einer
+  unlesbaren Datei, nicht bei diesem Fehler.
+
+  Jetzt:
+  - **Schreiben während des Betriebs:** Ein verzögertes Schreiben wird nur geschärft, wenn
+    keines aussteht (wie in Network Intelligence, Client-Stabilität, Time Machine, Traffic und
+    Audit). Solange sich etwas ändert, wird höchstens alle 5 Minuten geschrieben, beim
+    Herunterfahren und beim Entladen des letzten Eintrags wie bisher sofort.
+  - **Kürzen statt Verweigern:** Liegt der Verlauf über der Grenze, fallen die ältesten
+    Stundenbuckets aller Radios nach der Zeit (nicht Radio für Radio), danach erst die ältesten
+    Tagesbuckets, bis die Datei 5 % unter der Grenze liegt. Der neueste Bucket jeder Reihe
+    bleibt immer. Gekürzt wird auch im Speicher, Datei und Diagramme stimmen also überein.
+    Gezählt in `drops.trimmed`; eine Warnung je Lauf, danach Debug.
+  - **Nie leer wegen der Größe:** Die Datei, wie sie beim Start gelesen wurde, zählt als
+    letzter guter Stand. Kommt das Kürzen nicht unter die Grenze (nur möglich, wenn schon jede
+    Reihe nur noch ihren neuesten Bucket hat), bleibt der letzte gute Stand; gibt es keinen,
+    wird der Verlauf über der Grenze geschrieben, nie ein leerer. Ein Router, den WiFi RF
+    vergessen hat, kommt mit dem letzten guten Stand nicht zurück.
+  - **Grenze 8 MB statt 2 MB:** Damit passen die vollen 8 Tage Stundenverlauf und 32 Tage
+    Tagesverlauf für 13 Radios (etwa 2,9 MB) und auch für 32 Radios, das Höchstmaß (etwa
+    7,2 MB). Das Kürzen ist nur noch das Sicherheitsnetz. Mit der alten Grenze hätten nach dem
+    Kürzen 13 Radios etwa 4,8 Tage und 32 Radios etwa 1,1 Tage Stundenverlauf behalten.
+  - **Nicht mehr im Event-Loop:** Aufbau, Größenmessung und JSON der Nutzlast liefen im
+    Event-Loop (13 Radios etwa 14 ms, 32 Radios etwa 34 ms je Schreiben). Jetzt erledigt das
+    der Executor von Home Assistant (`serialize_in_event_loop=False`); im Event-Loop bleibt
+    nur das Kürzen im Speicher, wenn gekürzt wird (unter 3 ms bei 13 Radios und 2 MB Grenze).
+
+### Geändert
+
+- `WIFI_RF_MAX_STORE_BYTES` 2 000 000 → 8 000 000; neu `WIFI_RF_TRIM_HEADROOM` (0,05).
+- Diagnose, Block `wifi_rf` → `store`: `max_bytes` (die Grenze), `last_save_bytes` (wird
+  jetzt auch während des Betriebs gefüllt) und der neue Zähler `drops.trimmed` (gekürzte
+  Buckets). `drops.save_over_size` zählt nur noch Schreibvorgänge, die trotz Kürzen über der
+  Grenze lagen.
+- Die Datei ist additiv: 1.52.2 liest eine Datei von 1.52.3 (der unbekannte Zähler `trimmed`
+  wird übergangen), 1.52.3 liest eine Datei von 1.52.2 unverändert.
+
+### Tests
+
+- `tests/test_rf_store_over_size_v1523.py` (20 Tests): ein verzögertes Schreiben je Runde;
+  mit dem echten `Store` von Home Assistant ein Schreiben, während alle 0,05 s abgefragt wird
+  (Verzögerung auf 0,3 s verkürzt), und das letzte Schreiben beim Herunterfahren
+  (`EVENT_HOMEASSISTANT_FINAL_WRITE`) nach dem Laden einer guten Datei; Kürzen unter die
+  Grenze, neueste Buckets jedes Radios bleiben, Zähler, Warnung einmal, Laden ohne
+  `load_invalid`; Kürzen nach der Zeit über alle Radios; Stunden vor Tagen; erstes Schreiben
+  über der Grenze ohne und mit geladener Datei nie leer; nicht kürzbarer Verlauf behält die
+  geladene Datei, ohne einen vergessenen Router; 13 und 32 Radios im eingeschwungenen Zustand
+  unter einer niedrigen Grenze; die 8 MB fassen 32 Radios mit vollen Buckets ohne Kürzen;
+  Dateien von 1.52.2 und 1.52.3 in beide Richtungen; gekürzte Stunden lesen in den Diagrammen
+  als Lücke und in `window_at` (Time Machine) als `unknown`; Diagnose. Die Tests setzen ihre
+  eigene Grenze und hängen nicht vom Wert der Konstante ab (außer dem Test der Kapazität).
+- `tests/test_rf_store.py`: `test_payload_over_the_byte_limit_keeps_the_last_good_one` heißt
+  jetzt `…_is_trimmed_not_refused` und prüft das Kürzen.
+- Jeder der drei Fixes einmal zurückgenommen: ohne die Sperre gegen ein zweites verzögertes
+  Schreiben scheitern 2 Tests, ohne das Kürzen 11, ohne „geladene Datei zählt als letzter
+  guter Stand“ 1 Test.
+
+### Bekannte Grenzen
+
+- **Downgrade auf 1.52.2 oder älter:** Ab 1.52.3 darf die Datei größer als 2 MB werden. Eine
+  ältere Version liest sie, schreibt sie aber beim nächsten Herunterfahren leer (der Fehler
+  oben). Wer zurückgeht, verliert den Funkverlauf.
+- Geschrieben wird jedes Mal die ganze Datei: bei 13 Radios etwa 2,9 MB je Schreiben, höchstens
+  alle 5 Minuten (bis zu etwa 0,8 GB am Tag), bei 32 Radios bis zu etwa 2 GB am Tag.
+- Der letzte gute Stand bleibt im Speicher (13 Radios etwa 3 MB, 32 Radios etwa 8 MB), wie
+  schon nach jedem guten Schreiben seit 1.48.0.
+- Die Größen stammen aus einer Simulation mit allen sieben Reihen und Abfragen alle 60 s;
+  längere Zahlen in echten Werten machen die Datei etwas größer.
+- Nicht in einer echten HA-Instanz geprüft (siehe PR).
+
 ## [1.52.2] - 2026-11-27
 
 Network Time Machine, Tab „Zeitreise“: drei Anzeigefehler in „Vergleich“ und „Zustand“
