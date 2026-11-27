@@ -549,7 +549,11 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
 
 Self-Healing liest jetzt, was der Configuration Manager über die Konfiguration weiß
 (`heal_config_link.py`). Nur lesen: **kein Router-Aufruf**, kein Wiederherstellen, kein
-Probelauf, nichts wird geschrieben, kein Audit-Eintrag. Die Engine ruft es noch nicht auf
+Probelauf, kein Audit-Eintrag. Geschrieben wird nur in einem Fall, und das tut der Core selbst:
+ist ein gespeichertes Artefakt beschädigt, markiert sein Versionsspeicher die Version beim
+Vergleich als `corrupt`, speichert den Index einmal und feuert ein Ereignis
+`configuration.integrity_failed`, einmal je beschädigter Version und ohne Router-Aufruf (die
+erste Fassung dieses Eintrags sagte „nichts wird geschrieben“; das war falsch). Die Engine ruft es noch nicht auf
 (die Anbindung an die Faktenquelle `HealFactsProvider` beschreibt die Doku). Für Benutzer
 ändert sich nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`,
 Abschnitt 7.2.
@@ -558,29 +562,50 @@ Abschnitt 7.2.
   **gespeicherter** Versionen (`async_compare` mit zwei Sicherungsverweisen, als Modul
   `self_healing`). Die Live-Drift-Prüfung und der Probelauf des Wiederherstellens lesen den
   Router und werden deshalb nicht benutzt.
-- **Letzte Änderung:** aus den Zeitpunkten, an denen jede Version gesehen wurde (angelegt und
-  bei einer Wiederholung wieder gesehen), ergibt sich die letzte Änderung des gespeicherten
-  Inhalts: die Version davor, die danach, und zwei Zeitgrenzen. Bei einem Vorfall zählen nur
-  Versionen, die **strikt vor** seinem Beginn gesehen wurden.
+- **Zeitfenster von 24 h** (feste Konstante `CONFIG_CHANGE_WINDOW_S = 86400`): aus den
+  Zeitpunkten, an denen jede Version gesehen wurde (angelegt und bei einer Wiederholung wieder
+  gesehen), wird die neueste Version **strikt vor** dem Beginn des Vorfalls mit der neuesten
+  bei oder vor dem Beginn des Fensters verglichen. Der Vergleich zeigt so **alle** Änderungen im
+  Fenster; eine frühere Änderung im Bereich des Vorfalls wird nicht mehr von einer späteren
+  anderswo verdeckt. Eine Änderung, die älter ist als das Fenster, ist keine Drift dieses
+  Vorfalls: „keine Änderung“ nur, wenn der Speicher es belegt (derselbe Inhalt an beiden Enden,
+  nichts anderes dazwischen), sonst unbekannt. Neue Gründe: `window_base_missing` (keine
+  Version vor dem Fenster, nie „keine Änderung“), `change_too_old`, `changed_and_reverted`
+  (geändert und im Fenster zurückgenommen), `change_may_predate_window` (die erste Änderung
+  kann vor dem Fenster liegen; streng ausgelegt, bei täglichen Sicherungen oft unbekannt).
+  Zwei verschiedene Inhalte mit derselben Zeit sind auch auf der Seite der Basis
+  `ambiguous_order`. Bekannte Grenze: ein Bereich, der im Fenster geändert und vor dessen Ende
+  zurückgesetzt wurde, während sich ein anderer dauerhaft änderte, ist nicht sichtbar.
 - **Playbook F** bekommt echte Fakten: belegte Änderung, geänderte Bereiche, Risiko, Zeit der
   Änderung und die Sicherung, die ein Wiederherstellen benutzen würde (bevorzugt das neueste
   vollständige Archiv mit dem alten Inhalt). Der Plan nennt jetzt auch alle geänderten
   Bereiche (`changed_areas`) und sagt `restore_executable: false`; er wird bei jeder Änderung
   neu geprüft und führt nie aus (Auftragstests 14, 18, 19).
 - **Unbekannt bleibt unbekannt, mit Grund:** ein abgeschnittener Vergleich, ein nicht
-  vergleichbares Geheimnis, ein Bereich ohne Zuordnung, ein fehlgeschlagener Vergleich, ein
-  nicht geladener Index. „Keine Sicherung im Speicher“ ist ein bekanntes Nein, ein nicht
-  lesbarer Index ist unbekannt.
-- **Vorabprüfungen:** die Sicherungsfakten sind dieselben wie die des Sammlers aus Paket E
-  (Test). `service_config_unapplied` bleibt immer unbekannt
+  vergleichbares Geheimnis, eine Konfiguration, die nur auf einer Seite vorliegt (eigener
+  neutraler Grund `config_one_sided`), ein Bereich ohne Zuordnung, ein fehlgeschlagener
+  Vergleich, ein nicht geladener Index. „Keine Sicherung im Speicher“ ist ein bekanntes Nein,
+  ein nicht lesbarer Index ist unbekannt, ebenso Einträge, von denen keiner lesbar ist
+  (`source_error`).
+- **Vorabprüfungen:** die Sicherungsfakten stimmen auf einem sauberen Speicher mit denen des
+  Sammlers aus Paket E überein. Auf einem seltsamen Speicher weichen sie mit Absicht ab
+  (doppelte Kennung, Version eines anderen Routers, Zeit außerhalb des gültigen Bereichs,
+  keiner der Einträge lesbar, ein Speicher, der `None` antwortet); ein Test hält jede
+  Abweichung fest. `service_config_unapplied` bleibt immer unbekannt
   (`running_config_not_tracked`): der Configuration Manager kennt nur die gespeicherte
   Konfiguration, nicht die laufende. Ein Dienst-Neustart bleibt dadurch gesperrt.
 - **Richtlinie:** `config_change_24h` ist nur „ja“, wenn ein Vergleich eine Änderung im
-  Bereich in den letzten 24 h belegt, sonst unbekannt, nie „nein“.
-- **Tests:** `tests/test_heal_config_link_v1530.py` (110 Tests), darunter ein Zufallstest
-  gegen die echten Änderungszeiten und ein Test mit dem echten Core, der **null
-  Router-Aufrufe** und keinen Schreibzugriff nachweist. Mutationsprüfung auf grünem Stand:
-  85 Mutationen, alle scheitern.
+  Bereich in den letzten 24 h belegt (dieselbe Fensterlogik), sonst unbekannt, nie „nein“.
+- **Für das Paket, das den Adapter verdrahtet:** acht Pflichtregeln in der Doku (Abschnitt
+  7.2), u. a. dasselbe `before` für das async Lesen und den synchronen Aufruf (bei
+  `async_read_stored_diff` jetzt Pflicht) und Zwischenspeichern je (Router, `base_id`,
+  `other_id`).
+- **Tests:** `tests/test_heal_config_link_v1530.py` (124 Tests), darunter ein Zufallstest
+  mit 8000 Verläufen gegen die echten Änderungszeiten, ein Test mit dem echten Core, der
+  **null Router-Aufrufe** nachweist, und einer über einem beschädigten Artefakt (genau ein
+  Speichern des Index und ein Ereignis, beim zweiten Lesen nichts). Mutationsprüfung auf
+  grünem Stand: 111 Mutationen (26 neue, je eine für jede im Review geänderte Regel), alle
+  scheitern; fünf erst nach neuen Tests.
 
 ## [1.52.3] - 2026-11-27
 

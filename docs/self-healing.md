@@ -1233,10 +1233,20 @@ Paket; heute das private `_acl_blocked` hinter `_safe_call`).
 **Stand heute:** gebaut und getestet (`tests/test_heal_config_link_v1530.py`), **nicht an die
 Engine angebunden** (die Naht `HealFactsProvider` aus Paket X steht in Abschnitt 2.1; wie man
 sie füllt, steht unten). Nur lesen: kein Router-Aufruf, kein Wiederherstellen, kein Probelauf,
-nichts wird geschrieben, kein Audit-Eintrag, kein Laden eines Speichers. Ein Test mit dem
-echten Core und dem aufzeichnenden api-Objekt des Coordinators weist null Router-Aufrufe nach
+kein Audit-Eintrag, kein Laden eines Speichers. Ein Test mit dem echten Core und dem
+aufzeichnenden api-Objekt des Coordinators weist null Router-Aufrufe nach
 (`test_recorded_calls_zero_router_calls`): der einzige Aufruf beim Anbieter ist der Vergleich
 zweier gespeicherter Versionen.
+
+**Was der Vergleich doch schreibt (Korrektur, Review PR #82):** die frühere Aussage „nichts wird
+geschrieben, kein Bus-Ereignis“ stimmte nur bei unversehrten Artefakten. Ist ein gespeichertes
+Artefakt beschädigt, markiert der Versionsspeicher des Core die Version beim Vergleich als
+`corrupt`, speichert seinen Index **einmal** (`openwrt_router.config_catalog`) und feuert
+**ein** Bus-Ereignis `configuration.integrity_failed` mit `{version_id, status: corrupt}`. Das
+geschieht einmal je beschädigter Version, ohne Router-Aufruf; der Fakt ist dann `diff_failed`.
+Beim nächsten Lesen ist die Version nicht mehr vergleichbar, es wird nichts mehr geschrieben.
+Sonst schreibt die Anbindung nichts. Das ist Verhalten des Core, nicht dieses Moduls; Paket G
+ändert es nicht (Test `test_review_compare_over_a_damaged_artifact_writes_once`).
 
 **Quellen.**
 
@@ -1255,28 +1265,61 @@ zweier gespeicherter Versionen.
   (`async_prepare_restore`: Router-Verbindung, Audit). Die Drift-Zusammenfassung des
   Router-Zustands nennt keine Bereiche und hilft deshalb nicht.
 
-**Welche Änderung.** Jede vergleichbare Version (Status `ok`, Prüfstatus `valid` oder
+**Beobachtungen.** Jede vergleichbare Version (Status `ok`, Prüfstatus `valid` oder
 `unverified`, mit Inhaltsprüfsumme) ist eine Beobachtung ihres Inhalts beim Anlegen und, wenn
-sie wiederholt wurde, beim letzten Wiedersehen. Nach Zeit sortiert gibt die neueste Beobachtung
-den aktuellen Inhalt; rückwärts gegangen ist die erste Beobachtung eines anderen Inhalts die
-**Basis**. Daraus wird `VersionPair`: Basis, die neueste Version, `changed_after` (zuletzt den
-alten Inhalt gesehen) und `changed_at` (zuerst den neuen gesehen). Die wirkliche Änderung liegt
-in `(changed_after, changed_at]` (Zufallstest gegen simulierte echte Änderungszeiten). Mit
-`before` (Beginn des Vorfalls) zählen nur Beobachtungen **strikt davor**. Ein Gleichstand zweier
-Inhalte an der Grenze ist `ambiguous_order` (kein Paar). Die Wiederholung einer älteren
-Version (Deduplizierung vergleicht nur mit der neuesten Version derselben Art) wird über das
-Wiedersehen richtig als Rückkehr zum alten Inhalt erkannt. Die **Sicherung des Plans** ist das
-neueste von Hand wiederherstellbare Archiv (`ok`, gültig oder ungeprüft, mit sha256,
-`full_archive`) mit dem alten Inhalt unmittelbar vor der Änderung, sonst die Basis selbst
-(`backup_present` dann `false`).
+sie wiederholt wurde, beim letzten Wiedersehen. Die Wiederholung einer älteren Version
+(Deduplizierung vergleicht nur mit der neuesten Version derselben Art) wird über das
+Wiedersehen richtig als Rückkehr zum alten Inhalt erkannt.
 
-**Zeitgrenze (DECIDED):** `ConfigFact.changed_at` ist die **spätere** Grenze, also der Zeitpunkt,
-an dem die Änderung beobachtet wurde. Playbook F verlangt `changed_at < started_at`. Weil die
-wirkliche Änderung ≤ `changed_at` liegt, ist sie dann strikt vor dem Beginn des Vorfalls; die
-frühere Grenze könnte eine Änderung als „vorher“ werten, die erst danach geschah. Für
-`config_change_24h` gilt umgekehrt die **frühere** Grenze: „ja“ nur, wenn `changed_after` im
-Fenster der letzten 24 h liegt (dann liegt die Änderung sicher darin) und `changed_at` nicht
-nach der Momentaufnahme.
+**Zeitfenster (DECIDED, Review PR #82).** Feste Konstante `CONFIG_CHANGE_WINDOW_S = 86400`
+(24 h). Das Fenster endet am Ende `E` = `before` (Beginn des Vorfalls; ohne Vorfall die
+Momentaufnahme `wall_at`) und beginnt bei `S = E − 24 h`. Es zählen nur Beobachtungen **strikt
+vor** `E`. Verglichen wird die **neueste Beobachtung bei oder vor `S`** (die Basis) mit der
+**neuesten Beobachtung vor `E`**. Der Vergleich zeigt damit die **Vereinigung** aller Änderungen
+im Fenster: eine frühere Änderung im Bereich des Vorfalls wird nicht von einer späteren
+Änderung anderswo verdeckt (früher wurde nur die letzte Änderung verglichen). Die Regeln, in
+dieser Reihenfolge:
+
+| Lage im Speicher | Ergebnis |
+|---|---|
+| keine vergleichbare Beobachtung vor `E` | unbekannt `no_usable_version` |
+| keine Beobachtung bei oder vor `S` | unbekannt `window_base_missing` (**nie** „keine Änderung“) |
+| zwei verschiedene Inhalte mit derselben Zeit ab der Basis (auch an der Basis selbst) | unbekannt `ambiguous_order` |
+| keine Beobachtung nach der Basis | unbekannt `change_too_old`: die letzte Änderung ist älter als das Fenster oder nicht belegt |
+| im Fenster nur der Inhalt der Basis gesehen (gleicher Inhalt an beiden Enden, nichts anderes dazwischen) | **bekannt `false`**: der Speicher belegt, dass sich im Fenster nichts geändert hat |
+| am Ende wieder der Inhalt der Basis, dazwischen ein anderer (A→B→A) | unbekannt `changed_and_reverted` |
+| der Basis-Inhalt wurde zuletzt **vor** `S` gesehen, bevor der erste andere Inhalt kam | unbekannt `change_may_predate_window`: die erste Änderung kann vor dem Fenster liegen |
+| sonst | Paar (`VersionPair`), der Vergleich entscheidet |
+
+Strenge Lesart (DECIDED): „belegt“ heißt, **jede** verglichene Änderung liegt nachweislich im
+Fenster (`first_changed_after ≥ S`). Wird nur einmal am Tag gesichert, liegt die Basis oft vor
+`S` und der Fakt bleibt `change_may_predate_window` – das ist gewollt: eine ältere Änderung ist
+keine Drift dieses Vorfalls. Eine Änderung, die älter ist als das Fenster, macht F also nie
+zuständig (Review-Fall „Änderung vor Monaten“).
+
+`VersionPair`: Basis, die neueste Version, `first_changed_after` (zuletzt den Basis-Inhalt
+gesehen vor dem ersten anderen; ≥ `S`), `changed_after` und `changed_at` der **letzten**
+Änderung im Fenster (zuletzt den Inhalt davor gesehen, zuerst den neuen gesehen). Jede Änderung
+liegt nach `first_changed_after`, die letzte in `(changed_after, changed_at]` (Zufallstest gegen
+simulierte echte Änderungszeiten). Die **Sicherung des Plans** ist das neueste von Hand
+wiederherstellbare Archiv (`ok`, gültig oder ungeprüft, mit sha256, `full_archive`) mit dem
+Basis-Inhalt unmittelbar vor der ersten Änderung, sonst die Basis selbst (`backup_present` dann
+`false`).
+
+**Grenze (bekannt):** der Vergleich zeigt nur die Netto-Änderung zwischen den Enden. Ein Bereich,
+der im Fenster geändert und **vor** dem Ende wieder zurückgesetzt wurde, während sich ein anderer
+Bereich dauerhaft änderte, erscheint nicht. Ganz zurückgesetzte Fenster (A→B→A) sind erkannt
+(`changed_and_reverted`), teilweise zurückgesetzte nicht. Dafür müsste man jede
+Zwischenversion vergleichen; das tut Paket G nicht.
+
+**Zeitgrenze (DECIDED):** `ConfigFact.changed_at` ist die **spätere** Grenze der **letzten**
+Änderung im Fenster, also der Zeitpunkt, an dem sie beobachtet wurde. Playbook F verlangt
+`changed_at < started_at`. Weil die wirkliche Änderung ≤ `changed_at` liegt, ist sie dann strikt
+vor dem Beginn des Vorfalls; die frühere Grenze könnte eine Änderung als „vorher“ werten, die
+erst danach geschah. Für `config_change_24h` gilt dieselbe Fensterlogik mit der Momentaufnahme
+als Ende: „ja“ nur, wenn ein belegter Vergleich einen der Bereiche des Ziels nennt, die erste
+verglichene Änderung im Fenster der letzten 24 h vor `wall_at` liegt (`first_changed_after ≥
+wall_at − 24 h`) und `changed_at` nicht nach `wall_at`.
 
 **Grenze der Uhren (bekannt, nicht erkennbar):** beide Seiten benutzen die Wanduhr (Network
 Intelligence Epoch-Sekunden, der Configuration Manager UTC-Zeitstempel). Ging die Uhr beim
@@ -1291,12 +1334,12 @@ Zeiten bei einem Sprung, der Versionsindex nicht.
 | Fakt | gefüllt | unbekannt (Grund) |
 |---|---|---|
 | `ConfigFact.version_known`, `version_id`, `backup_present` | mit Paar: die Sicherung des Plans; ohne Paar: die neueste nutzbare Version; leerer Index: `false`/`false` („keine Sicherung“ ist ein bekanntes Nein) | Index nicht lesbar: `core_not_running`, `versions_not_loaded`, `source_error`, `invalid_router_id` |
-| `diff_proven`, `changed_areas`, `change_risk`, `changed_at` | Vergleich des Paars gelesen: `true` mit Bereichen, höchstem Risiko (unbekannt, wenn ein Risiko fehlt) und `changed_at`; gleiche Konfiguration: `false` mit leeren Bereichen | `no_usable_version`, `single_content`, `ambiguous_order`, `diff_not_read`, `diff_other_versions`, `diff_failed`, `diff_unreadable`, `diff_truncated`, `diff_area_unknown`, `secrets_not_comparable` |
+| `diff_proven`, `changed_areas`, `change_risk`, `changed_at` | Vergleich des Paars gelesen: `true` mit Bereichen, höchstem Risiko (unbekannt, wenn ein Risiko fehlt) und `changed_at`; gleiche Konfiguration oder im Fenster nur der Basis-Inhalt gesehen: `false` mit leeren Bereichen | `no_usable_version`, `window_base_missing`, `change_too_old`, `changed_and_reverted`, `change_may_predate_window`, `ambiguous_order`, `diff_not_read`, `diff_other_versions`, `diff_failed`, `diff_unreadable`, `diff_truncated`, `diff_area_unknown`, `config_one_sided`, `secrets_not_comparable` |
 | `restore_check` | – | **immer** `None` (`restore_dry_run_not_run`: der Probelauf spricht mit dem Router) |
-| Vorabprüfung `backups` | dieselben Zeilen wie `heal_preflight._backup_facts` (Test), neueste zuerst, höchstens 64 | wie oben (Index nicht lesbar) |
+| Vorabprüfung `backups` | auf einem sauberen Speicher dieselben Zeilen wie `heal_preflight._backup_facts` (Test), neueste zuerst, höchstens 64; Abweichungen auf einem seltsamen Speicher siehe unten | wie oben (Index nicht lesbar); Einträge vorhanden, aber keiner lesbar: `source_error` (nicht „keine Sicherung“) |
 | Zusammenfassung `config_captured`, `backup_present` | `current`/`outdated`/`none` bzw. `verified`/`unverified`/`outdated`/`none`, nach den Regeln der Prüfungen (Test gegen `run_preflight`) | `snapshot_time_ahead`, `backup_time_ahead` |
 | `service_config_unapplied` | – | **immer** `running_config_not_tracked`: der Configuration Manager liest nur die gespeicherte UCI-Konfiguration, nie die laufende. Ein Dienst- oder Router-Neustart bleibt damit gesperrt |
-| `config_change_24h` | `true`, wenn ein Vergleich eine Änderung in einem der Bereiche des Ziels im Fenster belegt | sonst `None`, **nie `false`** (der Speicher kann nicht belegen, dass sich nach seiner neuesten Version nichts geändert hat) |
+| `config_change_24h` | `true`, wenn ein Vergleich eine Änderung in einem der Bereiche des Ziels im Fenster belegt (Fensterlogik wie oben) | sonst `None`, **nie `false`** (der Speicher kann nicht belegen, dass sich nach seiner neuesten Version nichts geändert hat); ein `str` statt einer Liste von Bereichen gibt `None` |
 | Wiederherstellen | – | `restore_executable` immer `false`, `reasons.restore = restore_unsupported_dry_run_only`; `DriftPlan` lehnt jeden anderen Wert ab |
 
 `ConfigLink.reasons` nennt zu jedem unbekannten Fakt den Grund (Codes aus `REASONS`, deutsche
@@ -1305,10 +1348,30 @@ Prüfsumme, keine Adresse, keinen Konfigurationsinhalt. Fehler werden nur mit ih
 protokolliert.
 
 **Strenge beim Vergleich (DECIDED):** ein abgeschnittener Vergleich, eine einzige nicht
-vergleichbare Änderung (Geheimnis mit anderem Installationsschlüssel) oder eine vergleichbare
-Änderung ohne bekannten Bereich macht den ganzen Vergleich unbekannt – sonst könnte ein
-fehlender Bereich F übersehen lassen. Ein Vergleich anderer Versionen als des gewählten Paars
-(auch ein Live-Verweis) zählt nicht.
+vergleichbare Änderung oder eine vergleichbare Änderung ohne bekannten Bereich macht den ganzen
+Vergleich unbekannt – sonst könnte ein fehlender Bereich F übersehen lassen. Nicht vergleichbar
+ist entweder eine Konfiguration, die nur auf einer Seite vorliegt (der Anbieter meldet sie ohne
+Abschnitt und Option: `config_one_sided`, eigener neutraler Text), oder ein Geheimnis mit
+anderem Installationsschlüssel (`secrets_not_comparable`); kommt beides vor, gilt
+`config_one_sided`. Ein Vergleich anderer Versionen als des gewählten Paars (auch ein
+Live-Verweis) zählt nicht.
+
+**Gleichheit mit den Vorabprüfungen (abgeschwächt, Review PR #82):** die Sicherungsfakten
+(`backups`) stimmen mit dem eigenen Sammler der Vorabprüfungen (`heal_preflight._backup_facts`)
+nur auf einem **sauberen** Speicher überein. Auf einem seltsamen Speicher weicht die Anbindung
+mit Absicht ab (ein Test hält jede Abweichung fest,
+`test_review_parity_with_the_preflight_holds_on_clean_stores_only`):
+
+| Speicher | Anbindung | `heal_preflight._backup_facts` |
+|---|---|---|
+| doppelte Kennung | einmal (die erste) | beide Zeilen |
+| Version eines anderen Routers | weggelassen | behalten |
+| Zeit außerhalb `0..TIME_MAX` | weggelassen (ist dann nichts lesbar: `source_error`) | behalten |
+| Einträge vorhanden, keiner lesbar (Kennung und Zeit) | unbekannt `source_error` | bekannt `()` („keine Sicherung“) |
+| `records()` antwortet `None` | unbekannt `source_error` | unbekannt `versions_unknown` |
+
+Dass `_backup_facts` bei einem nicht iterierbaren Ergebnis oder einem Generator, der mitten im
+Lesen scheitert, eine Ausnahme wirft, gehört zu Paket E und ist hier nicht geändert.
 
 **So steckt ein späteres Paket die Anbindung ein** (Paket G verdrahtet nichts; `heal_engine.py`
 bleibt unverändert):
@@ -1326,7 +1389,8 @@ bleibt unverändert):
 2. **Den Vergleich außerhalb des Entscheidungswegs lesen**, etwa wenn ein Vorfall gemeldet wird
    oder sich der Versionsindex ändert: `link = await async_config_link_for(hass, router_id,
    wall_now=…, before=…)` (oder `async_read_stored_diff(core.manager.api(1), knowledge,
-   before=…)`) und `link.diff` je (Router, `before`) zwischenspeichern. Ein veralteter
+   before=…)`; dort ist `before` Pflicht, ohne gültigen Wert gibt es `None` und keinen Aufruf)
+   und `link.diff` je (Router, `base_id`, `other_id`) zwischenspeichern. Ein veralteter
    Zwischenspeicher ist ungefährlich: passt der Vergleich nicht mehr zum gewählten Paar, ist der
    Fakt `diff_other_versions` (unbekannt).
 3. **Playbook F:** `heal_playbooks.Evidence(…, config=link.config_fact)` an `assess` geben.
@@ -1338,6 +1402,21 @@ bleibt unverändert):
 6. **Nie:** einen Live-Verweis vergleichen, `async_prepare_restore` oder `async_detect_drift`
    aus der Faktenquelle rufen, einen anderen Akteur als `self_healing` benutzen oder
    `restore_executable` setzen (der Typ lehnt es ab).
+
+**Pflichtregeln für das Paket, das den Adapter verdrahtet** (Review PR #82, alle acht):
+
+1. Dasselbe `before` für das async Lesen (`async_config_link_for` / `async_read_stored_diff`)
+   und den synchronen Aufruf (`config_link_for`); sonst gehört der Vergleich zu einem anderen
+   Fenster und der Fakt ist `diff_other_versions`.
+2. Den Vergleich nach (Router, `base_id`, `other_id`) zwischenspeichern, nicht nach Zeit.
+3. Einen Vergleich je Paar höchstens einmal ausführen (über einem beschädigten Artefakt schreibt
+   der Core beim ersten Mal, siehe oben).
+4. Einen fehlenden Bereich nie als „unverändert“ lesen: nur `diff_proven is False` ist ein Nein,
+   `None` ist unbekannt.
+5. Nie Live-Verweise vergleichen (`ConfigRef.live`); nur zwei Sicherungsverweise.
+6. Nie `async_detect_drift` oder `async_prepare_restore` rufen (beide sprechen mit dem Router).
+7. `config_change_24h` eine Liste von Bereichen geben, nie einen `str` (ein `str` gibt `None`).
+8. Jede Ausnahme aus der Anbindung als „nichts bekannt“ werten, nie als „sicher“.
 
 ## 8. Playbooks A–G
 
@@ -2512,21 +2591,38 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   ein Hold ohne JSON-Form oder Einstellungen falschen Typs zählen als Änderung. Mutationen:
   G01–G13 des Reviewers und drei zur Bedingung des Zurücksetzens; alle scheitern außer G07
   (wie X08) und G11 (die Momentaufnahme nach `context_for`: `context_for` schreibt nichts).
-- `tests/test_heal_config_link_v1530.py` (Paket G, 110 Tests): geschlossene Mengen wörtlich
+- `tests/test_heal_config_link_v1530.py` (Paket G, 124 Tests): geschlossene Mengen wörtlich
   (Gründe, Werte, Änderungsarten gegen `ChangeKind`, Akteur gegen `heal_engine.MODULE`,
-  Schlüssel des Plans); Normalisierung (alles Seltsame wird unbekannt, nie ein Fehler); Wahl
-  des Paars mit Deduplizierung, strikter Grenze und Gleichstand; ein Zufallstest mit 3000
-  Verläufen gegen simulierte **echte** Änderungszeiten; der Vergleich mit echten
+  Schlüssel des Plans, `CONFIG_CHANGE_WINDOW_S = 86400`); Normalisierung (alles Seltsame wird
+  unbekannt, nie ein Fehler); Wahl der Versionen im Zeitfenster mit Deduplizierung, beiden
+  Fenstergrenzen auf einen Gleitkomma-Schritt genau, Gleichstand (auch auf der Seite der
+  Basis), A→B→A, fehlender Basis und Änderung vor dem Fenster; ein Zufallstest mit 8000
+  Verläufen gegen simulierte **echte** Änderungszeiten und gegen eine aus den Regeln
+  geschriebene Erwartung (jedes Ergebnis mindestens 20-mal); der Vergleich mit echten
   `ConfigDiff`-Objekten und dem echten Anbieter des Configuration Managers; Auftragstests 14,
   18, 19 über `assess` und `run_preflight`; Gleichheit der Sicherungsfakten mit
-  `heal_preflight._backup_facts`; ein Test mit dem echten Core: **null Router-Aufrufe**, nur der
-  Vergleich beim Anbieter, nichts geschrieben, kein Bus-Ereignis. Mutationsprüfung auf grünem
-  Stand: 85 Mutationen von `heal_config_link.py` und dem Plan in `heal_playbooks.py`, alle
-  scheitern (zehn erst nach neuen Tests: Adresse in einem Code, Live-Verweis mit
-  Sicherungskennung, Grund außerhalb der Menge, neueste nutzbare Version, nachträglich
-  veränderter Vergleich, seltsame Bereichseinträge, kurze Prüfsumme, geschlossener Core,
-  Grenze im async-Weg, alle geänderten Bereiche im Plan; eine elfte, Reihenfolge nach Zeit,
-  fiel vorher nur zufällig).
+  `heal_preflight._backup_facts` auf einem sauberen Speicher und jede Abweichung auf einem
+  seltsamen; ein Test mit dem echten Core: **null Router-Aufrufe**, nur der Vergleich beim
+  Anbieter; ein Test über einem beschädigten Artefakt: genau ein Speichern des Versionsindex
+  und ein Ereignis `configuration.integrity_failed`, beim zweiten Lesen nichts mehr. Die Fälle
+  des Reviews von PR #82 (Änderung vor Monaten, verdeckte frühere Änderung, A→B→A und fehlende
+  Basis über die Anbindung, einseitige Konfiguration) sind eigene Tests; sie scheitern auf dem
+  Stand vor dem Review. Mutationsprüfung auf grünem Stand: zuerst 85 Mutationen von
+  `heal_config_link.py` und dem Plan in `heal_playbooks.py`, alle scheitern (zehn erst nach
+  neuen Tests: Adresse in einem Code, Live-Verweis mit Sicherungskennung, Grund außerhalb der
+  Menge, neueste nutzbare Version, nachträglich veränderter Vergleich, seltsame
+  Bereichseinträge, kurze Prüfsumme, geschlossener Core, Grenze im async-Weg, alle geänderten
+  Bereiche im Plan; eine elfte, Reihenfolge nach Zeit, fiel vorher nur zufällig). Nach dem
+  Review: 111 Mutationen (die 85, zwölf davon an den neuen Code angepasst, und 26 neue, je
+  eine für jede geänderte Regel: Konstante, Fensterlänge, Grenze der Basis, fehlende Basis,
+  zu alte Änderung, Gleichstand, belegtes „keine Änderung“, A→B→A, Änderung vor dem Fenster,
+  Basis und Ende des Vergleichs, Zeitgrenzen, Sicherung des Plans, Ende des Fensters,
+  `before` als Pflicht, Anker in `ConfigLink` und im async-Weg, einseitige Konfiguration,
+  unlesbare Einträge); 106 scheitern sofort, fünf erst nach neuen Tests (neueste Version
+  strikt vor dem Ende, zweimal; Sicherung des Plans im Fakt; erste statt letzter Änderung in
+  `config_change_24h`; Markierung einer ganzen Konfiguration ohne Option). Die Prüfung auf
+  einen `str` in `config_change_24h` ist gleichwertig ohne sie (die Buchstaben eines `str`
+  sind keine Bereiche) und deshalb keine Mutation.
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 
