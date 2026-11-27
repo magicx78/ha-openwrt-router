@@ -1,8 +1,9 @@
 """Self-Healing: the link to the Configuration Manager (package G).
 
 Developer document: ``docs/self-healing.md`` §7.2. Release 1.53.0 is
-Observe only: nothing here calls a router, runs a restore, writes a store or
-changes a configuration.
+Observe only: nothing here calls a router, runs a restore or changes a
+configuration. The one write is the core's own: a comparison over a damaged
+artifact marks that version corrupt (below).
 
 What it does: it turns what the Configuration Manager ALREADY holds into the
 facts Self-Healing needs, and nothing more.
@@ -12,7 +13,10 @@ facts Self-Healing needs, and nothing more.
   archive checksum and content hash;
 * optionally the comparison of two STORED versions
   (``ConfigurationApi.async_compare`` with two backup references - it reads
-  the stored artifacts, never the live configuration).
+  the stored artifacts, never the live configuration). Over a damaged
+  artifact the core's version store marks that version ``corrupt``, saves its
+  index once and fires ``configuration.integrity_failed`` (once per damaged
+  version; no router call). Nothing else is written.
 
 Out of it come:
 
@@ -30,14 +34,22 @@ unreadable index is unknown; collectors never raise, they report unknown with
 a reason code (:data:`REASONS`); frozen dataclasses validate again on
 ``dataclasses.replace``.
 
+**Window.** Only changes inside :data:`CONFIG_CHANGE_WINDOW_S` (24 h) before
+the incident start count. The newest version seen strictly before the start
+is compared with the newest version seen at or before (start - window), so
+the comparison shows everything that changed inside the window (an earlier
+change in one area is not hidden by a later one elsewhere). A change is
+proven only when the store shows that every change it compares happened
+inside the window; anything else is unknown with a reason code.
+
 **Time.** A stored comparison only says that the configuration changed
 somewhere between the last observation of the old content and the first
-observation of the new one. ``changed_at`` is that LATER bound (the time the
-change was first seen in the store); ``changed_after`` is the earlier one.
-Playbook F takes a change as the incident's cause only when ``changed_at <
-started_at``; with the later bound that implies the real change time is
-strictly before the start too. The earlier bound would not (see the
-document, §7.2).
+observation of the new one. ``changed_at`` is that LATER bound of the LAST
+change in the window (the time it was first seen in the store);
+``changed_after`` is the earlier one. Playbook F takes a change as the
+incident's cause only when ``changed_at < started_at``; with the later bound
+that implies the real change time is strictly before the start too. The
+earlier bound would not (see the document, §7.2).
 
 **What it can never say.** The Configuration Manager reads the SAVED UCI
 configuration only; it never sees what is running. So
@@ -73,8 +85,9 @@ LINK_VERSION: Final = 1
 # The module the stored comparison is asked for (heal_engine.MODULE; a test
 # compares them - heal_engine pulls in Home Assistant).
 ACTOR_MODULE: Final = "self_healing"
-# "a configuration change in 24 h" (heal_policy ``config_change_24h``)
-CHANGE_WINDOW_S: Final = 86400
+# The change window: only changes in the 24 h before the incident start (or
+# the snapshot) count, for playbook F and for heal_policy ``config_change_24h``.
+CONFIG_CHANGE_WINDOW_S: Final = 86400
 # at most this many versions per router are kept (newest)
 ROWS_MAX: Final = 1000
 # the preflight's bound of the backups fact (heal_preflight _TUPLE_MAX)
@@ -104,7 +117,10 @@ REASONS: Final = (
     "source_error",
     "invalid_router_id",
     "no_usable_version",
-    "single_content",
+    "window_base_missing",
+    "change_too_old",
+    "changed_and_reverted",
+    "change_may_predate_window",
     "ambiguous_order",
     "diff_not_read",
     "diff_other_versions",
@@ -112,6 +128,7 @@ REASONS: Final = (
     "diff_unreadable",
     "diff_truncated",
     "diff_area_unknown",
+    "config_one_sided",
     "secrets_not_comparable",
     "snapshot_time_ahead",
     "backup_time_ahead",
@@ -127,9 +144,22 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "source_error": "Der Versionsindex ist nicht lesbar.",
         "invalid_router_id": "Die Router-Kennung ist ungültig.",
         "no_usable_version": "Keine brauchbare Version im Speicher.",
-        "single_content": (
-            "Alle gespeicherten Versionen haben denselben Inhalt; eine Änderung "
-            "ist im Speicher nicht belegt."
+        "window_base_missing": (
+            "Keine Version vor dem Beginn des Zeitfensters; ob sich im "
+            "Zeitfenster etwas geändert hat, ist nicht belegt."
+        ),
+        "change_too_old": (
+            "Im Zeitfenster wurde keine Version gesehen; eine Änderung, falls "
+            "es eine gab, ist älter oder nicht belegt."
+        ),
+        "changed_and_reverted": (
+            "Im Zeitfenster wurde ein anderer Inhalt gesehen, am Ende aber "
+            "wieder der alte; es hat sich etwas geändert und wurde "
+            "zurückgenommen."
+        ),
+        "change_may_predate_window": (
+            "Die erste Änderung kann vor dem Zeitfenster liegen; der "
+            "Vergleich ist nicht auf das Zeitfenster begrenzt."
         ),
         "ambiguous_order": (
             "Zwei Versionen mit verschiedenem Inhalt tragen dieselbe Zeit; die "
@@ -141,6 +171,10 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "diff_unreadable": "Der Vergleich hat eine unerwartete Form.",
         "diff_truncated": "Der Vergleich ist abgeschnitten.",
         "diff_area_unknown": "Eine Änderung hat keinen bekannten Bereich.",
+        "config_one_sided": (
+            "Eine Konfiguration liegt nur in einer der beiden Versionen vor; "
+            "der Vergleich ist unvollständig."
+        ),
         "secrets_not_comparable": (
             "Geheime Werte sind nicht vergleichbar (anderer Installationsschlüssel)."
         ),
@@ -428,8 +462,9 @@ def stored_diff_from(diff: Any, base_id: str, other_id: str) -> StoredDiff:
     ``other_id`` (never raises).
 
     Unknown (``proven`` None) when the diff is not of these two STORED
-    versions, is truncated, has a comparable change without a known area,
-    or has secrets that cannot be compared (another installation key).
+    versions, is truncated, lists a config found on one side only
+    (``config_one_sided``), has secrets that cannot be compared (another
+    installation key) or has a comparable change without a known area.
     ``change_risk`` is the highest risk, None if any risk is unknown.
     """
     try:
@@ -443,6 +478,14 @@ def _ref_backup(ref: Any) -> str | None:
     if getattr(ref, "router_id", None) is not None:
         return None  # a LIVE reference: never this module's
     return _backup_id(getattr(ref, "backup_id", None))
+
+
+def _one_sided(change: Any) -> bool:
+    """A config readable on one side only (the provider's whole-config mark:
+    no section, no option), not a secret that cannot be compared."""
+    return getattr(change, "section", None) == "" and (
+        getattr(change, "option", None) is None
+    )
 
 
 def _stored_diff_from(diff: Any, base_id: str, other_id: str) -> StoredDiff:
@@ -459,14 +502,20 @@ def _stored_diff_from(diff: Any, base_id: str, other_id: str) -> StoredDiff:
         return unknown_diff("diff_other_versions")
     if getattr(diff, "truncated", None) is not False:
         return unknown_diff("diff_truncated")
+    kinds = [
+        _member(getattr(change, "kind", None), (_NOT_COMPARABLE, *_KINDS))
+        for change in changes
+    ]
+    if None in kinds:
+        return unknown_diff("diff_unreadable")
+    blind = [c for c, k in zip(changes, kinds, strict=True) if k == _NOT_COMPARABLE]
+    if any(_one_sided(c) for c in blind):
+        return unknown_diff("config_one_sided")
+    if blind:
+        return unknown_diff("secrets_not_comparable")
     areas: set[str] = set()
     risks: list[str | None] = []
     for change in changes:
-        kind = _member(getattr(change, "kind", None), (_NOT_COMPARABLE, *_KINDS))
-        if kind is None:
-            return unknown_diff("diff_unreadable")
-        if kind == _NOT_COMPARABLE:
-            return unknown_diff("secrets_not_comparable")
         area = _member(getattr(change, "area", None), hb.CONFIG_AREAS)
         if area is None:
             return unknown_diff("diff_area_unknown")
@@ -493,19 +542,23 @@ def _stored_diff_from(diff: Any, base_id: str, other_id: str) -> StoredDiff:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class VersionPair:
-    """The last change the store shows, as two versions and two bounds.
+    """The change inside the window, as two versions and three bounds.
 
-    ``base_id``: the newest observation of the content before the change;
-    ``other_id``: the newest observation of the content after it.
-    The change happened in ``(changed_after, changed_at]``: ``changed_after``
-    is the last time the old content was seen, ``changed_at`` the first time
-    the new content was seen. ``plan_backup_id``: the version a restore to
-    the old content would use (the newest restorable archive of that
-    content, else ``base_id``).
+    ``base_id``: the newest version seen at or before the window start;
+    ``other_id``: the newest version seen before the window end. Every
+    change between them happened after ``first_changed_after`` (the last
+    time the base content was seen before the first other content; at or
+    after the window start). The LAST change happened in ``(changed_after,
+    changed_at]``: ``changed_after`` is the last time the content before it
+    was seen, ``changed_at`` the first time the final content was seen.
+    ``plan_backup_id``: the version a restore to the content before the
+    window's changes would use (the newest restorable archive of the base
+    content right before the first change, else ``base_id``).
     """
 
     base_id: str
     other_id: str
+    first_changed_after: float
     changed_after: float
     changed_at: float
     plan_backup_id: str
@@ -518,10 +571,10 @@ class VersionPair:
                 raise _fail(f"pair.{name}")
         if self.base_id == self.other_id:
             raise _fail("pair.other_id")
-        for name in ("changed_after", "changed_at"):
+        for name in ("first_changed_after", "changed_after", "changed_at"):
             if _time(getattr(self, name)) is None:
                 raise _fail(f"pair.{name}")
-        if not self.changed_after < self.changed_at:
+        if not self.first_changed_after <= self.changed_after < self.changed_at:
             raise _fail("pair.changed_at")
         if not isinstance(self.plan_backup_restorable, bool):
             raise _fail("pair.plan_backup_restorable")
@@ -529,11 +582,19 @@ class VersionPair:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Selection:
-    """Result of :func:`select_versions`."""
+    """Result of :func:`select_versions`.
 
-    latest: VersionRow | None  # the newest usable version (before the cutoff)
+    ``pair``: the change to compare (None: no change to compare).
+    ``unchanged``: the store proves no change inside the window (the base
+    content at both ends, no other content seen in between). ``reason``: why
+    it is unknown (None when there is a pair or ``unchanged``).
+    """
+
+    latest: VersionRow | None  # the newest usable version (before the end)
     pair: VersionPair | None
-    reason: str | None  # why there is no pair
+    reason: str | None
+    unchanged: bool = False
+    window_end: float | None = None
 
 
 def _check_cutoff(before: Any) -> float | None:
@@ -545,49 +606,73 @@ def _check_cutoff(before: Any) -> float | None:
     return out
 
 
-def select_versions(knowledge: ConfigKnowledge, *, before: Any = None) -> Selection:
-    """The last change of the stored content, seen strictly before ``before``.
+def select_versions(knowledge: ConfigKnowledge, *, before: Any) -> Selection:
+    """The configuration changes inside the window that ends at ``before``.
 
-    Every comparable version is an observation of its content at
-    ``created_at`` and, if deduplicated, again at ``last_seen_at``. Sorted
-    by time, the newest observation gives the current content; walking back,
-    the first observation of another content is the base. Equal times of
-    two contents at that boundary are ``ambiguous_order`` (no pair).
+    The window is ``(before - CONFIG_CHANGE_WINDOW_S, before)``. Every
+    comparable version is an observation of its content at ``created_at``
+    and, if deduplicated, again at ``last_seen_at``; only observations
+    strictly before ``before`` count. The base is the newest observation at
+    or before the window start, the other end the newest observation. The
+    store proves a change inside the window only when the base content was
+    seen at or after the window start right before the first other content;
+    see :data:`REASONS` for every other outcome.
     """
     if type(knowledge) is not ConfigKnowledge:
         raise _fail("knowledge")
-    cutoff = _check_cutoff(before)
+    end = _check_cutoff(before)
+    if end is None:
+        raise _fail("before")
     if knowledge.rows is None:
         return Selection(latest=None, pair=None, reason=knowledge.reason)
+    start = end - CONFIG_CHANGE_WINDOW_S
 
-    def early(t: float | None) -> bool:
-        return t is not None and (cutoff is None or t < cutoff)
+    def unknown_sel(reason: str) -> Selection:
+        return Selection(latest=latest, pair=None, reason=reason, window_end=end)
 
-    usable = [r for r in knowledge.rows if r.usable and early(r.created_at)]
+    usable = [r for r in knowledge.rows if r.usable and r.created_at < end]
     latest = max(usable, key=lambda r: (r.created_at, r.backup_id), default=None)
     obs: list[tuple[float, str, VersionRow]] = []
     for row in knowledge.rows:
         if not row.comparable:
             continue
         for t in dict.fromkeys((row.created_at, row.last_seen_at)):
-            if early(t):
-                obs.append((float(t), str(row.backup_id), row))  # type: ignore[arg-type]
+            if t is not None and t < end:
+                obs.append((float(t), str(row.backup_id), row))
     if not obs:
-        return Selection(latest=latest, pair=None, reason="no_usable_version")
+        return unknown_sel("no_usable_version")
     obs.sort(key=lambda o: (o[0], o[1]))
-    content = obs[-1][2].content_hash
+    b = max((i for i, o in enumerate(obs) if o[0] <= start), default=None)
+    if b is None:
+        return unknown_sel("window_base_missing")
+    base_t, _bid, base = obs[b]
+    contents_at: dict[float, set[str]] = {}
+    for t, _i, row in obs:
+        if t >= base_t:
+            contents_at.setdefault(t, set()).add(str(row.content_hash))
+    if any(len(c) > 1 for c in contents_at.values()):
+        return unknown_sel("ambiguous_order")
+    window = obs[b + 1 :]
+    if not window:
+        return unknown_sel("change_too_old")
+    old = base.content_hash
+    if all(o[2].content_hash == old for o in window):
+        return Selection(
+            latest=latest, pair=None, reason=None, unchanged=True, window_end=end
+        )
+    final = obs[-1][2].content_hash
+    if final == old:
+        return unknown_sel("changed_and_reverted")
+    f = next(i for i in range(b + 1, len(obs)) if obs[i][2].content_hash != old)
+    first_after = obs[f - 1][0]
+    if first_after < start:
+        return unknown_sel("change_may_predate_window")
     i = len(obs) - 1
-    while i >= 0 and obs[i][2].content_hash == content:
+    while obs[i][2].content_hash == final:
         i -= 1
-    if i < 0:
-        return Selection(latest=latest, pair=None, reason="single_content")
-    base_t, _bid, base = obs[i]
-    changed_at = obs[i + 1][0]
-    if base_t == changed_at:
-        return Selection(latest=latest, pair=None, reason="ambiguous_order")
     plan = base
-    j = i
-    while j >= 0 and obs[j][2].content_hash == base.content_hash:
+    j = f - 1
+    while j >= 0 and obs[j][2].content_hash == old:
         if obs[j][2].restorable_by_hand:
             plan = obs[j][2]
             break
@@ -595,12 +680,13 @@ def select_versions(knowledge: ConfigKnowledge, *, before: Any = None) -> Select
     pair = VersionPair(
         base_id=str(base.backup_id),
         other_id=str(obs[-1][2].backup_id),
-        changed_after=base_t,
-        changed_at=changed_at,
+        first_changed_after=first_after,
+        changed_after=obs[i][0],
+        changed_at=obs[i + 1][0],
         plan_backup_id=str(plan.backup_id),
         plan_backup_restorable=plan.restorable_by_hand,
     )
-    return Selection(latest=latest, pair=pair, reason=None)
+    return Selection(latest=latest, pair=pair, reason=None, window_end=end)
 
 
 # ---------------------------------------------------------------------------
@@ -661,10 +747,11 @@ class ConfigLink:
 
     Inputs: ``knowledge`` (the version index), ``wall_at`` (the wall time of
     the snapshot; it ages the versions like the preflight), ``before`` (the
-    incident's start, wall seconds; only versions seen strictly before it
-    count for the change) and ``diff`` (a stored comparison read earlier by
-    :func:`async_read_stored_diff`; used only if it is of the selected
-    pair). Everything else is derived in ``__post_init__`` and cannot be
+    incident's start, wall seconds: the end of the change window; only
+    versions seen strictly before it count; None: the window ends at
+    ``wall_at``) and ``diff`` (a stored comparison read earlier by
+    :func:`async_read_stored_diff` with the same window end; used only if it
+    is of the selected pair). Everything else is derived in ``__post_init__`` and cannot be
     handed in (``dataclasses.replace`` derives it again).
     """
 
@@ -699,7 +786,9 @@ class ConfigLink:
                 raise _fail("diff")
             diff = dataclasses.replace(diff)
             put(self, "diff", diff)
-        sel = select_versions(knowledge, before=self.before)
+        sel = select_versions(
+            knowledge, before=wall if self.before is None else self.before
+        )
         put(self, "selection", sel)
         reasons: dict[str, str] = {}
         put(self, "config_fact", self._config_fact(knowledge, sel, diff, reasons))
@@ -732,16 +821,23 @@ class ConfigLink:
             return hb.ConfigFact()
         pair = sel.pair
         if pair is None:
-            reasons["diff_proven"] = str(sel.reason)
             latest = sel.latest
             if latest is None:
+                reasons["diff_proven"] = str(sel.reason)
                 reasons["version_known"] = "no_usable_version"
                 return hb.ConfigFact(version_known=False, backup_present=False)
-            return hb.ConfigFact(
-                version_known=True,
-                version_id=latest.backup_id,
-                backup_present=latest.restorable_by_hand,
-            )
+            known_latest = {
+                "version_known": True,
+                "version_id": latest.backup_id,
+                "backup_present": latest.restorable_by_hand,
+            }
+            if sel.unchanged:
+                # the store proves no change inside the window
+                return hb.ConfigFact(
+                    **known_latest, diff_proven=False, changed_areas=frozenset()
+                )
+            reasons["diff_proven"] = str(sel.reason)
+            return hb.ConfigFact(**known_latest)
         base = {
             "version_known": True,
             "version_id": pair.plan_backup_id,
@@ -783,19 +879,23 @@ class ConfigLink:
         """``heal_policy`` ``config_change_24h`` for a target in ``areas``.
 
         True only when a stored comparison proves a change in one of
-        ``areas`` that happened within the last 24 h (its earlier bound is
-        inside the window). Never False: the store cannot prove that nothing
-        changed after its newest version. None otherwise (the policy counts
-        None as a change).
+        ``areas`` inside the window, and every compared change happened
+        within the 24 h before ``wall_at`` (the earlier bound of the first
+        one is inside) and not after it. Never False: the store cannot prove
+        that nothing changed after its newest version. None otherwise (the
+        policy counts None as a change). ``areas``: a list of area codes; a
+        str is no list (its letters are no areas).
         """
         fact, pair = self.config_fact, self.pair
         if fact.diff_proven is not True or fact.changed_areas is None or pair is None:
+            return None
+        if isinstance(areas, str):
             return None
         wanted = frozenset(a for a in areas if isinstance(a, str))
         if not wanted & fact.changed_areas:
             return None
         if (
-            pair.changed_after >= self.wall_at - CHANGE_WINDOW_S
+            pair.first_changed_after >= self.wall_at - CONFIG_CHANGE_WINDOW_S
             and pair.changed_at <= self.wall_at
         ):
             return True
@@ -825,10 +925,16 @@ class ConfigLink:
             else {
                 "base_id": pair.base_id,
                 "other_id": pair.other_id,
+                "first_changed_after": pair.first_changed_after,
                 "changed_after": pair.changed_after,
                 "changed_at": pair.changed_at,
                 "plan_backup_id": pair.plan_backup_id,
                 "plan_backup_restorable": pair.plan_backup_restorable,
+            },
+            "window": {
+                "end": self.selection.window_end,
+                "length_s": CONFIG_CHANGE_WINDOW_S,
+                "unchanged": self.selection.unchanged,
             },
             "preflight": {
                 "backups": self.backups.to_dict(),
@@ -866,7 +972,16 @@ def knowledge_from_versions(versions: Any, router_id: Any) -> ConfigKnowledge:
 
     Never raises: no store is ``core_not_running``, a store that is not
     loaded ``versions_not_loaded``, anything that breaks while reading
-    ``source_error``. Versions of another router are left out.
+    ``source_error``, and so are entries of which not one is readable (an id
+    and a time); an empty index is a known "nothing stored". Versions of
+    another router are left out.
+
+    Not the same as the preflight's own collector (``heal_preflight``
+    ``_backup_facts``) on an odd store, on purpose (a test pins each): a
+    duplicate id is kept once (the first), a version of another router and a
+    time outside ``0..TIME_MAX`` are left out, entries of which none is
+    readable are ``source_error``, and so is a store that answers None (the
+    preflight says ``versions_unknown``). On a clean store both agree.
     """
     if not isinstance(router_id, str) or not is_valid_id(router_id, ROUTER_ID_PREFIX):
         return ConfigKnowledge(router_id=None)
@@ -885,6 +1000,9 @@ def knowledge_from_versions(versions: Any, router_id: Any) -> ConfigKnowledge:
         _LOGGER.debug(
             "Self-Healing: version index not readable (%s)", type(err).__name__
         )
+        return ConfigKnowledge(router_id=router_id, reason="source_error")
+    if rows and not any(row.complete for row in rows):
+        # entries were there, but not one could be read: not "no backup"
         return ConfigKnowledge(router_id=router_id, reason="source_error")
     return ConfigKnowledge(router_id=router_id, rows=tuple(rows))
 
@@ -933,15 +1051,19 @@ def config_link_for(
 
 
 async def async_read_stored_diff(
-    api: Any, knowledge: ConfigKnowledge, *, before: Any = None
+    api: Any, knowledge: ConfigKnowledge, *, before: Any
 ) -> StoredDiff | None:
-    """Compare the two STORED versions of the last change (store only).
+    """Compare the two STORED versions of the window ending at ``before``.
 
-    ``api``: the core's ``ConfigurationApi``. Both references are backup
-    references, so the core reads the stored artifacts and never the live
-    configuration (no router call, no audit entry, nothing written).
-    None when the store shows no change (nothing to compare) or the inputs
-    are odd; a failed comparison is ``diff_failed``. Never raises (a
+    ``api``: the core's ``ConfigurationApi``. ``before``: the same window
+    end the sync call (:func:`config_link_for`) gets. Both references are
+    backup references, so the core reads the stored artifacts and never the
+    live configuration: no router call. What it may write: over a damaged
+    artifact the core's version store marks that version ``corrupt``, saves
+    its index once and fires ``configuration.integrity_failed`` - once per
+    damaged version (the version is then no longer compared); the result
+    here is ``diff_failed``. Nothing else is written. None when the store
+    shows no change to compare or the inputs are odd. Never raises (a
     cancellation still propagates).
     """
     try:
@@ -974,8 +1096,10 @@ async def async_config_link_for(
 
     For a later package to run off the decision path (for example when an
     incident opens) and to hand the :class:`StoredDiff` to
-    :func:`config_link_for`. Raises :class:`ConfigLinkError` only for its own
-    bad inputs; everything it reads becomes unknown on error.
+    :func:`config_link_for` with the same ``before``. The comparison reads
+    the store only; over a damaged artifact the core writes once (see
+    :func:`async_read_stored_diff`). Raises :class:`ConfigLinkError` only
+    for its own bad inputs; everything it reads becomes unknown on error.
     """
     knowledge = collect_config_knowledge(hass, router_id)
     diff: StoredDiff | None = None
@@ -988,7 +1112,8 @@ async def async_config_link_for(
         )
         api = None
     if api is not None:
-        diff = await async_read_stored_diff(api, knowledge, before=before)
+        end = wall_now if before is None else before
+        diff = await async_read_stored_diff(api, knowledge, before=end)
     return ConfigLink(knowledge=knowledge, wall_at=wall_now, before=before, diff=diff)
 
 
@@ -996,7 +1121,7 @@ __all__ = [
     "ACTOR_MODULE",
     "BACKUP_VALUES",
     "CAPTURED_VALUES",
-    "CHANGE_WINDOW_S",
+    "CONFIG_CHANGE_WINDOW_S",
     "LINK_VERSION",
     "REASONS",
     "REASON_TEXT_DE",
