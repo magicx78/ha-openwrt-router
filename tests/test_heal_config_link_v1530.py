@@ -1484,3 +1484,123 @@ def test_no_router_module_is_imported_at_module_level() -> None:
 def test_wall_clock_after_restore_window_constant() -> None:
     # the window the policy means: 24 h, exclusive of anything older
     assert timedelta(seconds=hcl.CHANGE_WINDOW_S) == timedelta(hours=24)
+
+
+# ---------------------------------------------------------------------------
+# Found by the mutation loop (each test kills one loosening)
+# ---------------------------------------------------------------------------
+
+
+def test_a_code_carrying_an_address_is_unknown() -> None:
+    for odd in ("v10.0.0.1", "ma00:11:22:33:44:55", "x::1"):
+        row = hcl.VersionRow(status=odd, validation=odd)
+        assert (row.status, row.validation) == ("unknown", "unknown")
+    assert hcl.VersionRow(status="ok.v1").status == "ok.v1"
+
+
+def test_stored_diff_reason_outside_the_set_is_unreadable() -> None:
+    sd = hcl.StoredDiff(base_id=bid(1), other_id=bid(2), reason="no_idea")
+    assert (sd.proven, sd.reason) == (None, "diff_unreadable")
+
+
+def test_a_live_reference_never_counts_even_with_a_backup_id() -> None:
+    odd = SimpleNamespace(
+        base=ConfigRef.backup(bid(1)),
+        other=SimpleNamespace(router_id=RID, backup_id=bid(2)),
+        changes=(),
+        truncated=False,
+    )
+    assert hcl.stored_diff_from(odd, bid(1), bid(2)).reason == "diff_other_versions"
+
+
+def test_latest_is_a_usable_version_only() -> None:
+    lk = link(knowledge(rec(1, T0, 1, status=VersionStatus.FAILED)))
+    assert lk.config_fact == pb.ConfigFact(version_known=False, backup_present=False)
+    assert lk.selection.latest is None
+
+
+def test_a_forced_diff_is_validated_again_by_the_link() -> None:
+    k = knowledge(rec(1, T0, 1), rec(2, T0 + 100, 2))
+    sd = hcl.StoredDiff(base_id=bid(1), other_id=bid(2), proven=True, areas={"dhcp"})
+    object.__setattr__(sd, "areas", frozenset({"moon"}))
+    lk = link(k, diff=sd)
+    assert lk.config_fact.diff_proven is None
+    assert lk.reasons["diff_proven"] == "diff_unreadable"
+
+
+def test_config_change_24h_skips_odd_area_items() -> None:
+    lk = changed_link()
+    assert lk.config_change_24h([["dhcp"], 5, "dhcp"]) is True  # type: ignore[list-item]
+
+
+def test_checksum_needs_a_full_sha256() -> None:
+    for sha in ("abc", 5, "a" * 63):
+        r = rec(1, T0, 1)
+        r.sha256 = sha
+        assert (
+            hcl.knowledge_from_versions(Versions(r), RID).rows[0].has_checksum is False
+        )
+
+
+def _fake_core(monkeypatch: pytest.MonkeyPatch, **attrs: Any) -> SimpleNamespace:
+    from custom_components.openwrt_router import enterprise_core
+
+    core = SimpleNamespace(**{"loaded": True, "closed": False, **attrs})
+    monkeypatch.setattr(enterprise_core, "async_get_core", lambda hass: core)
+    return core
+
+
+def test_a_closed_or_unloaded_core_is_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = _fake_core(monkeypatch, versions=Versions(rec(1, T0, 1)))
+    assert hcl.collect_config_knowledge(object(), RID).readable is True
+    for change in ({"closed": True}, {"loaded": False}):
+        for name, value in change.items():
+            setattr(core, name, value)
+        assert hcl.collect_config_knowledge(object(), RID).reason == "core_not_running"
+        core.loaded, core.closed = True, False
+
+
+async def test_async_link_reads_the_pair_before_the_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = Api(diff_of(bid(1), bid(2), ("modified", "dhcp", "low")))
+    _fake_core(
+        monkeypatch,
+        versions=Versions(rec(1, T0, 1), rec(2, T0 + 100, 2), rec(3, T0 + 200, 3)),
+        manager=SimpleNamespace(api=lambda version: api),
+    )
+    lk = await hcl.async_config_link_for(
+        object(), RID, wall_now=T0 + 300, before=T0 + 150
+    )
+    assert [(b.backup_id, o.backup_id) for b, o, _a in api.calls] == [(bid(1), bid(2))]
+    assert lk.config_fact.diff_proven is True
+    assert lk.config_fact.changed_at == T0 + 100
+
+
+def test_plan_lists_every_changed_area_and_the_relevant_ones() -> None:
+    k = knowledge(rec(1, T_START - 7200, 1), rec(2, T_START - 600, 2))
+    sd = hcl.stored_diff_from(
+        diff_of(
+            bid(1), bid(2), ("modified", "dhcp", "low"), ("added", "firewall", "high")
+        ),
+        bid(1),
+        bid(2),
+    )
+    lk = link(k, wall=T_START + 60, before=T_START, diff=sd)
+    f = pb.assess(incident(service="odhcpd"), dhcp_ev(config=lk.config_fact)).finding
+    assert f is not None and f.plan is not None
+    assert f.plan.changed_areas == ("dhcp", "firewall")
+    assert f.plan.relevant_areas == ("dhcp",)
+
+
+def test_rows_are_ordered_by_time_not_by_id() -> None:
+    k = knowledge(rec(9, T0, 1), rec(1, T0 + 5, 2), rec(5, T0 + 5, 3))
+    assert [r.backup_id for r in k.rows] == [bid(9), bid(1), bid(5)]
+    rows = [
+        hcl.VersionRow(backup_id=bid(hcl.ROWS_MAX + 5 - i), created_at=T0 + i)
+        for i in range(hcl.ROWS_MAX + 5)
+    ]
+    kept = hcl.ConfigKnowledge(router_id=RID, rows=rows).rows
+    assert kept[0].created_at == T0 + 5 and kept[-1].created_at == T0 + hcl.ROWS_MAX + 4
