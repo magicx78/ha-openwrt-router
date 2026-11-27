@@ -1465,6 +1465,16 @@ TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
             "Eine Konfigurationsänderung ist belegt, die Messung legt die Ursache "
             "aber außerhalb des Routers; das ursprüngliche Playbook bleibt."
         ),
+        "drift_in_service_area": (
+            "Eine belegte Konfigurationsänderung betrifft den Bereich dieses "
+            "Dienstes; ein Neustart würde die gespeicherte, nicht geprüfte "
+            "Änderung übernehmen."
+        ),
+        "wont_restart_unreviewed_change": (
+            "Kein Neustart: er würde eine gespeicherte, nicht geprüfte "
+            "Konfigurationsänderung dieses Dienstes übernehmen; zuerst den "
+            "Vergleich prüfen."
+        ),
         "drift_hint_outside_signal": (
             "Eine Konfigurationsänderung ist belegt, es gibt aber auch einen "
             "Hinweis auf eine Ursache außerhalb des Routers; das ursprüngliche "
@@ -1912,9 +1922,11 @@ def match(incident: IncidentInput, evidence: Evidence) -> Match:
        UNSUPPORTED with the reason;
     8. a diff-proven configuration change in an area the incident touches,
        seen before the incident started, on a router Playbook F fits:
-       Playbook F instead (the drift overlay; :func:`assess` hands the case
-       back when the original playbook measures the cause outside). A proven
-       change with an unknown or later time is a hint only.
+       Playbook F instead (the drift overlay) - unless the original playbook
+       sees an outside signal (:func:`outside_signals`): then it keeps the
+       case and the change is a hint (reason ``drift_hint_outside_signal``;
+       :func:`assess` returns exactly this match). A proven change with an
+       unknown or later time is a hint only.
     """
     if type(incident) is not IncidentInput or type(evidence) is not Evidence:
         raise PlaybookError("invalid input")
@@ -1951,6 +1963,15 @@ def match(incident: IncidentInput, evidence: Evidence) -> Match:
         and _drift_before_incident(inc, evidence)
         and _support(PLAYBOOKS["drift_recovery"], evidence)[0] is None
     ):
+        if outside_signal(found, inc, evidence):
+            # the original playbook sees a sign of an outside cause: it keeps
+            # the case, the change is a hint (the same rule in assess)
+            return Match(
+                status=MatchStatus.MATCHED,
+                playbook_id=found,
+                reason="drift_hint_outside_signal",
+                drift_hint=True,
+            )
         return Match(
             status=MatchStatus.MATCHED,
             playbook_id="drift_recovery",
@@ -2361,48 +2382,99 @@ def _type_playbook(inc: IncidentInput) -> str | None:
     return _TYPE_PLAYBOOK.get(inc.incident_type or "")
 
 
-def outside_signal(playbook_id: str, inc: IncidentInput, ev: Evidence) -> bool:
-    """Any sign, named or measured, that the fault may lie outside the router.
+# Outside signals: evidence that the fault may lie outside the router. Defined
+# ONCE as a shared set every playbook consults (decided by the master on PR
+# #79, second review), plus a few playbook-specific ones. A playbook may only
+# ignore a shared signal through an entry in SIGNAL_EXCEPTIONS (named and
+# documented; today there is none).
+SHARED_OUTSIDE_SIGNALS: Final = (
+    "sig_wan_down",  # Evidence.wan_up is False
+    "sig_wan_link_down",  # WanFact.link_up is False
+    "sig_wan_interface_down",  # WanFact.interface_up is False
+    "sig_wan_no_address",  # WanFact.has_address is False
+    "sig_upstream_router_down",  # InterfaceFact.upstream_router_down is True
+    "sig_uplink_port_down",  # InterfaceFact role "uplink" with link_up False
+    "sig_chain_stage_not_healthy",  # gateway/wan/internet failed or degraded
+    "sig_upstream_resolver_failing",  # DnsFact.upstream_ok is False
+)
+SPECIFIC_OUTSIDE_SIGNALS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        # dnsmasq "no servers" / "query limit" lines (net_rules: cause
+        # dns_resolution, a hypothesis): an upstream or load problem as much
+        # as a local one, so never proof of an inside fault
+        "dns_recovery": ("sig_dns_log_hint",),
+        "dhcp_recovery": ("sig_address_conflict",),
+        "radio_recovery": ("sig_interference",),
+        "interface_recovery": (),
+        "wan_recovery": (),
+        "drift_recovery": (),  # F takes the signals of the playbook it replaces
+        "client_recovery": (),
+    }
+)
+SIGNAL_EXCEPTIONS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {pid: frozenset() for pid in PLAYBOOK_IDS}
+)
+_NOT_HEALTHY: Final = ("failed", "degraded")
+_OUTSIDE_CHAIN_STAGES: Final = ("gateway", "wan", "internet")
+
+
+def _shared_signals(ev: Evidence) -> frozenset[str]:
+    wan, itf = ev.wan, ev.interface
+    found = {
+        "sig_wan_down": ev.wan_up is False,
+        "sig_wan_link_down": wan.link_up is False,
+        "sig_wan_interface_down": wan.interface_up is False,
+        "sig_wan_no_address": wan.has_address is False,
+        "sig_upstream_router_down": itf.upstream_router_down is True,
+        "sig_uplink_port_down": itf.role == "uplink" and itf.link_up is False,
+        "sig_chain_stage_not_healthy": any(
+            ev.chain.get(s) in _NOT_HEALTHY for s in _OUTSIDE_CHAIN_STAGES
+        ),
+        "sig_upstream_resolver_failing": ev.dns.upstream_ok is False,
+    }
+    return frozenset(name for name, on in found.items() if on)
+
+
+def _specific_signals(
+    playbook_id: str, inc: IncidentInput, ev: Evidence
+) -> frozenset[str]:
+    found = {
+        "sig_dns_log_hint": ev.dns.log_hint is True,
+        "sig_address_conflict": inc.incident_type == "dhcp_conflict",
+        "sig_interference": ev.radio.interference is True,
+        "sig_named_outside_cause": inc.cause is not None
+        and inc.cause in OUTSIDE_CAUSES[playbook_id],
+    }
+    wanted = (*SPECIFIC_OUTSIDE_SIGNALS[playbook_id], "sig_named_outside_cause")
+    return frozenset(name for name in wanted if found[name])
+
+
+def outside_signals(
+    playbook_id: str, inc: IncidentInput, ev: Evidence
+) -> frozenset[str]:
+    """Every sign, named or measured, that the fault may lie outside the router.
 
     A signal is not a verdict: an outside and an inside signal together give
     None, never False. ``cause_outside_router`` False never stands next to a
     signal (decided by the master on PR #79), and Playbook F never takes a
-    case over from a playbook that saw one. Per playbook: a cause from
-    :data:`OUTSIDE_CAUSES`; A: the WAN down, a gateway/WAN/internet stage
-    failed or degraded, the upstream resolver failing; B: an address
-    conflict; C: interference measured; D: the upstream router down; E: the
-    WAN link down, the WAN interface down, no address, or a gateway/internet
-    stage failed or degraded (each can be the provider's side); F: the
-    signals of the playbook of the incident's type; G: the named cause only.
+    case over from a playbook that saw one. The shared set
+    (:data:`SHARED_OUTSIDE_SIGNALS`, minus :data:`SIGNAL_EXCEPTIONS`) plus
+    the playbook's own (:data:`SPECIFIC_OUTSIDE_SIGNALS`, and a cause from
+    :data:`OUTSIDE_CAUSES`); F uses those of the playbook of the incident's
+    type.
     """
-    if playbook_id == "drift_recovery":
+    pid = playbook_id
+    if pid == "drift_recovery":
         orig = _type_playbook(inc)
-        return (
-            orig is not None and orig != playbook_id and outside_signal(orig, inc, ev)
-        )
-    if inc.cause is not None and inc.cause in OUTSIDE_CAUSES[playbook_id]:
-        return True
-    if playbook_id == "dns_recovery":
-        return (
-            ev.wan_up is False
-            or any(ev.chain.get(s) in _NOT_HEALTHY for s in _OUTSIDE_CHAIN_STAGES)
-            or ev.dns.upstream_ok is False
-        )
-    if playbook_id == "dhcp_recovery":
-        return inc.incident_type == "dhcp_conflict"
-    if playbook_id == "radio_recovery":
-        return ev.radio.interference is True
-    if playbook_id == "interface_recovery":
-        return ev.interface.upstream_router_down is True
-    if playbook_id == "wan_recovery":
-        wan = ev.wan
-        return (
-            wan.link_up is False
-            or wan.interface_up is False
-            or wan.has_address is False
-            or any(ev.chain.get(s) in _NOT_HEALTHY for s in ("gateway", "internet"))
-        )
-    return False
+        if orig is not None and orig != pid:
+            pid = orig
+    shared = _shared_signals(ev) - SIGNAL_EXCEPTIONS[playbook_id]
+    return shared | _specific_signals(pid, inc, ev)
+
+
+def outside_signal(playbook_id: str, inc: IncidentInput, ev: Evidence) -> bool:
+    """Whether :func:`outside_signals` found anything."""
+    return bool(outside_signals(playbook_id, inc, ev))
 
 
 def _settle(
@@ -2422,7 +2494,9 @@ def _settle(
     return raw
 
 
-def _may_restart(run: _Run, svc: ServiceFact, outside: bool | None) -> bool:
+def _may_restart(
+    run: _Run, svc: ServiceFact, outside: bool | None, service: str
+) -> bool:
     """Every fact a service-restart proposal needs is known and favourable.
 
     Enabled and down or in an observed loop; the cause on this router; not a
@@ -2438,6 +2512,19 @@ def _may_restart(run: _Run, svc: ServiceFact, outside: bool | None) -> bool:
         or inc.observed_families < 1
     ):
         return False
+    cfg = run.ev.config
+    if (
+        cfg.diff_proven is True
+        and cfg.changed_areas is not None
+        and cfg.changed_areas & _SERVICE_AREAS.get(service, frozenset())
+    ):
+        # a restart would apply a saved, unreviewed change of this service
+        # (decided by the master on PR #79, second review)
+        run.why("drift_in_service_area")
+        run.wont("wont_restart_unreviewed_change")
+        run.rec("rec_review_diff")
+        run.context["service_config_unapplied"] = None
+        return False
     if run.ev.capabilities.get("data.services") is not True:
         run.why("services_capability_unknown")
         run.wont("wont_restart_capability_unknown")
@@ -2446,10 +2533,6 @@ def _may_restart(run: _Run, svc: ServiceFact, outside: bool | None) -> bool:
 
 
 # --- A: DNS -----------------------------------------------------------------
-
-
-_OUTSIDE_CHAIN_STAGES: Final = ("gateway", "wan", "internet")
-_NOT_HEALTHY: Final = ("failed", "degraded")
 
 
 def dns_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
@@ -2539,7 +2622,7 @@ def _analyze_dns(run: _Run) -> PlaybookFinding:
             target_fact=target,
             outside=True,
         )
-    if _may_restart(run, svc, outside):
+    if _may_restart(run, svc, outside, "dnsmasq"):
         proposal = run.propose("service.restart", "dnsmasq")
         run.rec("rec_restart_dnsmasq_with_approval")
         return run.finding(
@@ -2724,7 +2807,7 @@ def _analyze_dhcp(run: _Run) -> PlaybookFinding:
             target_fact=_target_fact(svc, None),
             outside=outside,
         )
-    if _may_restart(run, svc, outside):
+    if _may_restart(run, svc, outside, daemon):
         proposal = run.propose("service.restart", daemon)
         run.rec("rec_restart_dhcp_daemon_with_approval")
         return run.finding(
@@ -3082,10 +3165,36 @@ def _analyze_wan(run: _Run) -> PlaybookFinding:
 # --- F: drift ---------------------------------------------------------------
 
 
+# The area a cause on the router lives in (Playbook F, second review of PR
+# #79): F says False only when the named cause maps to an area that actually
+# changed. Keys are exactly F's INSIDE_CAUSES.
+DRIFT_CAUSE_AREAS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "dhcp_server": frozenset({"dhcp"}),
+        "radio_restart": frozenset({"wlan"}),
+        "vlan": frozenset({"vlan"}),
+        "uplink_config": frozenset({"interface", "wlan"}),
+    }
+)
+# Playbooks that never say False: F never says it for their incidents either.
+_NEVER_FALSE: Final = frozenset({"interface_recovery", "wan_recovery"})
+
+
 def drift_cause_outside(inc: IncidentInput, ev: Evidence) -> bool | None:
-    """False when a diff proves a change on this router in the area the
-    incident touches (the cause is on the router); otherwise None."""
-    raw = False if _drift_in_area(inc, ev) else None
+    """False when a diff proves a change in the area the incident touches AND
+    the named cause maps (:data:`DRIFT_CAUSE_AREAS`) to an area that changed;
+    never for an incident of D or E; otherwise None."""
+    raw: bool | None = None
+    changed = ev.config.changed_areas
+    areas = DRIFT_CAUSE_AREAS.get(inc.cause or "")
+    if (
+        _drift_in_area(inc, ev)
+        and _type_playbook(inc) not in _NEVER_FALSE
+        and areas is not None
+        and changed is not None
+        and areas & changed
+    ):
+        raw = False
     return _settle("drift_recovery", inc, ev, raw)
 
 
@@ -3257,33 +3366,20 @@ def assess(incident: IncidentInput, evidence: Evidence) -> Assessment:
     run = _Run(pb=PLAYBOOKS[m.playbook_id], inc=incident, ev=evidence)
     if m.status is MatchStatus.UNSUPPORTED:
         return Assessment(match=m, finding=_unsupported(run, m))
-    if (
-        m.drift_overlay
-        and m.original_playbook_id is not None
-        and outside_signal(m.original_playbook_id, incident, evidence)
-    ):
-        # the original playbook saw a sign of an outside cause: the drift is
-        # only a hint and the original finding, with its value, stays
-        # (decided by the master on PR #79; measured True or a signal only)
-        orig_id = m.original_playbook_id
-        probe = _ANALYZERS[orig_id](
-            _Run(pb=PLAYBOOKS[orig_id], inc=incident, ev=evidence)
-        )
-        code = (
+    if m.reason == "drift_hint_outside_signal":
+        # match() handed the case back: the original playbook saw a sign of an
+        # outside cause, the drift is only a hint and the original finding,
+        # with its value, stays (decided by the master on PR #79). The reason
+        # says whether the playbook measured the cause outside or only saw a
+        # signal.
+        probe = _ANALYZERS[m.playbook_id](_Run(pb=run.pb, inc=incident, ev=evidence))
+        run.why(
             "drift_hint_outside_measured"
             if probe.incident_facts.cause_outside_router is True
             else "drift_hint_outside_signal"
         )
-        run = _Run(pb=PLAYBOOKS[orig_id], inc=incident, ev=evidence)
-        run.why(code)
         run.rec("rec_review_diff")
-        finding = _ANALYZERS[orig_id](run)
-        m = Match(
-            status=MatchStatus.MATCHED,
-            playbook_id=orig_id,
-            reason=code,
-            drift_hint=True,
-        )
+        finding = _ANALYZERS[m.playbook_id](run)
     elif m.drift_overlay:
         run.why("drift_overlay")
         finding = _ANALYZERS[m.playbook_id](run)
@@ -3343,11 +3439,15 @@ def to_decision_input(
         raise PlaybookError("invalid finding")
     if finding.proposal is None:
         return None
+    merged = merge_context(context, finding.context_facts)
+    if "drift_in_service_area" in finding.reasons:
+        # an unreviewed change of the service is saved: never "applied"
+        merged = dataclasses.replace(merged, service_config_unapplied=None)
     return hp.DecisionInput(
         action_type=finding.proposal.action_type,
         params=dict(finding.proposal.params),
         incident=finding.incident_facts,
-        context=merge_context(context, finding.context_facts),
+        context=merged,
         prior_failed_attempts=prior_failed_attempts,
         config_change_24h=config_change_24h,
     )

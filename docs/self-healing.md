@@ -926,9 +926,11 @@ gilt:
    beide als Zeitstempel übergeben, keine Uhr im Modul), (c) F auf diesem Router passt und
    (d) das ursprüngliche Playbook **keinen Hinweis** auf eine Ursache außerhalb gesehen hat
    (`outside_signal`, siehe 8.3; zweite Review-Runde, entschieden vom Koordinator: nicht nur
-   ein gemessenes True sperrt, sondern jeder Hinweis). Das prüft `assess`: sieht das
-   ursprüngliche Playbook einen Hinweis, bleibt sein Befund samt Wert, die Änderung ist nur
-   ein Hinweis – Grund `drift_hint_outside_measured`, wenn es True gemessen hat, sonst
+   ein gemessenes True sperrt, sondern jeder Hinweis). Das prüft schon `match` (entschieden,
+   dritte Runde: `match` und `assess` geben dasselbe Ergebnis, `assess` übernimmt das von
+   `match` unverändert): sieht das ursprüngliche Playbook einen Hinweis, behält es den Fall
+   (Grund `drift_hint_outside_signal`), sein Befund samt Wert bleibt, die Änderung ist nur ein
+   Hinweis; im Befund steht `drift_hint_outside_measured`, wenn es True gemessen hat, sonst
    `drift_hint_outside_signal` (etwa WAN aus **und** lokaler Resolver scheitert: A sagt None,
    F übernimmt nicht); Empfehlung `rec_review_diff`. Ist
    die Zeit unbekannt oder liegt sie nicht davor, bleibt das ursprüngliche Playbook, die
@@ -973,16 +975,48 @@ None. Die Liste ist im Test festgeschrieben:
 `dns_resolution` (aus dnsmasq-Logzeilen, nur Hypothese) steht bei A nicht auf der Liste
 (entschieden: eine Logzeile ist kein Beleg für „auf diesem Router“).
 
-**Kein False neben einem Hinweis nach außen (zweite Review-Runde).** `outside_signal(playbook,
-incident, evidence)` sammelt jeden genannten oder gemessenen Hinweis, dass der Fehler außerhalb
-liegen kann; ein Hinweis ist kein Urteil (äußerer und innerer Hinweis zusammen ergeben None).
-`_settle` macht aus False ein None, sobald ein Hinweis da ist; so steht
-`cause_outside_router` False bei **keinem** der sieben Playbooks neben einem Hinweis. Hinweise:
-jede Ursache aus `OUTSIDE_CAUSES`; A: WAN aus, Stufe Gateway/WAN/Internet gescheitert oder
-„degraded“, vorgelagerter Resolver scheitert; B: Adresskonflikt; C: Interferenz gemessen;
-D: vorgelagerter Router aus; E: WAN-Leitung unten, WAN-Schnittstelle unten, keine Adresse,
-Stufe Gateway/Internet gescheitert oder „degraded“ (alles kann auch beim Anbieter liegen);
-F: die Hinweise des Playbooks der Vorfallart; G: nur die genannte Ursache. `to_decision_input`
+**Kein False neben einem Hinweis nach außen (zweite und dritte Review-Runde).**
+`outside_signals(playbook, incident, evidence)` sammelt jeden genannten oder gemessenen
+Hinweis, dass der Fehler außerhalb liegen kann; ein Hinweis ist kein Urteil (äußerer und
+innerer Hinweis zusammen ergeben None). `_settle` macht aus False ein None, sobald ein Hinweis
+da ist; so steht `cause_outside_router` False bei **keinem** der sieben Playbooks neben einem
+Hinweis. Die Hinweise sind **einmal** als gemeinsame Menge festgelegt
+(`SHARED_OUTSIDE_SIGNALS`, entschieden vom Koordinator), die **jedes** Playbook prüft; ein
+Playbook darf einen gemeinsamen Hinweis nur über einen benannten Eintrag in
+`SIGNAL_EXCEPTIONS` übergehen – heute gibt es keinen:
+
+| Hinweis | Feld |
+|---|---|
+| `sig_wan_down` | `Evidence.wan_up` False |
+| `sig_wan_link_down` | `WanFact.link_up` False |
+| `sig_wan_interface_down` | `WanFact.interface_up` False |
+| `sig_wan_no_address` | `WanFact.has_address` False |
+| `sig_upstream_router_down` | `InterfaceFact.upstream_router_down` True |
+| `sig_uplink_port_down` | `InterfaceFact.role` `uplink` und `link_up` False |
+| `sig_chain_stage_not_healthy` | Stufe Gateway, WAN oder Internet `failed` oder `degraded` |
+| `sig_upstream_resolver_failing` | `DnsFact.upstream_ok` False |
+
+Dazu je Playbook (`SPECIFIC_OUTSIDE_SIGNALS`): eine genannte Ursache aus `OUTSIDE_CAUSES`;
+A `sig_dns_log_hint` (`DnsFact.log_hint` True); B `sig_address_conflict` (Vorfall
+`dhcp_conflict`); C `sig_interference` (gemessen); F nimmt die Hinweise des Playbooks der
+Vorfallart. **`log_hint`** sind die dnsmasq-Zeilen „no servers“ und „query limit“
+(`net_rules`: Ursache `dns_resolution`, nur Hypothese): „keine vorgelagerten Server“ kann
+der Upstream oder die Konfiguration sein, „Anfragegrenze“ Last; ein Beleg für einen Fehler
+**auf** dem Router ist keins davon, also gilt es als unklar (None, kein Vorschlag;
+entschieden vom Koordinator, strenge Lesart). Bewusst **keine** Hinweise für A und B
+(entschieden): Interferenz am Funk, die Client-Auffälligkeit `dhcp_dns_anomaly` (sie zeigt
+eher auf DHCP/DNS des Routers) und die dnsmasq-Zeilen bei B (sie betreffen DNS, nicht DHCP).
+
+**Gespeicherte Änderung des Dienstes (dritte Runde, entschieden vom Koordinator).** Belegt
+ein Vergleich eine Änderung in einem Bereich des Dienstes (dnsmasq: `dns`, `dhcp`,
+`services`; odhcpd: `dhcp`, `services`), gleich ob ihre Zeit bekannt ist oder danach liegt,
+schlägt A oder B keinen Neustart vor (`drift_in_service_area`,
+`wont_restart_unreviewed_change`, `rec_review_diff`): ein Neustart würde die gespeicherte,
+nicht geprüfte Änderung übernehmen. Der Befund trägt `service_config_unapplied` als
+unbekannt, und `to_decision_input` gibt in diesem Fall nie `service_config_unapplied=False`
+weiter, auch wenn der Kontext False sagt.
+
+`to_decision_input`
 macht aus einem Vorschlag den `DecisionInput` der Richtlinie; Fakten, die das Playbook
 gelesen hat, ergänzen den `RiskContext` nur dort, wo er nichts weiß – widersprechen sie
 ihm, wird das Feld unbekannt. Ein Befund ohne Vorschlag ergibt **keinen** `DecisionInput`.
@@ -1075,11 +1109,11 @@ Paketen); kein Text setzt Werte ein, Router-Texte erscheinen nie darin.
 
 | | |
 |---|---|
-| Erkennung heute | **nicht vorhanden**: Network Intelligence meldet keine Konfigurationsabweichung als Vorfall (`drift_incident`). F greift als **Überlagerung** (Regeln in 8.2, Punkt 7): ein Vergleich des Configuration Managers belegt eine Änderung im Bereich des Vorfalls (DHCP, DNS, WLAN, VLAN, Schnittstelle, Routing, Dienste), ihre Zeit ist bekannt und liegt vor dem Vorfall, und das ursprüngliche Playbook hat die Ursache nicht als außerhalb gemessen. Nur zeitliche Nähe einer Änderung genügt nicht; unbekannte Zeit → nur Hinweis |
+| Erkennung heute | **nicht vorhanden**: Network Intelligence meldet keine Konfigurationsabweichung als Vorfall (`drift_incident`). F greift als **Überlagerung** (Regeln in 8.2, Punkt 7): ein Vergleich des Configuration Managers belegt eine Änderung im Bereich des Vorfalls (DHCP, DNS, WLAN, VLAN, Schnittstelle, Routing, Dienste), ihre Zeit ist bekannt und liegt vor dem Vorfall, und das ursprüngliche Playbook hat **keinen Hinweis** auf eine Ursache außerhalb gesehen (nicht nur: nichts gemessen; 8.2 Punkt 7, Hinweise in 8.3). Nur zeitliche Nähe einer Änderung genügt nicht; unbekannte Zeit → nur Hinweis |
 | Rollen, Fähigkeit | Gateway, Access Point; `config.capture`, `config.diff` |
 | Schritte | letzte bekannte Version · Vergleich · relevante Änderungen · Auswirkung · Kompatibilität der Wiederherstellung (Probelauf; es gibt keinen Ausführer) · Rücksetz-Plan · Freigabe (C2) · gesicherte Wiederherstellung (G) · Prüfung (H) |
 | Darf vorschlagen | **nichts**. Ergebnis ist ein Plan: Version, relevante und kritische Bereiche, Risiko der Änderung, Prüfergebnis, Sicherung vorhanden, manuelle Schritte (Vergleich prüfen, Probelauf, ausdrückliche Freigabe, von Hand wiederherstellen, danach prüfen); der Plan führt nie aus und verlangt immer eine ausdrückliche Freigabe (eine andere Einstellung lehnt der Typ ab). Die tiefe Anbindung an den Configuration Manager ist Paket G |
-| Ursache außerhalb | **False**, wenn ein Vergleich eine Änderung im Bereich belegt und keine Ursache außer `dhcp_server`, `radio_restart`, `vlan`, `uplink_config` genannt ist; sonst **None**. Hat das ursprüngliche Playbook True gemessen, greift F gar nicht (8.2) |
+| Ursache außerhalb | **False** nur, wenn ein Vergleich eine Änderung im Bereich belegt **und** die genannte Ursache auf einen Bereich zeigt, der sich wirklich geändert hat (`DRIFT_CAUSE_AREAS`: `dhcp_server` → DHCP, `radio_restart` → WLAN, `vlan` → VLAN, `uplink_config` → Schnittstelle oder WLAN); ohne genannte Ursache, bei einer anderen Ursache und für Vorfälle von D und E (`wan_down`, Ports) nie: **None**. Sieht das ursprüngliche Playbook einen Hinweis nach außen, greift F gar nicht (8.2) |
 | Nie | nie eine automatische Wiederherstellung (`config.restore` ist Probelauf, gesperrt); nie eine automatische Rücksetzung kritischer Konfiguration (VLAN, Schnittstelle, Management-IP, Firewall, Routing, SSH, oder Änderungsrisiko hoch/kritisch) |
 | Abbruch | Sicherung passt nicht, keine Sicherung, kritischer Bereich, sowie die allgemeinen Abbrüche |
 | Eskalation | Wiederherstellen nur von Hand durch den Administrator; Abweichung bestätigen oder von Hand zurücksetzen |
@@ -1726,7 +1760,7 @@ Hold.
   (`_Run.propose` setzt die Konstante, M30) und die Gegenprüfung in `assess` (M25) erreicht
   **kein Test**: jeder Weg dorthin übergibt schon die Konstante. Sie sind Absicherung in der
   Tiefe, keine geprüfte Eigenschaft.
-- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 216 Tests):
+- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 313 Tests):
   Regressionstests aus den Proben des Reviews, jeder scheiterte auf dem Stand b32a393 (geprüft
   in einer Kopie mit dem alten Modul und zwei wirkungslosen Feldern `started_at`/`changed_at`,
   69 Tests rot): Erlaubnisliste `INSIDE_CAUSES` festgeschrieben; jede bekannte Ursache außer
@@ -1744,18 +1778,29 @@ Hold.
   den gleichverteilten und einen nahe am Vorschlag, der höchstens drei Fakten feindlich zieht
   (genannte Ursachen mit gestörtem Dienst, Belegung um 90 %, `temporal_only` False bei nur
   `correlation`, Neustart-Zähler allein, „degraded“, nur WAN oben, Fähigkeit und Drift-Zeit
-  unbekannt); für jeden Vorschlag prüft er die nötigen Fakten aus den Eingaben, nicht aus dem
-  Code. Gegen das alte Modul fand er 1807 Vorschläge, davon 201 mit Ursache außerhalb der
+  unbekannt); für jeden Vorschlag prüft er die nötigen Fakten aus den Eingaben. Gegen das alte Modul fand er 1807 Vorschläge, davon 201 mit Ursache außerhalb der
   Liste (P1-2), 42 ohne gemessenen Upstream (P1-2), 15 bei vollem oder unbekanntem Bereich
   (P1-1) und 92 ohne beobachtete Familie (P1-5); gegen das neue keinen Verstoß (1400
   Vorschläge). Dritte Ergänzung (Entscheidung des Koordinators zur Drift): für **jeden**
-  Befund beider Generatoren prüft der Test aus den Eingaben, dass False nie neben einem
-  Hinweis nach außen steht und True immer einer ist (bei F gegen das ersetzte Playbook);
-  benannte Tests: WAN aus plus lokaler Resolver scheitert plus belegte Änderung bleibt bei A
-  (vorher: F mit False), scheiternder vorgelagerter Resolver bei gesunder Internet-Stufe
-  (vorher: False und Vorschlag), Hinweise je Playbook, False-Fall jedes Playbooks plus
-  Änderung plus Hinweis. Gegen den Stand f9f514e: 2 der Zufallsbefunde mit False neben
-  einem Hinweis, gegen den neuen keiner.
+  Befund beider Generatoren prüft der Test, dass False nie neben einem Hinweis nach außen
+  steht. **Korrektur (dritte Runde):** im Stand e59f754 war das Orakel dafür eine Kopie von
+  `outside_signal` und konnte einen fehlenden Hinweis nicht finden. Jetzt ist es eine
+  eigene, wörtliche Liste von `Evidence`-Feldern (`OUTSIDE_TROUBLE` im Test: WAN-Fakten,
+  vorgelagerter Router, Uplink-Port, Stufen Gateway/WAN/Internet, vorgelagerter Resolver;
+  dazu je Playbook `log_hint`, Konflikt, Interferenz) plus jede genannte Ursache außerhalb
+  der wörtlich festgeschriebenen Liste `INSIDE_OK`. Was es belegt: kein Befund der
+  Zufallsfälle sagt False neben einem dieser Felder. Was es **nicht** belegt: dass die Liste
+  vollständig ist – ein Feld, das in beiden fehlt, findet es nicht. Benannte Tests: jeder
+  gemeinsame Hinweis in jedem Playbook, das False sagen kann (A, B, C, F, G); die Lücken des
+  Reviews (vorgelagerter Router aus, Uplink-Port unten, WAN ohne Adresse, WAN-Leitung
+  unten) auf Gateway und AP ohne Vorschlag; die sauberen Fälle von A und B schlagen weiter
+  vor; `log_hint`; gespeicherte Änderung im Bereich des Dienstes; F nur mit dem Bereich der
+  Ursache; `match` gleich `assess` über 3000 Zufallsfälle; Zeitstempel (unendlich, weit in
+  der Zukunft, negativ, bool, Text) für `changed_at` **und** `started_at`. Gegen den Stand
+  e59f754 scheitern 72 Tests (die Festschreibungen nur, weil neue Namen fehlen); `fuzz3.py`
+  des Reviewers fand dort 15 341 Fälle „Freigabe nötig“ mit äußerem Hinweis, am neuen Stand
+  keinen in den vier Lücken-Kategorien (verbleibend: Interferenz, `dhcp_dns_anomaly` und die
+  dnsmasq-Zeilen bei B, bewusst keine Hinweise, siehe 8.3).
 - **Mutationsprüfung auf grünem Stand (zweite Runde):** zuerst 58 Änderungen – die 35 des Reviewers
   (M01–M35, auf den neuen Code übertragen, M15 getrennt nach Abhängigen und Management-Weg)
   und 22 für die neuen Regeln (N01–N22: Erlaubnisliste, „degraded“, Drift-Zeit und
@@ -1763,7 +1808,11 @@ Hold.
   D-Rollen, E nie False, Neustart-Zähler), dazu nach der Drift-Entscheidung drei weitere
   (N23 `_settle` ohne Hinweisprüfung, N24 scheiternder Upstream kein Hinweis, N25 F erbt
   die Hinweise nicht; N07 prüft jetzt die Hinweis-Sperre der Überlagerung): 61 Änderungen,
-  59 lassen mindestens einen Test scheitern, darunter
+  59 lassen mindestens einen Test scheitern. **Dritte Runde:** 79 Änderungen, dazu die vier
+  des Reviewers für Zeitstempel (N21a–c, N22) und je eine für jeden Hinweis (S01–S09), die
+  Ausnahmeliste (S10), die Übernahme der Hinweise durch F (S11), die gespeicherte Änderung
+  (S12, S13), die Bereiche von F (S14–S16) und die Übergabe in `match` (N07): 77 lassen
+  mindestens einen Test scheitern, darunter
   die Überlebenden des Reviews M09 (90 %), M15 (Abhängige und Management-Weg getrennt), M31
   (Anbieter-Störung nur mit Adresse) und M34 (Schwelle der Neustarts). Es überleben **M25**
   und **M30**: Absicherung in der Tiefe, die kein Test erreicht (siehe Korrektur oben).

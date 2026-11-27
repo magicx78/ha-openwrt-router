@@ -338,14 +338,21 @@ nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Absch
     Vorfall liegt und das ursprüngliche Playbook keinen Hinweis auf eine Ursache außerhalb
     gesehen hat (nicht nur kein gemessenes „außerhalb“); sonst bleibt es beim ursprünglichen
     Playbook, die Änderung ist ein Hinweis. „Ursache auf dem Router“ steht bei keinem
-    Playbook neben einem solchen Hinweis.
+    Playbook neben einem solchen Hinweis. Die Hinweise sind einmal als gemeinsame Menge
+    festgelegt (WAN-Leitung, -Schnittstelle, -Adresse, vorgelagerter Router, Uplink-Port,
+    Diagnosestufen, vorgelagerter Resolver), die jedes Playbook prüft; dazu die
+    dnsmasq-Zeilen „no servers“/„query limit“ bei A (unklar, kein Vorschlag).
+  - Kein Neustart-Vorschlag, wenn ein Vergleich eine gespeicherte Änderung im Bereich des
+    Dienstes belegt (der Neustart würde sie übernehmen). F sagt „auf dem Router“ nur, wenn
+    die genannte Ursache auf einen geänderten Bereich zeigt, und nie bei WAN- oder
+    Port-Vorfällen. `match` und `assess` geben bei Drift dasselbe Ergebnis.
   - C: keine Empfehlung „Funk von Hand neu starten“, wenn der Management-Weg darüber läuft
     oder das unbekannt ist oder der Funk nicht benannt ist; Texte sagen Unbekanntes als
     unbekannt. D: WAN-Schnittstellen und unbekannte Rollen gelten als kritisch. E sagt nie
     „auf dem Router“ (Leitung oben, Schnittstelle unten kann auch der Anbieter sein).
-  - Tests: 216 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
+  - Tests: 313 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
     Generator nahe am Vorschlag mit den feindlichen Werten des Reviews erweitert).
-    Mutationsprüfung auf grünem Stand: 61 Änderungen, 59 lassen einen Test scheitern; zwei
+    Mutationsprüfung auf grünem Stand: 79 Änderungen, 77 lassen einen Test scheitern; zwei
     (zweite Prüfung beim Bauen des Vorschlags, Gegenprüfung in `assess`) sind Absicherung in
     der Tiefe, die kein Test erreicht.
 
