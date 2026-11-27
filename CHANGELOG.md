@@ -4,6 +4,30 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+### Self-Healing, Paket B (Grundlage, noch nicht verdrahtet)
+
+Erster Baustein von Phase 7 „Self-Healing“: Datenmodell mit Zustandsmaschine und Speicher. Für
+Benutzer ändert sich nichts: Nichts davon wird geladen, es gibt keinen Router-Aufruf, keine
+Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/self-healing.md`.
+
+- `heal_model.py`: ein Datensatz je Reparaturversuch mit 17 Zuständen und **einer**
+  Übergangstabelle (31 Übergänge, je Übergang die erlaubten Akteure Engine, Administrator,
+  Wiederherstellung). Ein Übergang hält Zeitpunkt, Akteur und Grund im Verlauf fest; ein
+  unerlaubter wirft einen typisierten Fehler und ändert nichts. Kein Weg führt zweimal in die
+  Ausführung. Neustartregel: Eine unterbrochene Ausführung heißt „unbekannt, muss geprüft
+  werden“ und wird nie wiederholt; Freigaben verfallen. Schleifenschutz, Router-Sperre,
+  Schreibzugriffe von außerhalb der Engine, Einstellungen (Standard: an, jeder Router im
+  Modus Observe, Auto-Heal aus, Allowlist leer und höchstens Risiko 1) und Wartungsfenster
+  als geprüfte Daten.
+- `heal_store.py`: Store `openwrt_router.self_healing` (Version 1.1, private Datei, atomares
+  Schreiben). Schritte in die Ausführung werden **vor** dem Handeln geschrieben und
+  zurückgelesen, weil HAs Store einen Schreibfehler selbst abfängt. Eine verlorene, neuere
+  oder beschädigte Datei startet leer bzw. ohne den kaputten Teil, bleibt als `.bak` liegen
+  und pausiert Auto-Heal 24 h für die ganze Flotte. Grenzen: 500 Datensätze, 20 offene je
+  Router, 90 Tage für abgeschlossene, 1 MB Datei; verdrängt werden nur abgeschlossene
+  Datensätze, nie eine laufende Aktion.
+- `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
+
 ## [1.52.2] - 2026-11-27
 
 Network Time Machine, Tab „Zeitreise“: drei Anzeigefehler in „Vergleich“ und „Zustand“

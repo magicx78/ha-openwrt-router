@@ -109,6 +109,10 @@ PLAN_ID_PREFIX: Final = "pln_"
 AUTHORIZATION_ID_PREFIX: Final = "wau_"
 VERIFICATION_ID_PREFIX: Final = "vac_"
 CORRELATION_ID_PREFIX: Final = "cor_"
+# Self-Healing (Phase 7, 1.53.0): one remediation action record
+# (heal_model.RemediationAction). The module's audit prefix and its audit
+# share come with the module wiring, not with this id.
+REMEDIATION_ID_PREFIX: Final = "rem_"
 # Fleet-wide subject (installation_key_reset, audit entries of an unknown
 # router). Never a router id: the registry refuses it (contract §4.1).
 FLEET_ROUTER_ID: Final = "-"
