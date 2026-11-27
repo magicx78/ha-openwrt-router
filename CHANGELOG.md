@@ -29,7 +29,11 @@ unverändert (Version 1.2). Entwicklerdoku: `docs/time-machine.md`, Abschnitte 2
   unbekannten Seite zählt nie als Änderung, und die Zahl in „Keine bekannte Änderung; n
   Merkmale sind zu einem der Zeitpunkte unbekannt.“ ist genau die Zahl dieser Zeilen (ein Funk
   ist ein Merkmal; in dem Fall oben also mehr als vorher, wo ein ganzer Funk-Block eine Zeile
-  war).
+  war). Auch jede unbekannte Funk-Zelle nennt einen Grund: „zu diesem Zeitpunkt nicht
+  gesehen“, wenn die vollständige Liste dieser Seite den Funk nicht hat, und der Satz zu
+  `not_observed`, wenn die Liste unvollständig und leer ist. „Erreichbar“: Sagen beide
+  bekannten Zellen Verschiedenes („nicht erreichbar (LAN)“ und „nicht erreichbar“), ist die
+  Zeile eine Änderung und wird gezählt, nie „unverändert“.
 - **Ein geleertes Feld zeigt nicht mehr das alte Ergebnis.** Wurde „Von“, „Bis“ oder der
   Zeitpunkt von „Zustand“ nach einer Antwort geleert, blieb das alte Ergebnis stehen, als
   gehöre es zu den Feldern. Jetzt steht sofort der Hinweis („„Von“ und „Bis“ wählen.“ bzw.
@@ -46,7 +50,16 @@ unverändert (Version 1.2). Entwicklerdoku: `docs/time-machine.md`, Abschnitte 2
   bekannt ist, nicht unter den Unterschieden und zählt nicht in „n Merkmale … unbekannt“;
   darunter steht „1 Router ist deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von
   ihm nichts bekannt.“ War er zu einem der Zeitpunkte noch eingeschaltet, steht sein Verlauf wie
-  sonst da, mit dem Abzeichen „derzeit deaktiviert“.
+  sonst da, mit dem Abzeichen „derzeit deaktiviert“. „deaktiviert“ ersetzt die Werte nur, wenn
+  jeder unbekannte Wert den Grund `not_observed` hat (das, was ein deaktivierter Eintrag
+  hinterlässt); bei jedem anderen Grund (etwa Aufzeichnung verdrängt, nicht beobachtet, Uhr
+  zurückgesprungen) stehen die Werte mit ihren echten Gründen da, mit „derzeit deaktiviert“,
+  und der Router wird im Vergleich aufgeführt. Ist sonst nichts verschieden, sagt die
+  Zusammenfassung nicht mehr „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ über
+  Router, von denen nichts bekannt ist, sondern „Über 2 deaktivierte Router ist nichts bekannt;
+  sonst hat sich zwischen diesen Zeitpunkten nichts geändert.“ (mit Ereignissen dazwischen:
+  „…; sonst sind die Zustände zu beiden Zeitpunkten gleich, und dazwischen gab es
+  Ereignisse.“).
 - **Doku:** `docs/time-machine.md` (Abschnitte 20.3 und 24) sagte, die Zeit vor Speicher 1.2
   sei `not_recorded`. Tatsächlich ist die Zeit, die 1.51.0 aufzeichnete, global bekannt, und
   jeder Router ist dort `not_observed` (außer was eine aufgezeichnete Marke ergibt, etwa ein
@@ -60,8 +73,10 @@ unverändert (Version 1.2). Entwicklerdoku: `docs/time-machine.md`, Abschnitte 2
 - `/compare`, `changes.routers[]`: `reachable`, `role` und `uplink` tragen zusätzlich
   `from_reason` und `to_reason` (Grund je Seite, null für eine bekannte Seite).
 - Beide Felder sind additiv: Ein Panel von 1.52.1 zeigt die neue Antwort wie bisher (mit den
-  alten Fehlern), und das neue Panel zeigt eine Antwort ohne die Felder wie 1.52.1 (ohne
-  „deaktiviert“). `_PANEL_VERSION` `20261127-timemachine11`.
+  alten Fehlern). Das neue Panel behebt die Zellen auch bei einer Antwort eines Servers von
+  1.52.1, denn die trägt die Blöcke `before`/`after` schon; ohne `entry` zeigt es nur kein
+  „deaktiviert“, und ohne `from_reason`/`to_reason` nennt eine Zelle ohne Block den Grund
+  ihrer Seite wie bisher. `_PANEL_VERSION` `20261127-timemachine11`.
 
 ### Tests
 
@@ -77,6 +92,12 @@ unverändert (Version 1.2). Entwicklerdoku: `docs/time-machine.md`, Abschnitte 2
   nach einer Antwort; deaktivierter Router in „Zustand“ und „Vergleich“, Antwort ohne das
   Feld). Der Test von 1.52.1, der festhielt, dass ein geleertes Feld das alte Ergebnis behält,
   prüft jetzt das Gegenteil.
+- Nach dem Review: Zusammenfassung mit nicht aufgeführten deaktivierten Routern; „deaktiviert“
+  nur bei `not_observed`, sonst Karte und Tabelle mit den echten Gründen; „Erreichbar“ mit
+  „(LAN)“ auf einer Seite; Gründe unbekannter Funk-Zellen; eine Zelle ohne Block mit
+  `from_reason`/`to_reason`. Was ein Laden tut (leeren oder fragen), entscheiden die reinen
+  Funktionen `stateLoadStep`/`compareLoadStep` (getestet); dass beide Container deren Aktion
+  sofort und ohne Bedingung abschicken, hält ein Test am Quelltext fest (ohne DOM).
 
 ### Bekannte Grenzen
 
@@ -84,6 +105,10 @@ unverändert (Version 1.2). Entwicklerdoku: `docs/time-machine.md`, Abschnitte 2
   vergangenen Zeitpunkt „derzeit deaktiviert“; wann er deaktiviert wurde, weiß die Time Machine
   nicht (der Verlauf endet dort als „noch kein Wert beobachtet“).
 - Ein Router, dessen Eintrag gelöscht wurde, hat `entry: null` und erscheint wie bisher.
+- Ein Router mit einer bekannten, aber leeren Funkliste bekommt im Vergleich eine Zeile „Funk:
+  unbekannt“, wie die Karte in „Zustand“ („keine Funkdaten“).
+- `_radio_diff` trägt keine Gründe je Seite; ohne Block nennt eine Funk-Zelle den Grund des
+  Servers für die ganze Zeile oder den ihrer Seite.
 - Nicht in einer echten HA-Instanz geprüft (siehe PR).
 
 ## [1.52.1] - 2026-11-26

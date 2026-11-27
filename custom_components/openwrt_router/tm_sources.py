@@ -282,7 +282,8 @@ class RouterMap:
 
     by_entry: Mapping[str, str] = field(default_factory=dict)
     names: Mapping[str, str | None] = field(default_factory=dict)
-    # 1.52.2: router ids whose config entry is disabled by the user or HA
+    # 1.52.2: router ids whose config entry is disabled (``disabled_by`` set;
+    # ConfigEntryDisabler has only USER: a user disabled it)
     disabled: frozenset[str] = frozenset()
 
     def entry_of(self, router_id: str | None) -> str | None:

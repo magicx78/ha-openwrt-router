@@ -1169,8 +1169,8 @@ Felder:
   "router_name"}` des Elternrouters oder null = direkt am Gateway): jeweils `{"value",
   "derived", "reason"}`.
 - je Router `entry` (1.52.2, additiv): der Konfigurationseintrag des Routers **jetzt**,
-  `"enabled"`, `"disabled"` (`disabled_by` des Eintrags ist gesetzt, vom Benutzer oder von
-  HA; HA richtet ihn nicht ein) oder null (kein Eintrag, nur Verlauf). Es ist der Stand beim
+  `"enabled"`, `"disabled"` (`disabled_by` des Eintrags ist gesetzt; `ConfigEntryDisabler`
+  kennt nur `user`, also hat ein Benutzer ihn ausgeschaltet; HA richtet ihn nicht ein) oder null (kein Eintrag, nur Verlauf). Es ist der Stand beim
   Abfragen, nicht der zu `at`; in beiden Blöcken von `/compare` steht derselbe Wert
   (`tm_sources.ENTRY_*`, `RouterMap.disabled`, gelesen in `build_router_map`). Ein
   deaktivierter Eintrag behält seine Kennung in der Router-Registry und erscheint deshalb in
@@ -1782,7 +1782,10 @@ die Aktion `clear` beider Reducer (`stateReducer`, `compareReducer`) das Ergebni
 `seq`, sodass eine Antwort, die noch unterwegs war, verworfen wird (auch eine Seite „Weitere
 laden“). Ein Feld mit einer übersprungenen Uhrzeit ist nicht leer: Es zeigt weiter seinen
 eigenen Fehler, die Aktion `clear` nimmt aber auch dort das alte Ergebnis weg (entschieden in
-diesem PR: es gehört nicht mehr zum Feld). Laden beim Öffnen, 400 ms Pause beim Tippen und
+diesem PR: es gehört nicht mehr zum Feld). Ob ein Laden leert oder fragt, entscheiden die
+reinen Funktionen `stateLoadStep` und `compareLoadStep` (Aktion `clear` oder `start` und die
+Anfrage); beide Container schicken deren Aktion sofort und ohne Bedingung ab (ein Test hält
+das am Quelltext fest, die Container laufen in den Tests ohne DOM nicht). Laden beim Öffnen, 400 ms Pause beim Tippen und
 Laden einer verborgenen Seite, sobald sie sichtbar ist, bleiben wie in 1.52.1.
 
 Ortszeit an einer Zeitumstellung (`parseLocalInput`, Tests mit Europe/Berlin): Eine Uhrzeit
@@ -1806,10 +1809,14 @@ gezeigt wird die erste.“ Gleiches gilt für „Von“ und „Bis“ des Vergle
   zurückgesprungen, Zeit doppelt“. Uplink- und Rollenwechsel mit Parameter `since` zeigen
   „zuerst gesehen HH:MM:SS“.
 - **Deaktivierter Router** (1.52.2, `entry: "disabled"`, `disabledView`): Ist zu diesem
-  Zeitpunkt nichts von ihm bekannt, zeigt die Karte statt der vier Zeilen „unbekannt · noch
-  kein Wert beobachtet“ eine Zeile „deaktiviert · in Home Assistant ausgeschaltet, zu diesem
-  Zeitpunkt nichts bekannt“. Sind Werte bekannt (er war damals eingeschaltet), steht die Karte
-  wie sonst, mit dem Abzeichen „derzeit deaktiviert“ am Namen. Ohne das Feld (Antwort bis
+  Zeitpunkt nichts von ihm bekannt, und zwar nur, weil nichts beobachtet wurde (Erreichbar,
+  Rolle, Uplink und Funk unbekannt, jeder Grund `not_observed`), zeigt die Karte statt der
+  vier Zeilen „unbekannt · noch kein Wert beobachtet“ eine Zeile „deaktiviert · in Home
+  Assistant ausgeschaltet, zu diesem Zeitpunkt nichts bekannt“. Sind Werte bekannt (er war
+  damals eingeschaltet) oder hat ein unbekannter Wert einen anderen Grund (`evicted`,
+  `observation_gap`, `clock_shift`, …), steht die Karte wie sonst mit diesen Gründen, mit dem
+  Abzeichen „derzeit deaktiviert“ am Namen (Review 1.52.2: ein anderer Grund ist eine eigene
+  Tatsache). Ohne das Feld (Antwort bis
   1.52.1) ist kein Router deaktiviert.
 - Marken mit Datum in der Zeitspalte (`MarkRow` mit `start`: laufende Ausfälle und Lücken,
   Block „Läuft seit vor dem Zeitfenster“) tragen `tm-mark--start`: Zeitspalte 9.5em statt
@@ -1847,20 +1854,38 @@ mit denselben Ansichten wie „Zustand“ (`reachableView`, `roleView`, `uplinkV
 `radiosView`/`radioView`), und jede unbekannte Zelle hat den Grund **ihrer** Seite
 (`beforeReason`, `afterReason`). Funk: eine Zeile je Funk der Seiten, deren Liste bekannt ist
 (ein Funk, den die vollständige Liste einer Seite nicht hat: „unbekannt · zu diesem Zeitpunkt
-nicht gesehen“); nur wenn beide Listen unbekannt sind, eine Zeile „Funk“ mit dem Grund je
-Seite. Unveränderte Funks stehen jetzt ebenfalls hinter „Unverändertes zeigen“. Eine Zeile
+nicht gesehen“; eine unvollständige Liste nennt stattdessen ihren eigenen Grund); nur wenn
+beide Listen unbekannt sind, eine Zeile „Funk“ mit dem Grund je Seite. Eine Liste `partial`
+mit `not_observed` ohne Einträge hat keinen eigenen Grund; ihre Zelle trägt den Satz „Nicht
+alle Funkmodule sind bekannt: …“, keine unbekannte Zelle steht ohne Grund da. Unveränderte Funks stehen jetzt ebenfalls hinter „Unverändertes zeigen“. Eine Zeile
 mit einer unbekannten Seite ist `unknown` und nie eine Änderung; ob beide bekannte Seiten
 `same` oder `changed` sind, sagt weiter der Server (`changes`, etwa eine Breite nach „Funk
-an“). Ohne Blöcke (eine ältere Antwort) gilt der Weg über `changes` wie bisher. Die
+an“). Ausnahme „Erreichbar“: Der Server vergleicht nur wahr/falsch, die Zelle sagt auch
+„(LAN)“ (`cause: lan_down`); sagen beide bekannten Zellen Verschiedenes, ist die Zeile
+`changed` und zählt als Änderung. Ohne Block (eine Antwort ohne Blöcke oder ein Router, der in
+einem Block fehlt) gilt der Weg über `changes`; eine unbekannte Zelle nennt dann
+`from_reason` bzw. `to_reason` des Servers, ohne diese Felder den Grund ihrer Seite wie
+bisher. `_radio_diff` hat keine Gründe je Seite. Die
 Zusammenfassung zählt genau die Zeilen der Tabellen („Keine bekannte Änderung; n Merkmale
 sind …“ = Zahl der Zeilen `unknown`).
 
 **Deaktivierter Router (1.52.2).** Ein Router mit `entry: "disabled"`, von dem zu beiden
-Zeitpunkten nichts bekannt ist (`compareRouters`), steht nicht unter den Unterschieden, zählt
+Zeitpunkten nichts bekannt ist, weil nichts beobachtet wurde (`disabledView` `only` auf beiden
+Seiten, siehe 25.2; `compareRouters`), steht nicht unter den Unterschieden, zählt
 nicht in „n Merkmale … unbekannt“ und nicht als „Router ohne Unterschied“; darunter steht „1
 Router ist deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von ihm nichts
 bekannt.“ (mehrere: „n Router sind …“). Ist er zu einem der Zeitpunkte bekannt (vorher
-eingeschaltet), steht seine Tabelle wie sonst, mit dem Abzeichen „derzeit deaktiviert“. Darunter „Ereignisse dazwischen“ (Zahl je Art, „In der Zeitleiste zeigen“ mit
+eingeschaltet) oder trägt ein unbekannter Wert einen anderen Grund als `not_observed`, steht
+seine Tabelle wie sonst, mit dem Abzeichen „derzeit deaktiviert“. Wären ohne die nicht
+aufgeführten Router die Sätze „Zwischen diesen Zeitpunkten hat sich nichts geändert.“ oder
+„Die Zustände … sind gleich; …“ fällig, sagt die Zusammenfassung stattdessen „Über 1
+deaktivierten Router ist nichts bekannt; sonst hat sich zwischen diesen Zeitpunkten nichts
+geändert.“ (mehrere: „Über n deaktivierte Router …“; mit Ereignissen: „…; sonst sind die
+Zustände zu beiden Zeitpunkten gleich, und dazwischen gab es Ereignisse.“,
+`disabledSummaryText`, Texte in `tmTexts.ts`), nie einen Satz über Router, von denen nichts
+bekannt ist.
+
+Darunter „Ereignisse dazwischen“ (Zahl je Art, „In der Zeitleiste zeigen“ mit
 dem Fenster `t1`–`t2`, höchstens 14 Tage), Vorfälle, für Administratoren
 Konfigurationsänderungen (gezählt werden Versionen; das Backend liefert keine Zahl geänderter
 Einstellungen). `changes.other_sources` (Einträge der anderen Module mit `t1 ≤ ts < t2`)
