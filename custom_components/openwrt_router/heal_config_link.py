@@ -3,7 +3,7 @@
 Developer document: ``docs/self-healing.md`` §7.2. Release 1.53.0 is
 Observe only: nothing here calls a router, runs a restore or changes a
 configuration. The one write is the core's own: a comparison over a damaged
-artifact marks that version corrupt (below).
+or deleted artifact marks that version corrupt or missing (below).
 
 What it does: it turns what the Configuration Manager ALREADY holds into the
 facts Self-Healing needs, and nothing more.
@@ -14,7 +14,8 @@ facts Self-Healing needs, and nothing more.
 * optionally the comparison of two STORED versions
   (``ConfigurationApi.async_compare`` with two backup references - it reads
   the stored artifacts, never the live configuration). Over a damaged
-  artifact the core's version store marks that version ``corrupt``, saves its
+  artifact (a wrong checksum or size) the core's version store marks that
+  version ``corrupt``, over a deleted artifact file ``missing``; it saves its
   index once and fires ``configuration.integrity_failed`` (once per damaged
   version; no router call). Nothing else is written.
 
@@ -41,6 +42,14 @@ the comparison shows everything that changed inside the window (an earlier
 change in one area is not hidden by a later one elsewhere). A change is
 proven only when the store shows that every change it compares happened
 inside the window; anything else is unknown with a reason code.
+
+**Never a known "no change".** The store can never prove that nothing
+changed: a change may not have been captured yet, an A -> B -> A may have
+left no version of B, a new content may have been captured exactly at the
+start. So ``diff_proven`` from this module is True or unknown, never False
+(the same rule as ``config_change_24h``). When the store shows no change in
+the window the reason is ``no_change_seen``; :attr:`Selection.no_change_seen`
+is a display flag for that, never a fact.
 
 **Time.** A stored comparison only says that the configuration changed
 somewhere between the last observation of the old content and the first
@@ -119,6 +128,7 @@ REASONS: Final = (
     "no_usable_version",
     "window_base_missing",
     "change_too_old",
+    "no_change_seen",
     "changed_and_reverted",
     "change_may_predate_window",
     "ambiguous_order",
@@ -151,6 +161,11 @@ REASON_TEXT_DE: Final[Mapping[str, str]] = MappingProxyType(
         "change_too_old": (
             "Im Zeitfenster wurde keine Version gesehen; eine Änderung, falls "
             "es eine gab, ist älter oder nicht belegt."
+        ),
+        "no_change_seen": (
+            "Im Speicher ist im Zeitfenster keine Änderung zu sehen; das "
+            "belegt nicht, dass sich nichts geändert hat (eine Änderung kann "
+            "noch nicht gesichert oder schon zurückgenommen sein)."
         ),
         "changed_and_reverted": (
             "Im Zeitfenster wurde ein anderer Inhalt gesehen, am Ende aber "
@@ -412,7 +427,8 @@ class StoredDiff:
 
     ``proven`` True: comparable changes in ``areas`` (complete: every
     change has a known area, nothing truncated, every secret comparable).
-    False: the two versions are the same configuration (``areas`` empty).
+    False: the comparison shows no change (``areas`` empty); the link turns
+    that into an unknown ``no_change_seen``, never a known "no".
     None: unknown (``reason`` required).
     """
 
@@ -585,15 +601,16 @@ class Selection:
     """Result of :func:`select_versions`.
 
     ``pair``: the change to compare (None: no change to compare).
-    ``unchanged``: the store proves no change inside the window (the base
-    content at both ends, no other content seen in between). ``reason``: why
-    it is unknown (None when there is a pair or ``unchanged``).
+    ``reason``: why it is unknown (None only when there is a pair).
+    ``no_change_seen``: a DISPLAY flag - the store shows only the base content
+    inside the window (reason ``no_change_seen``). It is never a fact: the
+    store cannot prove that nothing changed.
     """
 
     latest: VersionRow | None  # the newest usable version (before the end)
     pair: VersionPair | None
     reason: str | None
-    unchanged: bool = False
+    no_change_seen: bool = False
     window_end: float | None = None
 
 
@@ -616,7 +633,8 @@ def select_versions(knowledge: ConfigKnowledge, *, before: Any) -> Selection:
     or before the window start, the other end the newest observation. The
     store proves a change inside the window only when the base content was
     seen at or after the window start right before the first other content;
-    see :data:`REASONS` for every other outcome.
+    see :data:`REASONS` for every other outcome. It never proves that
+    nothing changed (``no_change_seen`` is unknown).
     """
     if type(knowledge) is not ConfigKnowledge:
         raise _fail("knowledge")
@@ -657,8 +675,13 @@ def select_versions(knowledge: ConfigKnowledge, *, before: Any) -> Selection:
         return unknown_sel("change_too_old")
     old = base.content_hash
     if all(o[2].content_hash == old for o in window):
+        # what the store shows, not a proof (module docstring)
         return Selection(
-            latest=latest, pair=None, reason=None, unchanged=True, window_end=end
+            latest=latest,
+            pair=None,
+            reason="no_change_seen",
+            no_change_seen=True,
+            window_end=end,
         )
     final = obs[-1][2].content_hash
     if final == old:
@@ -831,11 +854,6 @@ class ConfigLink:
                 "version_id": latest.backup_id,
                 "backup_present": latest.restorable_by_hand,
             }
-            if sel.unchanged:
-                # the store proves no change inside the window
-                return hb.ConfigFact(
-                    **known_latest, diff_proven=False, changed_areas=frozenset()
-                )
             reasons["diff_proven"] = str(sel.reason)
             return hb.ConfigFact(**known_latest)
         base = {
@@ -853,7 +871,9 @@ class ConfigLink:
             reasons["diff_proven"] = str(diff.reason)
             return hb.ConfigFact(**base)
         if diff.proven is False:
-            return hb.ConfigFact(**base, diff_proven=False, changed_areas=frozenset())
+            # the comparison shows no change: still no proof of "none"
+            reasons["diff_proven"] = "no_change_seen"
+            return hb.ConfigFact(**base)
         return hb.ConfigFact(
             **base,
             diff_proven=True,
@@ -934,7 +954,7 @@ class ConfigLink:
             "window": {
                 "end": self.selection.window_end,
                 "length_s": CONFIG_CHANGE_WINDOW_S,
-                "unchanged": self.selection.unchanged,
+                "no_change_seen": self.selection.no_change_seen,
             },
             "preflight": {
                 "backups": self.backups.to_dict(),
@@ -1059,10 +1079,11 @@ async def async_read_stored_diff(
     end the sync call (:func:`config_link_for`) gets. Both references are
     backup references, so the core reads the stored artifacts and never the
     live configuration: no router call. What it may write: over a damaged
-    artifact the core's version store marks that version ``corrupt``, saves
-    its index once and fires ``configuration.integrity_failed`` - once per
-    damaged version (the version is then no longer compared); the result
-    here is ``diff_failed``. Nothing else is written. None when the store
+    artifact the core's version store marks that version ``corrupt`` (a
+    deleted artifact file: ``missing``), saves its index once and fires
+    ``configuration.integrity_failed`` - once per damaged version (the
+    version is then no longer compared); the result here is
+    ``diff_failed``. Nothing else is written. None when the store
     shows no change to compare or the inputs are odd. Never raises (a
     cancellation still propagates).
     """
@@ -1097,7 +1118,7 @@ async def async_config_link_for(
     For a later package to run off the decision path (for example when an
     incident opens) and to hand the :class:`StoredDiff` to
     :func:`config_link_for` with the same ``before``. The comparison reads
-    the store only; over a damaged artifact the core writes once (see
+    the store only; over a damaged or deleted artifact the core writes once (see
     :func:`async_read_stored_diff`). Raises :class:`ConfigLinkError` only
     for its own bad inputs; everything it reads becomes unknown on error.
     """

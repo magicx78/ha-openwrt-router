@@ -176,6 +176,7 @@ def test_reason_codes_are_a_closed_literal_set_with_german_texts() -> None:
         "no_usable_version",
         "window_base_missing",
         "change_too_old",
+        "no_change_seen",
         "changed_and_reverted",
         "change_may_predate_window",
         "ambiguous_order",
@@ -512,7 +513,7 @@ def test_change_in_the_window_and_its_bounds() -> None:
         rec(4, S + 400, 2),
     )
     pair = sel.pair
-    assert pair is not None and (sel.reason, sel.unchanged) == (None, False)
+    assert pair is not None and (sel.reason, sel.no_change_seen) == (None, False)
     assert (pair.base_id, pair.other_id) == (bid(1), bid(4))
     # the old content was last seen at S+200 (dedup), the new first at S+300
     assert (pair.first_changed_after, pair.changed_after, pair.changed_at) == (
@@ -546,10 +547,14 @@ def test_a_change_older_than_the_window_is_no_drift() -> None:
     # the reviewer's [stale] case: changed 89 days ago, the new content seen
     # again just before the incident
     sel = select(rec(1, E - 90 * W, 1), rec(2, E - 89 * W, 2, seen=E - 60), before=E)
-    assert (sel.pair, sel.reason, sel.unchanged) == (None, None, True)
+    assert (sel.pair, sel.reason, sel.no_change_seen) == (
+        None,
+        "no_change_seen",
+        True,
+    )
     # nothing seen inside the window: unknown, never "no change"
     old = select(rec(1, E - 90 * W, 1), rec(2, E - 89 * W, 2))
-    assert (old.pair, old.reason, old.unchanged) == (None, "change_too_old", False)
+    assert (old.pair, old.reason, old.no_change_seen) == (None, "change_too_old", False)
 
 
 def test_no_version_before_the_window_is_unknown() -> None:
@@ -559,7 +564,7 @@ def test_no_version_before_the_window_is_unknown() -> None:
         (rec(1, math.nextafter(S, math.inf), 1, raw=True),),
     ):
         sel = select(*records)
-        assert (sel.pair, sel.reason, sel.unchanged) == (
+        assert (sel.pair, sel.reason, sel.no_change_seen) == (
             None,
             "window_base_missing",
             False,
@@ -568,7 +573,7 @@ def test_no_version_before_the_window_is_unknown() -> None:
 
 def test_changed_and_changed_back_is_unknown() -> None:
     sel = select(rec(1, S - 10, 1, seen=S + 20), rec(2, S + 10, 2))
-    assert (sel.pair, sel.reason, sel.unchanged) == (
+    assert (sel.pair, sel.reason, sel.no_change_seen) == (
         None,
         "changed_and_reverted",
         False,
@@ -591,7 +596,7 @@ def test_window_start_boundary_at_one_float_step() -> None:
 
 def test_window_end_boundary_at_one_float_step() -> None:
     records = (rec(1, S - 10, 1, seen=S + 5), rec(2, E, 2, raw=True))
-    assert select(*records).unchanged is True  # a version AT the end is out
+    assert select(*records).no_change_seen is True  # a version AT the end is out
     just = math.nextafter(E, 0)
     inside = select(rec(1, S - 10, 1, seen=S + 5), rec(2, just, 2, raw=True))
     assert inside.pair is not None
@@ -649,8 +654,8 @@ def test_equal_times_of_two_contents_are_ambiguous() -> None:
 )
 def test_only_usable_versions_with_content_take_part(bad: dict[str, Any]) -> None:
     base = rec(1, S - 100, 1, seen=S + 5)
-    assert select(base, rec(2, S + 100, 2, **bad)).unchanged is True
-    assert select(base, rec(2, S + 100, None)).unchanged is True
+    assert select(base, rec(2, S + 100, 2, **bad)).no_change_seen is True
+    assert select(base, rec(2, S + 100, None)).no_change_seen is True
     assert select(base, rec(2, S + 100, 2, validation="valid")).pair is not None
 
 
@@ -791,7 +796,7 @@ def _expected(points: list[tuple[float, int]], before: float) -> str:
     if not window:
         return "change_too_old"
     if all(c == old for _p, c in window):
-        return "unchanged"
+        return "no_change_seen"
     if window[-1][1] == old:
         return "changed_and_reverted"
     first = next(i for i, (_p, c) in enumerate(window) if c != old)
@@ -804,10 +809,45 @@ def _expected(points: list[tuple[float, int]], before: float) -> str:
 def test_random_histories_against_the_true_change_times() -> None:
     rng = random.Random(15300)
     seen: dict[str, int] = {}
+    # "no change seen" against the TRUE timeline: how often a real change
+    # lies inside the window although the store shows none
+    quiet = hidden = 0
     for _ in range(8000):
         records, true_changes, at, before, glitch = _simulate(rng)
         k = knowledge(*(r for r, _t, _s in records))
         sel = hcl.select_versions(k, before=T0 + before)
+        start = before - W
+        real_in_window = [c for c in true_changes if start < c < before]
+        # never a known "no", whatever the store holds and whatever the
+        # comparison says
+        fact = hcl.ConfigLink(knowledge=k, wall_at=T0 + before, diff=None).config_fact
+        assert fact.diff_proven is not False
+        if sel.pair is not None:
+            for sd in (
+                hcl.StoredDiff(
+                    base_id=sel.pair.base_id,
+                    other_id=sel.pair.other_id,
+                    proven=False,
+                    areas=(),
+                ),
+                hcl.StoredDiff(
+                    base_id=sel.pair.base_id,
+                    other_id=sel.pair.other_id,
+                    proven=True,
+                    areas=("dhcp",),
+                ),
+            ):
+                lk = link(k, wall=T0 + before, before=T0 + before, diff=sd)
+                assert lk.config_fact.diff_proven is not False
+                if lk.config_fact.diff_proven is True and not glitch:
+                    assert real_in_window  # a proven change really happened
+        if sel.reason == "no_change_seen" and not glitch:
+            quiet += 1
+            hidden += bool(real_in_window)
+            assert sel.no_change_seen is True and sel.pair is None
+            lk = link(k, wall=T0 + before, before=T0 + before)
+            assert lk.config_fact.diff_proven is None
+            assert lk.reasons["diff_proven"] == "no_change_seen"
         points = []
         for r, t, again in records:
             usable = r.status is VersionStatus.OK and r.validation.status in (
@@ -823,13 +863,13 @@ def test_random_histories_against_the_true_change_times() -> None:
         seen[expected] = seen.get(expected, 0) + 1
         if expected != "pair":
             assert sel.pair is None
-            if expected == "unchanged":
-                assert (sel.unchanged, sel.reason) == (True, None)
-            else:
-                assert (sel.unchanged, sel.reason) == (False, expected)
+            assert (sel.no_change_seen, sel.reason) == (
+                expected == "no_change_seen",
+                expected,
+            )
             continue
         pair = sel.pair
-        assert pair is not None and sel.unchanged is False
+        assert pair is not None and sel.no_change_seen is False
         if glitch:
             continue
         first, after, changed = (
@@ -850,9 +890,12 @@ def test_random_histories_against_the_true_change_times() -> None:
         assert (changed, newest) in points
         assert all(c == newest for p, c in points if p >= changed)
         assert not [p for p, _c in points if after < p < changed]
+    # the store showed no change, yet the true timeline changed inside the
+    # window in a good share of the cases: "no change" can never be a fact
+    assert quiet >= 20 and hidden >= 20, (quiet, hidden)
     for outcome in (
         "pair",
-        "unchanged",
+        "no_change_seen",
         "no_usable_version",
         "window_base_missing",
         "change_too_old",
@@ -894,17 +937,14 @@ def test_empty_index_is_a_known_no() -> None:
     assert lk.reasons["version_known"] == "no_usable_version"
 
 
-def test_no_change_in_the_window_is_a_known_no() -> None:
+def test_no_change_seen_in_the_window_is_unknown_never_a_known_no() -> None:
     lk = link(knowledge(rec(1, OLD, 1), rec(2, T_START - 600, 1)), wall=T_START + 60)
     cf = lk.config_fact
     assert (cf.version_known, cf.version_id, cf.backup_present) == (True, bid(2), True)
-    assert (cf.diff_proven, cf.changed_areas, cf.changed_at) == (
-        False,
-        frozenset(),
-        None,
-    )
-    assert "diff_proven" not in lk.reasons
-    assert lk.selection.unchanged is True
+    assert (cf.diff_proven, cf.changed_areas, cf.changed_at) == (None, None, None)
+    assert lk.reasons["diff_proven"] == "no_change_seen"
+    assert lk.selection.no_change_seen is True  # a display flag only
+    assert lk.to_dict()["window"]["no_change_seen"] is True
 
 
 def test_one_content_without_a_base_is_unknown() -> None:
@@ -950,9 +990,10 @@ def test_a_diff_of_other_versions_or_an_unknown_diff_is_not_used() -> None:
     assert lk2.reasons["diff_proven"] == "diff_failed"
     same = hcl.StoredDiff(base_id=bid(1), other_id=bid(2), proven=False, areas=())
     lk3 = changed_link(diff=same)
-    assert lk3.config_fact.diff_proven is False
-    assert lk3.config_fact.changed_areas == frozenset()
-    assert lk3.config_fact.changed_at is None
+    # a comparison that shows no change is still no proof of "none"
+    cf3 = lk3.config_fact
+    assert (cf3.diff_proven, cf3.changed_areas, cf3.changed_at) == (None, None, None)
+    assert lk3.reasons["diff_proven"] == "no_change_seen"
 
 
 def test_the_cutoff_picks_the_change_before_the_incident() -> None:
@@ -1450,7 +1491,7 @@ def test_to_dict_is_json_and_carries_no_hash_or_address() -> None:
             "reasons",
         ]
     )
-    assert d["window"] == {"end": T_START, "length_s": 86400, "unchanged": False}
+    assert d["window"] == {"end": T_START, "length_s": 86400, "no_change_seen": False}
     assert d["change"]["first_changed_after"] == T_START - 7200
     assert link(knowledge()).to_dict()["change"] is None
 
@@ -1891,11 +1932,8 @@ def test_review_stale_change_months_ago_does_not_make_f_take_over() -> None:
     )
     lk = link(k, wall=T_START + 60, before=T_START, diff=sd)
     cf = lk.config_fact
-    assert (cf.diff_proven, cf.changed_areas, cf.changed_at) == (
-        False,
-        frozenset(),
-        None,
-    )
+    assert (cf.diff_proven, cf.changed_areas, cf.changed_at) == (None, None, None)
+    assert lk.reasons["diff_proven"] == "no_change_seen"
     a = pb.assess(_dhcp_incident(), dhcp_ev(config=cf))
     plain = pb.assess(_dhcp_incident(), dhcp_ev())
     assert a.match.playbook_id == plain.match.playbook_id == "dhcp_recovery"
@@ -2100,8 +2138,81 @@ def test_review_a_whole_config_mark_has_no_option() -> None:
     assert (sd.proven, sd.reason) == (None, "secrets_not_comparable")
 
 
-def _damage(root: str, marker: str) -> int:
-    """Append a byte to every stored file whose path names ``marker``."""
+def _no_change_seen(k: hcl.ConfigKnowledge) -> None:
+    """The store shows no change: unknown, never a known "no"."""
+    sel = hcl.select_versions(k, before=E)
+    assert (sel.pair, sel.reason, sel.no_change_seen) == (None, "no_change_seen", True)
+    lk = link(k, wall=E + 60, before=E)
+    cf = lk.config_fact
+    assert (cf.diff_proven, cf.changed_areas, cf.changed_at) == (None, None, None)
+    assert lk.reasons["diff_proven"] == "no_change_seen"
+    assert lk.config_change_24h(["dhcp"]) is None
+
+
+def test_review2_a_change_not_yet_captured_is_unknown() -> None:
+    # (a) the old content was last seen 23 h before the start; a change after
+    # that has no version yet
+    _no_change_seen(knowledge(rec(1, S - 100, 1, seen=S + 3600)))
+
+
+def test_review2_a_b_a_with_b_never_stored_is_unknown() -> None:
+    # (b) the same content seen before the window and a minute before the
+    # start; a B in between left no version
+    _no_change_seen(knowledge(rec(1, S - 100, 1, seen=E - 60)))
+
+
+def test_review2_a_new_content_captured_at_the_start_is_unknown() -> None:
+    # (c) the new content was stored exactly at the incident start: it does
+    # not count (strictly before), yet it shows a change happened before
+    _no_change_seen(
+        knowledge(rec(1, S - 10, 1, seen=S + 5, raw=True), rec(2, E, 2, raw=True))
+    )
+
+
+def test_review2_no_input_yields_a_known_no_change() -> None:
+    rng = random.Random(2)
+    same = hcl.StoredDiff(base_id=bid(1), other_id=bid(2), proven=False, areas=())
+    empty = hcl.stored_diff_from(diff_of(bid(1), bid(2)), bid(1), bid(2))
+    assert empty.proven is False  # the comparison itself says "no change"
+    stores: list[hcl.ConfigKnowledge] = [
+        knowledge(),
+        hcl.knowledge_from_versions(None, RID),
+        hcl.knowledge_from_versions(Versions(loaded=False), RID),
+        knowledge(rec(1, S - 100, 1, seen=S + 3600)),
+        knowledge(rec(1, S - 100, 1, seen=E - 60)),
+        knowledge(rec(1, OLD, 1), rec(2, T_START - 600, 1)),
+        knowledge(rec(1, S - 100, 1), rec(2, S + 100, 2)),
+    ]
+    for _ in range(1500):
+        records, _true, _at, _before, _glitch = _simulate(rng)
+        stores.append(knowledge(*(r for r, _t, _s in records)))
+    for k in stores:
+        for before in (None, E, T0 + 100 * _GRID):
+            sel = hcl.select_versions(k, before=E if before is None else before)
+            diffs: list[hcl.StoredDiff | None] = [None, same, empty]
+            if sel.pair is not None:
+                diffs += [
+                    hcl.StoredDiff(
+                        base_id=sel.pair.base_id,
+                        other_id=sel.pair.other_id,
+                        proven=False,
+                        areas=(),
+                    ),
+                    hcl.stored_diff_from(
+                        diff_of(sel.pair.base_id, sel.pair.other_id),
+                        sel.pair.base_id,
+                        sel.pair.other_id,
+                    ),
+                ]
+            for d in diffs:
+                lk = link(k, wall=E + 60, before=before, diff=d)
+                assert lk.config_fact.diff_proven is not False
+                assert lk.config_change_24h(["dhcp", "wlan"]) is not False
+
+
+def _damage(root: str, marker: str, *, delete: bool = False) -> int:
+    """Append a byte to (or delete) every stored file whose path names
+    ``marker``."""
     import os
 
     damaged = 0
@@ -2109,14 +2220,20 @@ def _damage(root: str, marker: str) -> int:
         for name in files:
             path = os.path.join(folder, name)
             if marker in path:
-                with open(path, "ab") as fh:
-                    fh.write(b"x")
+                if delete:
+                    os.remove(path)
+                else:
+                    with open(path, "ab") as fh:
+                        fh.write(b"x")
                 damaged += 1
     return damaged
 
 
+@pytest.mark.parametrize(
+    ("delete", "status"), [(False, "corrupt"), (True, "missing")], ids=["bad", "gone"]
+)
 async def test_review_compare_over_a_damaged_artifact_writes_once(
-    disks: FakeDisks, tmp_path: Any
+    disks: FakeDisks, tmp_path: Any, delete: bool, status: str
 ) -> None:
     env = await start_env(disks, tmp_path, provider=AreaProvider())
     try:
@@ -2129,7 +2246,8 @@ async def test_review_compare_over_a_damaged_artifact_writes_once(
         second = await env.api.async_create_backup(
             rid, reason=BackupReason.MANUAL, actor=admin
         )
-        assert _damage(str(tmp_path), second.record.backup_id[4:]) > 0
+        marker = second.record.backup_id[4:]
+        assert _damage(str(tmp_path), marker, delete=delete) > 0
         start = first.record.created_at.timestamp() + W
         saves = _saves(disks)
         events = len(bus_events(env.hass))
@@ -2142,7 +2260,8 @@ async def test_review_compare_over_a_damaged_artifact_writes_once(
             "diff_failed",
         )
         assert env.router_calls() == router  # no router call
-        # the version store marks the version corrupt and saves its index once
+        # the version store marks the version corrupt (a deleted file:
+        # missing) and saves its index once
         changed_stores = {
             key: (saves[key], now)
             for key, now in _saves(disks).items()
@@ -2155,10 +2274,10 @@ async def test_review_compare_over_a_damaged_artifact_writes_once(
         assert [e["type"] for e in new] == ["configuration.integrity_failed"]
         assert new[0]["data"] == {
             "version_id": second.record.backup_id,
-            "status": "corrupt",
+            "status": status,
         }
         after = hcl.collect_config_knowledge(env.hass, rid)
-        assert [r.validation for r in after.rows] == ["unverified", "corrupt"]
+        assert [r.validation for r in after.rows] == ["unverified", status]
         # once per damaged version: the next read writes nothing
         saves2, events2 = _saves(disks), len(bus_events(env.hass))
         again = await hcl.async_config_link_for(
@@ -2167,5 +2286,8 @@ async def test_review_compare_over_a_damaged_artifact_writes_once(
         assert _saves(disks) == saves2 and len(bus_events(env.hass)) == events2
         assert again.reasons["diff_proven"] == "change_too_old"
         assert env.router_calls() == router
+        # and the module says so (review: "corrupt or missing")
+        for doc in (hcl.__doc__, hcl.async_read_stored_diff.__doc__):
+            assert doc is not None and f"``{status}``" in doc
     finally:
         await stop_env(env)
