@@ -128,15 +128,23 @@ async def test_save_is_delayed_and_flush_writes_now(disk):
     assert again.radios[R1].hourly["utilization"]
 
 
-async def test_payload_over_the_byte_limit_keeps_the_last_good_one(disk):
-    store = await _store(max_bytes=1500)
+async def test_payload_over_the_byte_limit_is_trimmed_not_refused(disk):
+    """1.52.3: the oldest buckets go, the newest stay; nothing is refused.
+    (1.52.2 kept the last good payload, or wrote an empty history.)"""
+    store = await _store(max_bytes=6000)
     store.record(R1, {"utilization": 5.0}, T0)
     good = store._data_to_save()
     assert good["radios"]
-    for minute in range(1, 200):
-        store.record(R1, {n: 1.0 for n in rf_store.SERIES}, T0 + 3600 * minute)
-    assert store._data_to_save() == good
-    assert store.drops["save_over_size"] == 1
+    for hour in range(1, 200):
+        store.record(R1, {"utilization": 1.0, "noise": 2.0}, T0 + 3600 * hour)
+    payload = store._data_to_save()
+    assert payload != good
+    assert rf_store.store_size(payload) <= 6000
+    hourly = payload["radios"][ref_key(R1)]["h"]
+    newest = str(int(T0 + 3600 * 199))
+    assert newest in hourly["utilization"] and newest in hourly["noise"]
+    assert str(int(T0)) not in hourly["utilization"]
+    assert store.drops["trimmed"] > 0 and store.drops["save_over_size"] == 0
 
 
 async def test_nothing_but_numbers_is_stored(disk):
