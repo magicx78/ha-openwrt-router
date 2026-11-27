@@ -1,12 +1,13 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
-     Paket D (Branch feature/self-healing-d, 2026-11-27, auf B und C1). Gebaut sind heal_model.py
+     Paket E (Branch feature/self-healing-e, 2026-11-27, auf B, C1 und D). Gebaut sind heal_model.py
      und heal_store.py (Paket B), die Kennung `rem_` in core_models.py, seit Paket C1
      heal_engine.py, heal_views.py, der Modulschalter `self_healing_enabled` und die
      Verdrahtung in __init__.py, config_flow.py und diagnostics.py, seit Paket D
-     heal_catalog.py und heal_policy.py (reine Logik, von der Engine noch nicht aufgerufen).
-     Aussagen zu B, C1 und D sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     heal_catalog.py und heal_policy.py (reine Logik, von der Engine noch nicht aufgerufen),
+     seit Paket E heal_preflight.py (Vorabprüfungen und Sammler, ebenfalls nicht angebunden).
+     Aussagen zu B, C1, D und E sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
      tests/full_router_kit.py); nicht auf Routern,
@@ -79,6 +80,13 @@ Ausführungsweg. Die Engine aus C1 ruft sie noch nicht auf (sie nutzt weiter
 `ObserveOnlyDecider`); das Einsetzen über die Schnittstelle `HealDecider` ist ein eigenes
 kleines Paket nach dem Merge von D. Auch Paket D ändert für Benutzer nichts.
 
+**Stand heute (Paket E):** Dazu kommen die dreizehn Vorabprüfungen (`heal_preflight.py`,
+Abschnitt 7.1) mit einem Sammler, der nur liest, was schon im Speicher liegt (kein Router-Aufruf,
+kein Poll), und den Fakten für `RiskContext`/`IncidentFacts`. Nichts ruft sie bisher auf; sie
+zeigen später nur „was würde sperren“. Heute besteht keine schreibende Aktion die Prüfungen
+(Rechte nicht geprüft, alles außer `service.restart` im Katalog gesperrt). Auch Paket E ändert
+für Benutzer nichts.
+
 ## 2. Modulaufbau
 
 Geplant ist **eine** Instanz für die ganze Flotte je HA-Installation, verdrahtet wie Security
@@ -92,7 +100,7 @@ frei).
 | `heal_store.py` | async | Store `openwrt_router.self_healing`, Schreiben vor dem Handeln, Grenzen | **gebaut** (Paket B) |
 | `heal_catalog.py` | rein | geschlossene Liste typisierter Aktionen, Parameterprüfung, Rollback-Aussage je Aktion | **gebaut** (Paket D) |
 | `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); die Engine (C1) ruft sie noch nicht auf – ein eigenes kleines Paket setzt einen `HealDecider` über `heal_policy` ein (Abschnitt 2.1), I ruft `record_outcome` |
-| `heal_preflight.py` | rein + async | Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf** | Plan (E) |
+| `heal_preflight.py` | rein + Sammler | dreizehn Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf**; Fakten für `RiskContext`/`IncidentFacts` | **gebaut** (Paket E, Abschnitt 7.1); Engine und Routen rufen sie noch nicht auf |
 | `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten | Plan (F, G) |
 | `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
 | `heal_engine.py` | async | Ablauf, Sperren, Warteschlange, Zeitgeber, Neustart | **gebaut** bis PROPOSED (C1, Abschnitt 2.1); Ausführen, Sperren, Warteschlange Plan (C2, I) |
@@ -830,10 +838,114 @@ der ACL, deckt nur UCI ab und geht bei einem Neustart von rpcd oder des Routers 
 Watchdog, kein zweiter Zugangsweg.
 
 **Stand heute (Paket D):** Katalog, Parameterprüfung, Rollback-Aussagen und die Liste der
-nie erlaubten Familien sind gebaut und getestet (`tests/test_heal_catalog_v1530.py`). Die
-gemeinsamen Vorabprüfungen oben sind **nicht** gebaut (Paket E); die Richtlinie liest deren
-Ergebnis heute als Fakten aus `RiskContext` (Abschnitt 9). Kein Eintrag hat einen Ausführer;
-`router_call` und `required_acl` sind nur Namen für Erklärung und Prüfung.
+nie erlaubten Familien sind gebaut und getestet (`tests/test_heal_catalog_v1530.py`). Kein
+Eintrag hat einen Ausführer; `router_call` und `required_acl` sind nur Namen für Erklärung und
+Prüfung.
+
+**Stand heute (Paket E):** Die gemeinsamen Vorabprüfungen oben sind gebaut
+(`heal_preflight.py`, Abschnitt 7.1). Engine und Routen rufen sie noch nicht auf (Anbindung
+im Adapter-Paket bzw. C2); 1.53.0 nutzt sie nur lesend für „was würde sperren“.
+
+### 7.1 Vorabprüfungen (`heal_preflight.py`, Paket E)
+
+Zwei Teile in einer Datei:
+
+- **Der reine Kern** (kein HA-Import auf Modulebene, keine Uhr, kein Router-Aufruf):
+  `run_preflight(facts, action_type, params, approval=…, limits=…)` führt die dreizehn
+  Prüfungen aus `PREFLIGHT_CHECK_IDS` in dieser Reihenfolge über eine Momentaufnahme
+  `PreflightFacts` aus und gibt ein `PreflightResult`. Jede Prüfung meldet `pass`, `fail`,
+  `unknown` oder `not_applicable`, ob sie für **diese** Aktion kritisch ist, einen Grundcode,
+  weitere Codes (`detail`) und die Fakten, die sie gelesen hat (`facts_used`). Gesamturteil:
+  `blocked`, sobald eine kritische Prüfung `fail` **oder `unknown`** ist, sonst `clear`.
+  Unbekannt besteht nie eine kritische Prüfung.
+- **Der Sammler** (`collect_preflight_facts(hass, router_id)`, darunter
+  `facts_from_sources(FactSources(…), router_id, wall_now=…)`): baut die Momentaufnahme **nur
+  aus dem, was schon im Speicher liegt** – Coordinator-Daten des letzten Polls, Router Registry,
+  Versionsindex und Sperre des Core, Network Intelligence, Security Center, Netzwerkdiagnose,
+  Speicher von Self-Healing. Kein Poll, kein Refresh, kein Router-Aufruf, kein Executor-Job,
+  kein Abruf des Configuration Managers. Die Module mit HA-Bezug werden erst im Sammler
+  importiert. Ohne laufende Engine (ihr Speicher hat die Sicherheitsuhr, Holds, Sperren,
+  Wartungsfenster) gibt es `PreflightError`. `preflight_for(hass, router_id, aktion, params,
+  record=…)` sammelt und prüft in einem Schritt, speichert nichts, führt nichts aus.
+
+Jeder Fakt (`Fact`) trägt Wert, Quelle (`source`, z. B. `coordinator.data.services`), Alter
+(`age_s`; Poll-Fakten mit dem Alter des Polls, Speicher-Fakten 0, Registry-Fakten ohne
+Stempel `None`) und bei unbekanntem Wert einen Grund (`reason`, Pflicht). Werte sind nur
+Wahrheitswerte, Zahlen, kurze Codes oder Tupel davon; ein Wert, der wie eine IPv4-, IPv6- oder
+MAC-Adresse aussieht, wird abgelehnt. Daten eines Polls, der fehlschlug oder älter als zwei
+Poll-Intervalle ist, werden nicht benutzt (`poll_failed`, `poll_stale`); dann sind alle
+Router-Zustandsfakten unbekannt, nie aus dem alten Poll geraten.
+
+| Prüfung | kritisch für | liest (Quelle) | heute unbekannt / Grenze |
+|---|---|---|---|
+| `router_reachable` | jede Aktion mit Router-Aufruf oder Schreiben (auch `diag.refresh`); `n/a` für `observe.evaluate`, `diag.ha_probes` | `coordinator.last_update_success`, `data.last_seen`, `update_interval` | – ; älter als 2 Intervalle: `unknown` |
+| `identity_unique` | schreibende | Registry: Zustand des Datensatzes, Identitätsflags (`primary_identity_status`), Zahl der Datensätze mit dieser Kennung oder diesem Eintrag | – |
+| `action_supported` | immer | Katalog (Status, Ablehnung), Fähigkeiten der Registry (`transport.ubus`, `data.services`, `data.wireless`, `config.restore`), `diag_enabled` | gesperrte Katalogeinträge immer `fail` |
+| `permissions_present` | schreibende; `n/a` ohne Router-Aufruf bzw. bei HA-seitigen Proben | Cache der von rpcd abgelehnten Methoden der api (`_acl_blocked`, Speicher), Anmeldung als root (`config_ssh_user_is_root`, kein Netz), für `diag.refresh` der frische Poll | **heute nie `pass` für eine schreibende Aktion:** `rc/init` steht nicht in ACL v8 → ohne root `fail acl_does_not_grant`, mit root `unknown root_rights_not_verified`; Rechte aus ACL v8 → `unknown deployed_acl_not_verified` (ob die Datei auf dem Router liegt, ist nicht im Speicher). Füllt: C2 (eine geprüfte Rechteprobe) |
+| `no_concurrent_repair` | ab Risiko 1 (`n/a` für `observe.evaluate`) | Speicher: Hold, Flotten-Pause; bei schreibenden zusätzlich Router-Sperre (Engine/extern), offene Reparaturen auf dem Router, auf Routern davor oder dahinter (Topologie von Network Intelligence), in der Flotte (Grenze 1), Schutzschalter/Abklingzeit/Versuche der Schleifenschlüssel der Aktion | Router davor/dahinter ohne Topologie: `unknown topology_unknown`, nie 0 |
+| `maintenance_window_ok` | ab Risiko 1, **kritisch nur für Auto-Heal** (und bei unbekanntem Weg); mit Freigabe nur angezeigt | `ni.in_maintenance(entry)` (Router oder Flotte), Wartungsfenster des Speichers für das Bauteil (Router-Neustart: jedes), wirksamer Modus | – |
+| `no_critical_state` | schreibende | frischer Poll: Speicherdruck (> 85 % oder < 16 MiB frei), CPU-Last (> 100 % der Kerne, nur mit gemessenem Load-Average), Laufzeit (< 600 s, einstellbar 300–3600 s); Sperre des Configuration Managers; offene Security-Funde; Vorfälle auf dem Uplink und hinter dem Router (Network Intelligence) | Security Center aus → `unknown security_center_off` (ein ausgeschaltetes Modul sagt nicht „nichts gefunden“) |
+| `management_path_available` | schreibende mit Unterbrechung | Katalog (`disruption`), abhängige Router (Topologie), Funk-Uplink (`sta_interfaces`) | Dienst-Neustart `pass` (kein Link, keine Route, keine Adresse fällt weg); Router-Neustart `fail cuts_own_management_path`; Funk mit Routern dahinter `unknown` (deren Uplink-Medium ist nicht bekannt); `lan` `fail`, `wan`/`wan6` `unknown`; leere STA-Liste heißt „keine“ **oder** „Erkennung gescheitert“ → `unknown` |
+| `components_known` | schreibende | frischer Poll: `services` (`enabled`), Funk (`wifi_radios.phy`), Schnittstellen (`logical_name`); Versionsindex; Registry | **`odhcpd` wird nicht gepollt** (`DEFAULT_SERVICES`) → `unknown service_not_in_poll`; Funk über den iwinfo-Weg trägt andere Namen → `unknown radio_not_identified`; ein absichtlich abgeschalteter Dienst `fail service_disabled_on_purpose` |
+| `config_captured` | nur Konfiguration ändernde Aktionen (Katalog v1: `config.restore`), sonst `n/a` | Versionsindex des Core (Speicher): neueste `ok`/`partial`-Sicherung jünger als 24 h | – |
+| `backup_present` | wie oben | Versionsindex: `ok`, Prüfstatus `valid`, Prüfsumme vorhanden, jünger als 24 h | `unverified` → `fail backup_not_validated` |
+| `recovery_path_checked` | schreibende | Katalog (Rollback-Art, Grundrisiko), Fähigkeit `config.restore`, Sicherungen, Ergebnis von `management_path_available` | Wiederherstellen ist ein Probelauf: **Sicherung vorhanden, aber nicht wiederherstellbar → `fail restore_unavailable_dry_run_only`** (Detail `backup_present_not_restorable`); Risiko 3 → `fail no_recovery_mechanism`; Funk: zweiter Aufruf nur, solange der Weg hält; Dienst-Neustart `pass manual_recovery_statement` (die ehrliche Aussage des Katalogs) |
+| `approval_valid` | schreibende ab Risiko 2; Risiko 1 außerhalb von Auto-Heal; sonst `n/a` | der übergebene `RemediationAction`-Datensatz: gleicher Router, Aktion, Parameter; `approved`; Guard-Kennung; `binding_hash` = `binding_hash(Datensatz mit diesem Fingerabdruck)`; Frist gegen die Wanduhr der Momentaufnahme, höchstens 15 min voraus | die Frist selbst prüft weiter der Guard (C2) |
+
+**Fingerabdruck** (`state_fingerprint`, `PreflightResult.fingerprint`): sha256
+(`canonical_sha256`) über die Router-Kennung und die Werte der Fakten in `FINGERPRINT_FACTS`;
+statt Alter, Prozentwerten und Client-Zahlen gehen nur ihre Schwellen ein (`poll_fresh`,
+`memory_high`, `cpu_overloaded`, `recent_reboot`). Gleiche Fakten ergeben denselben Wert, jede
+Änderung eines relevanten Fakts (auch bekannt → unbekannt) einen anderen. Keine Adresse,
+kein Geheimnis, keine Freigabe (sonst wäre die Bindung zirkulär). Eine Freigabe bindet über
+`expected_binding(record, fingerprint)`; ändert sich der Zustand, passt sie nicht mehr.
+
+**Bindung und Frist:** Ein Ergebnis gilt nur für (Router, Aktion, Parameter) und für
+`valid_for_s` Sekunden **Sicherheitszeit** ab `facts.safe_at` (Standard 120 s, einstellbar
+10–300 s). `result.validity(router_id=…, action_type=…, params=…, safe_now=store.now())`
+antwortet `valid`, `blocked`, `expired`, `not_yet`, `other_router`, `other_action` oder
+`tampered`. Ein Sprung der Wanduhr bewegt die Sicherheitsuhr nicht (Abschnitt 5.2) und
+verlängert oder beendet ein Ergebnis nicht.
+
+**Kein grünes Ergebnis von außen** (wie `gate`): `PreflightResult` nimmt nur Fakten (genau
+`PreflightFacts`, jedes Feld genau `Fact`), Aktion, Parameter (einmal gelesen, eingefroren),
+den Datensatz mit der Freigabe (genau `RemediationAction`) und Grenzen (genau
+`PreflightLimits`). Urteil, Prüfungen, Fingerabdruck und Frist sind `init=False` und werden in
+`__post_init__` berechnet; `dataclasses.replace` kann nur Eingaben tauschen und prüft dann neu.
+Die Aktion wird erneut gegen den Katalog geprüft (`try_validate`). `validity()` rechnet vor
+`valid` alles aus den gespeicherten Fakten nach; ein hinter dem Rücken der eingefrorenen
+Klasse geändertes Feld ergibt `tampered`.
+
+**Fakten für die Richtlinie** (für das Adapter-Paket): `risk_context_for(facts, aktion,
+params)` → `heal_policy.RiskContext`, `incident_facts_for(facts, aktion, params)` →
+`IncidentFacts` (oder `None` ohne Vorfall). Was die Momentaufnahme nicht weiß, bleibt `None`.
+`service_dependant_routers`/`_clients` sind Untergrenzen aus den DHCP-Leases dieses Routers
+(Router über die MACs der Registry); 0 gesehene Leases heißt `None`, nicht 0 (statische
+Adressen sieht man nicht). `service_config_unapplied` bleibt `None` (Paket G),
+`clients_on_target` `None` (Clients je Funk sind nicht zugeordnet), `temporal_only` und
+`cause_outside_router` bleiben `None` (Paket F); `target_fact` ist `direct` nur, wenn der
+Dienst der Aktion im frischen Poll eingeschaltet ist und nicht läuft.
+
+**Heute unbekannt und wer es füllt:** Rechte der Root-Anmeldung und Stand der ACL auf dem
+Router (C2); ob die gespeicherte Dienst-Konfiguration geladen ist (G); `odhcpd` im Poll
+(eigenes kleines Paket oder C2: `DEFAULT_SERVICES`); Uplink-Medium der abhängigen Router und
+Funkname des iwinfo-Wegs (F/C-Funk, gesperrt); ob eine Wiederherstellung ausführbar ist (kein
+Ausführer); Ursache außerhalb des Routers, nur zeitliche Nähe (F); Alter der Registry-Fakten
+(die Registry stempelt sie nicht).
+
+**DECIDED (Paket E):**
+
+- `router_reachable` ist für **jede** Aktion mit Router-Aufruf kritisch, auch für den lesenden
+  `diag.refresh` (ein Refresh eines ausgefallenen oder veralteten Routers beweist nichts).
+- Eine Wartung sperrt nur Auto-Heal; mit Freigabe wird sie angezeigt (ein Mensch entscheidet),
+  bei unbekanntem Weg sperrt sie.
+- `heal_model.CheckOutcome` kennt kein `not_applicable`: `to_model_checks()` speichert eine
+  solche Prüfung als `pass` mit Grund `not_applicable` (sie sperrt nie). Das Adapter-Paket kann
+  den Wert ergänzen.
+- Als laufende Reparatur zählen offene Datensätze nach der Planung (ab `preflight`, ohne
+  Endzustände); für die Flotten-Grenze die, die eine Sperre halten oder freigegeben sind.
+- Konfiguration ändernd ist im Katalog v1 nur `config.restore`; ein Dienst-Neustart lädt die
+  gespeicherte Konfiguration (das sperrt Paket G über `service_config_unapplied`).
 
 ## 8. Playbooks A–G
 
@@ -1297,8 +1409,8 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 |---|---|---|
 | **B** | Zustandsmaschine, Datenmodell, Speicher, Neustartregel, Grenzen | **gebaut** (PR #75) |
 | **C1** | Engine-Gerüst, Modulschalter, Verdrahtung, lesende Routen, Listener | **gebaut** (PR #78; nur Observe, Abschnitt 2.1 und 11) |
-| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik; die Engine ruft sie noch nicht auf (eigenes kleines Paket nach dem Merge: ein `HealDecider` über `heal_policy`, Abschnitt 2.1) | **dieser Stand** |
-| E | Vorabprüfungen | offen |
+| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik; die Engine ruft sie noch nicht auf (eigenes kleines Paket nach dem Merge: ein `HealDecider` über `heal_policy`, Abschnitt 2.1) | **gebaut** |
+| **E** | Vorabprüfungen (`heal_preflight.py`, Abschnitt 7.1): dreizehn Prüfungen, Fingerabdruck, Bindung an Router/Aktion/Parameter und Sicherheitszeit, Sammler nur aus dem Speicher, Fakten für `RiskContext`/`IncidentFacts`; nicht angebunden (Adapter-Paket: Engine und `HealDecider`; C2: letzte Vorabprüfung vor dem Ausführen) | **dieser Stand** |
 | F | Playbooks A–G; **muss `IncidentFacts.cause_outside_router` füllen** (Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt) – bis dahin ist er `None` und sperrt jeden Dienst-Neustart (Insufficient Evidence) | offen |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
@@ -1469,10 +1581,46 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   Reviewers M06, M10, M15, M18, M20, M23, M27, M28): Ausnahme im Empfänger, Ausnahme im Takt,
   Obergrenze der Warteliste, Abbruch der Core-Bindung beim Stopp, nur eigene Planungs-
   Datensätze schließen, gescheitertes Entladen.
+- `tests/test_heal_preflight_v1530.py` (Paket E, 188 Tests): Auftragstest 8 (eine
+  gescheiterte kritische Prüfung sperrt; eine nicht kritische nicht; heute sperrt jede
+  schreibende Aktion), 9 (Router offline: `router_reachable` scheitert für jede Aktion mit
+  Router-Aufruf, der Zustand des Routers wird nicht aus dem alten Poll gelesen; veraltet,
+  Zeit voraus, ohne Intervall: unbekannt), 26 (zweite Aktion auf demselben Router, Reparatur
+  auf einem Router dahinter oder davor über die Topologie, Flotten-Grenze, externe Sperre,
+  Schutzschalter des Speichers – mit dem echten Speicher und dem Sammler), 27 (Wartung von
+  Network Intelligence und Wartungsfenster des Speichers; sperrt Auto-Heal, mit Freigabe nur
+  angezeigt). Jede der dreizehn Prüfungen in `pass`/`fail`/`unknown`/`not_applicable`, soweit
+  der Katalog es zulässt; Eigenschaftsprüfung „unbekannt besteht nie“: für jede bestandene
+  kritische Prüfung und jeden Fakt, den sie las, macht „unbekannt“ sie `unknown` oder `fail`
+  und das Urteil `blocked`; ein unbekannter Fakt vermehrt nie die bestandenen Prüfungen.
+  Fälschung: kein Urteil als Eingabe, `replace` prüft neu, `object.__setattr__` auf jedes
+  abgeleitete Feld und auf die Fakten ergibt `tampered`, Unterklassen und Attrappen werden
+  abgelehnt, die Aktion wird gegen den Katalog geprüft, Parameter eingefroren, Adressen als
+  Fakt abgelehnt. Fingerabdruck stabil, ändert sich mit jedem relevanten Fakt (auch bekannt →
+  unbekannt), nicht mit Alter, Prozenten, Clients. Frist auf der Sicherheitsuhr des echten
+  Speichers: Sprünge der Wanduhr (ein Tag vor, zwei zurück) ändern nichts, echte Zeit schon.
+  Hold und Flotten-Pause aus dem echten Speicher sperren; `service.restart` eines absichtlich
+  abgeschalteten Dienstes (auch die Richtlinie sagt Not Safe); Management-Weg am Access Point
+  mit drei Routern dahinter; Sicherung vorhanden, aber nicht wiederherstellbar. Sammler: nach
+  zwei Polls des echten api/Coordinator aus `full_router_kit` fügt das Sammeln (auch über
+  `collect_preflight_facts` und `preflight_for`) der aufgezeichneten Aufrufliste nichts hinzu
+  und ruft keinen Refresh; veralteter oder gescheiterter Poll, fehlender Eintrag, fehlender
+  Core, Network Intelligence, Security Center oder Diagnose ergeben „unbekannt“ mit Grund.
+  Reinheit per AST (kein `homeassistant`, `api`, `coordinator`, `time`, `datetime`, `socket`,
+  `subprocess`, `aiohttp`, `asyncssh` irgendwo; Engine, Speicher, Core, Network Intelligence,
+  Security Center und Diagnose nur im Sammler importiert).
+- **Mutationsprüfung Paket E:** 97 gezielte Änderungen an `heal_preflight.py` in einer Kopie (je eine Sperrregel jeder der dreizehn Prüfungen entfernt oder gelockert, dazu Urteil, Bindung, Frist, Fälschungsschutz, Fingerabdruck, Adressprüfung und Sammler); auf grüner Grundlinie lässt jede mindestens einen Test scheitern. Im ersten Lauf überlebte eine („eine schreibende Aktion braucht in Auto-Heal keine Freigabe“); dafür kam `test_a_write_needs_an_approval_also_in_auto_heal` dazu.
 - Nach dem ganzen Testlauf darf kein Verzeichnis `MagicMock` stehen (Hook
   `pytest_sessionfinish` in `tests/conftest.py`, der Lauf scheitert sonst).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
+
+Nicht geprüft (Paket E): der Sammler gegen den echten Core, das echte Network Intelligence und
+das echte Security Center in einem laufenden HA (die Tests nehmen Attrappen mit denselben
+Attributen; nur api, Coordinator und Speicher sind echt); ob `primary_identity_status`,
+Fähigkeiten und Versionsindex auf der Flotte die Werte tragen, die die Tabelle in 7.1 annimmt;
+der Sammler über `hass.config_entries` mit echten Einträgen; die Aufrufer (Engine, Routen,
+Executor), die es noch nicht gibt.
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (die C1-Tests laufen mit einem nachgebildeten `hass`, dem echten Network-Intelligence-Motor

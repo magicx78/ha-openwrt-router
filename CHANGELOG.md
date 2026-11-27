@@ -280,6 +280,41 @@ keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwickl
   überlebt hatten) und 44 eigene an den neuen Regeln lassen jede mindestens einen Test
   scheitern.
 
+### Self-Healing, Paket E
+
+Die Vorabprüfungen (Preflight Safety Engine): was vor jeder schreibenden Aktion geprüft wird
+und woher die Fakten dafür kommen. In 1.53.0 läuft nichts davon schreibend; die Prüfungen
+sind noch nicht angebunden und sollen später nur zeigen, „was sperren würde“. Für Benutzer
+ändert sich nichts: kein Router-Aufruf, keine Route, keine Entität, keine neue unique_id,
+keine Datei, keine ACL-Änderung. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 7.1.
+
+- `heal_preflight.py`, reiner Kern: dreizehn Prüfungen in fester Reihenfolge (Router
+  erreichbar, Identität eindeutig, Aktion unterstützt, Rechte, keine gleichzeitige Reparatur,
+  Wartung, kein gefährlicher Zustand, Management-Weg, Bauteile bekannt, Konfiguration
+  erfasst, Sicherung vorhanden, Wiederherstellung geklärt, Freigabe gültig). Jede meldet
+  bestanden, gescheitert, unbekannt oder nicht zutreffend, ob sie für die Aktion kritisch ist,
+  einen Grund und die gelesenen Fakten. Eine gescheiterte **oder unbekannte** kritische
+  Prüfung sperrt.
+- Ein Ergebnis gilt nur für Router, Aktion und Parameter und nur 120 s Sicherheitszeit
+  (einstellbar 10–300 s); ein Sprung der Wanduhr verlängert es nicht. Ein grünes Ergebnis lässt
+  sich nicht von außen bauen oder nachträglich verändern: es nimmt nur Fakten, berechnet Urteil
+  und Prüfungen selbst, prüft die Aktion erneut gegen den Katalog und erkennt geänderte Felder.
+- Fingerabdruck des Zustands (sha256) über die Fakten, die zählen, ohne Adressen und
+  Geheimnisse; eine Freigabe passt nur zum Fingerabdruck, mit dem sie erteilt wurde.
+- Sammler: liest nur, was schon im Speicher liegt (letzter Poll, Router Registry,
+  Versionsindex, Network Intelligence, Security Center, Diagnose, Self-Healing-Speicher). Jeder
+  Fakt trägt Quelle und Alter; fehlende oder veraltete Daten sind „unbekannt“ mit Grund, nie
+  geraten.
+- Fakten für die Richtlinie (`RiskContext`, `IncidentFacts`) aus derselben Momentaufnahme,
+  für das Paket, das Engine und Richtlinie verbindet.
+- Heute besteht keine schreibende Aktion die Prüfungen: die Rechte für `rc/init` sind nicht
+  geprüft (ohne Root-Anmeldung fehlen sie), `odhcpd` wird nicht gepollt, alles außer
+  `service.restart` ist im Katalog gesperrt, eine Sicherung ist ohne Ausführer nicht
+  wiederherstellbar.
+- Tests: `tests/test_heal_preflight_v1530.py` (188), darunter die Auftragstests 8, 9, 26 und 27
+  und ein Test, dass der Sammler keinen Router-Aufruf macht (aufgezeichnete Aufrufliste von
+  `full_router_kit`). Mutationsprüfung: siehe Entwicklerdoku, Abschnitt 17.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
