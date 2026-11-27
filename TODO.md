@@ -282,7 +282,19 @@ Branch `claude/traffic-analytics-d7ae50`. Nutzerdoku: `docs/traffic-analytics.md
 
 - [ ] **Speichergrenze nach einer Woche mit 1.52.3 nachsehen:** Diagnose `wifi_rf` →
       `store.last_save_bytes` und `store.drops.trimmed` der echten Instanz (13 Radios, erwartet
-      etwa 2,9 MB, `trimmed` 0). Wächst `trimmed`, sind die Werte länger als in der Simulation.
+      etwa 3,1 MB, `trimmed` 0). Wächst `trimmed`, sind die Werte länger als in der Simulation.
+- [ ] **Option: Werte gerundet speichern** (nicht umgesetzt; Review von 1.52.3). Ungerundet
+      kommen nur Auslastung (`100 * busy / active` aus ms-Zählern) und Retry-Rate (Quote aus
+      Paketzählern) an; ihre Summen in den Buckets haben dann bis zu 17 Stellen. Aussagekraft
+      der Quellen: Die Auslastung beruht auf ms-Zählern über etwa 300 s (1 ms ≈ 0,0003 %), die
+      Retry-Rate auf Paketzählern (bei wenigen hundert Paketen je Fenster tragen mehr als vier
+      Stellen nichts). Auslastung auf 2 und Retry-Rate auf 4 Nachkommastellen gerundet (Summen,
+      Minimum, Maximum beim Schreiben; vorher prüfen, mit wie vielen Stellen Panel und Sensoren
+      anzeigen) dürfte nichts Sichtbares verlieren und bringt ein Radio von
+      etwa 238 KB auf etwa 224 KB (32 Radios etwa 7,2 MB statt 7,6 MB); im ungünstigsten Fall
+      (alle Felder voll) wäre der Gewinn größer. Mittelwerte aus gerundeten Summen weichen in
+      der letzten gezeigten Stelle höchstens um eine Rundung ab. Erst nach Rückmeldung der
+      echten Größen umsetzen.
 
 - [ ] **Retry-Zählung an echter Hardware bestätigen** (nur lesend, mit Freigabe): seit 1.49.3
       gilt eine 0 als echte 0, sobald ein Client desselben Radios im Fenster Retries > 0

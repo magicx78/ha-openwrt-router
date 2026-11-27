@@ -27,12 +27,24 @@ could be reset there):
   all radios (hourly first, then daily; the newest bucket of every series
   stays) to ``WIFI_RF_TRIM_HEADROOM`` below the limit, in memory too
   (``trimmed``; pattern of ``tm_store``);
-* a payload that still does not fit keeps the last good one, and the file
-  as loaded counts as last good (pattern of ``traffic_store``); the history
+* a payload that still does not fit keeps the file as loaded until the
+  first good write of the run (pattern of ``traffic_store``); after that
+  copy is released, such a payload is written over the limit; the history
   is never written empty because of its size;
 * HA builds and serialises the payload in its executor
   (``serialize_in_event_loop=False``): the loop only copies the bucket
-  dicts and applies the trim (8 MB of indented JSON took 25 to 35 ms).
+  dicts and applies the trim (8 MB of indented JSON took 25 to 35 ms);
+* atomic writes (temporary file, then rename, like ``tm_store`` and
+  ``traffic_store``): a crash during one of up to 96 writes a day never
+  leaves a cut-off file;
+* a router forgotten while a write is under way is written out at once.
+
+Known limit: HA's ``Store`` catches a failed write (``WriteError``), logs
+it and reports nothing back. The store then counts the write as done
+(``dirty`` cleared, ``last_save_bytes`` set) although the file is older.
+The next poll marks the history dirty again and arms the next write, so the
+file catches up one delay later; only a failure in the last write before
+an unload or shutdown is not retried.
 """
 
 from __future__ import annotations
@@ -307,11 +319,13 @@ class RfStore:
         self.hass = hass
         # serialize_in_event_loop=False: HA calls _data_to_save and writes
         # the JSON in its executor (up to 8 MB; see the module docstring).
+        # atomic_writes: temporary file + rename, never a cut-off file.
         self._store: Store[dict[str, Any]] = Store(
             hass,
             WIFI_RF_STORE_VERSION,
             WIFI_RF_STORE_KEY,
             private=True,
+            atomic_writes=True,
             serialize_in_event_loop=False,
         )
         self.max_radios = max_radios
@@ -325,8 +339,8 @@ class RfStore:
         self.loaded = False
         self.dirty = False
         self.last_save_bytes: int | None = None
-        # The last payload that fit (or the file as loaded): written again
-        # when a new one cannot be trimmed under the limit.
+        # The file as loaded: written again when a payload cannot be trimmed
+        # under the limit; released after the first good write (several MB).
         self._last_payload: dict[str, Any] | None = None
         # True while a delayed write is armed: HA's async_delay_save moves a
         # pending write back on every call, so it is called once (1.52.3).
@@ -334,6 +348,8 @@ class RfStore:
         # Counts changes: a write clears ``dirty`` only if nothing changed
         # since its snapshot.
         self._generation = 0
+        # generation of the last forget_router that removed something
+        self._forgot_at = -1
         self._trim_warned = False
         self._lock = asyncio.Lock()
 
@@ -480,22 +496,24 @@ class RfStore:
 
     def _saved(self, prepared: _Prepared) -> None:
         """Apply a write's result in the loop: trim memory as the file was."""
-        if prepared.cuts:
-            for part, ref, name, ts in prepared.cuts:
-                history = self.radios.get(ref)
-                if history is None:
-                    continue
-                series = history.hourly if part == _HOURLY else history.daily
-                buckets = series.get(name)
-                if buckets is not None:
-                    buckets.pop(ts, None)
-            self.drops["trimmed"] += len(prepared.cuts)
+        removed = 0
+        for part, ref, name, ts in prepared.cuts:
+            history = self.radios.get(ref)
+            if history is None:
+                continue
+            series = history.hourly if part == _HOURLY else history.daily
+            buckets = series.get(name)
+            # an overlapping write may have removed it already: count once
+            if buckets is not None and buckets.pop(ts, None) is not None:
+                removed += 1
+        if removed:
+            self.drops["trimmed"] += removed
             _LOGGER.log(
                 logging.DEBUG if self._trim_warned else logging.WARNING,
                 "WiFi RF history over %d bytes; the oldest %d buckets were dropped "
                 "(hourly first); later trims are logged at debug level",
                 self.max_bytes,
-                len(prepared.cuts),
+                removed,
             )
             self._trim_warned = True
         if prepared.over:
@@ -509,21 +527,31 @@ class RfStore:
             )
         if prepared.fresh:
             self.last_save_bytes = prepared.size
-            self._last_payload = prepared.payload
+            # A good payload reached the writer: the loaded copy (several MB)
+            # is no longer needed. A later payload that cannot be trimmed is
+            # written over the limit instead, never an empty one.
+            self._last_payload = None
             if self._generation == prepared.generation:
                 self.dirty = False
+        if self._forgot_at > prepared.generation:
+            # A router was forgotten after this write's snapshot, so the file
+            # still has it: write again now, not in a delay (privacy).
+            self._arm(0)
 
     def _changed(self) -> None:
         self.dirty = True
         self._generation += 1
+
+    def _arm(self, delay: float) -> None:
+        self._save_pending = True
+        self._store.async_delay_save(self._data_to_save, delay)
 
     def schedule_save(self) -> None:
         """Arm one delayed write (none while one is pending)."""
         self._changed()
         if self._save_pending:
             return
-        self._save_pending = True
-        self._store.async_delay_save(self._data_to_save, WIFI_RF_SAVE_DELAY_SECONDS)
+        self._arm(WIFI_RF_SAVE_DELAY_SECONDS)
 
     async def async_flush(self) -> None:
         """Write now (last unload); the payload is built in the executor."""
@@ -654,18 +682,21 @@ class RfStore:
         # the kept last good payload must not bring the router back (1.52.3)
         last = self._last_payload
         radios = last.get("radios") if last is not None else None
+        kept_it = False
         if isinstance(radios, dict):
             prefix = f"{router_id}{_REF_SEP}"
-            self._last_payload = {
-                **last,
-                "radios": {
-                    k: v
-                    for k, v in radios.items()
-                    if not (isinstance(k, str) and k.startswith(prefix))
-                },
+            left = {
+                k: v
+                for k, v in radios.items()
+                if not (isinstance(k, str) and k.startswith(prefix))
             }
-        if gone:
-            self.schedule_save()
+            kept_it = len(left) < len(radios)
+            self._last_payload = {**last, "radios": left}
+        if gone or kept_it:
+            # privacy: the router leaves the file now, not after a delay
+            self._changed()
+            self._forgot_at = self._generation
+            self._arm(0)
         return bool(gone)
 
     def stats(self) -> dict[str, Any]:
