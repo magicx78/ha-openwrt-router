@@ -335,6 +335,23 @@ keine Datei, keine ACL-Änderung. Entwicklerdoku: `docs/self-healing.md`, Abschn
 - Flottenweite Security-Vorfälle zählen für jeden Router; neue Router mit DHCP-Lease und ein
   geänderter Vorfall ändern den Fingerabdruck.
 
+#### Nach dem zweiten Review von PR #80
+
+- Ein kleiner Zeitabgleich der Uhr nach hinten (etwa 5 Sekunden per NTP) sperrt nicht mehr
+  bis zum nächsten Neustart. Die Prüfung rechnet jetzt mit dem Rückstand der Uhr: ein Poll
+  zählt um so viele Sekunden älter, eine Freigabe läuft so viel früher ab. Ein großer Abstand
+  sperrt weiter, etwa wenn die Uhr einmal einen Tag vorging und dann korrigiert wurde. Das
+  hält auch über einen Neustart an, bis die Zeit, in der Home Assistant aus war, den Abstand
+  aufgebraucht hat. Die Entwicklerdoku erklärt das und warum (der Speicher kennt die Zeit des
+  Sprungs nicht).
+- Ist der Router nicht erreichbar, scheitert für einen Dienst-Neustart auch die
+  Wiederherstellungs-Prüfung (vorher „unbekannt“).
+- Ein Router-Neustart verlangt wie ein Dienst-Neustart, dass die gespeicherte Konfiguration
+  schon läuft (heute unbekannt, sperrt; er bleibt ohnehin gesperrt).
+- Die Entwicklerdoku nennt neue Pflichten für das anbindende Paket: Freigaben überleben keinen
+  Neustart von Home Assistant; der Fingerabdruck beim Freigeben entsteht mit denselben Eingaben
+  wie die letzte Prüfung; die nicht zutreffenden Prüfungen werden mit dem Datensatz gespeichert.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)

@@ -81,7 +81,7 @@ GREEN: dict[str, Any] = {
     "poll_ok": True,
     "poll_age_s": 10.0,
     "poll_interval_s": 60.0,
-    "wall_clock_behind": False,
+    "wall_clock_lag_s": 0.0,
     "record_active": True,
     "identity_status": "confirmed",
     "identity_bindings": 1,
@@ -1400,7 +1400,7 @@ def test_the_fingerprint_ignores_noise_but_not_thresholds() -> None:
     for over in (
         {"poll_age_s": 500.0},
         {"poll_ok": False},
-        {"wall_clock_behind": True},  # through the poll freshness
+        {"wall_clock_lag_s": 500.0},  # through the poll freshness
         {"memory_pressure_pct": 90.0},
         {"cpu_load_pct": 150.0},
         {"uptime_s": 60},
@@ -2417,8 +2417,9 @@ def test_review_2_moving_safe_at_forward() -> None:
         if "valid_until" in names:
             object.__setattr__(r, "valid_until", later + hp.VALID_FOR_DEFAULT_S)
         assert _valid_at(r, later + 1) is hp.Validity.TAMPERED, names
-    # the result holds its own copy: the caller's facts object changed later
-    # does not reach it
+    # the result holds its own PreflightFacts object (a shallow copy; the
+    # Fact objects are shared, see test_review2_4_…): a later change of the
+    # caller's facts object itself does not reach it
     f = facts(run_path="auto")
     r = hp.run_preflight(f, "diag.refresh", None)
     object.__setattr__(f, "safe_at", SAFE0 + 10_000)
@@ -2458,7 +2459,7 @@ def test_review_4_an_expired_approval_does_not_revive_with_the_wall_clock() -> N
     # the wall clock set back by an hour: the store sees it behind its mark
     # (the fingerprint changes with it; even an approval bound to that state
     # does not pass)
-    back = facts(wall_at=T0 + 10.0, safe_at=SAFE0 + 3600.0, wall_clock_behind=True)
+    back = facts(wall_at=T0 + 10.0, safe_at=SAFE0 + 3600.0, wall_clock_lag_s=3590.0)
     c = hp.run_preflight(back, "service.restart", DNSMASQ, approval=rec).check(
         "approval_valid"
     )
@@ -2469,13 +2470,13 @@ def test_review_4_an_expired_approval_does_not_revive_with_the_wall_clock() -> N
     )
     assert (c.status, c.reason, c.blocks) == (CS.FAIL, "wall_clock_set_back", True)
     # not known whether it was set back: no pass either
-    blind = facts(wall_at=T0 + 10.0, wall_clock_behind=u("safety_clock_unknown"))
+    blind = facts(wall_at=T0 + 10.0, wall_clock_lag_s=u("safety_clock_unknown"))
     rec_u = approved(blind, expires_at=T0 + 60.0)
     c = hp.run_preflight(blind, "service.restart", DNSMASQ, approval=rec_u).check(
         "approval_valid"
     )
     assert (c.status, c.reason, c.blocks) == (CS.UNKNOWN, "safety_clock_unknown", True)
-    assert c.facts_used == ("wall_clock_behind",)
+    assert c.facts_used == ("wall_clock_lag_s",)
     # a wall time before the decision itself
     early = facts(wall_at=T0 - 100.0)
     rec_early = approved(early, at_state(S.APPROVED), expires_in=600.0)
@@ -2503,19 +2504,19 @@ async def test_review_4_6_the_store_shows_a_wall_clock_set_back() -> None:
     clock = Clock(T0 + 3600)
     store, _ = await open_store(clock)
     f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
-    assert f.wall_clock_behind.value is False
-    assert f.wall_clock_behind.source == "heal_store.loop.clock"
+    assert f.wall_clock_lag_s.value == 0.0
+    assert f.wall_clock_lag_s.source == "heal_store.loop.clock"
     clock.now = T0 + 10  # set back by almost an hour, no real time passes
     f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
-    assert f.wall_clock_behind.value is True
+    assert f.wall_clock_lag_s.value == 3590.0
     # within the model's tolerance it is no set-back
     clock.now = T0 + 3600 - 0.5
     f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
-    assert f.wall_clock_behind.value is False
-    # real time catches up past the mark: trusted again
+    assert f.wall_clock_lag_s.value == 0.0
+    # real time catches up past the mark: no lag again
     clock.now = T0 + 3601
     f = hp.facts_from_sources(hp.FactSources(store=store), R1, wall_now=clock())
-    assert f.wall_clock_behind.value is False
+    assert f.wall_clock_lag_s.value == 0.0
 
 
 @pytest.mark.usefixtures("disks")
@@ -2540,8 +2541,8 @@ async def test_review_6_stale_poll_data_stays_stale_after_a_set_back() -> None:
     assert r.check("router_reachable").reason == "wall_clock_set_back"
     assert f.services.value is None  # nothing of the old data is used
     # pure facts: set back is never fresh, unknown neither
-    assert hp._poll_fresh(facts(wall_clock_behind=True))[0] is None
-    assert hp._poll_fresh(facts(wall_clock_behind=u()))[0] is None
+    assert hp._poll_fresh(facts(wall_clock_lag_s=600.0))[0] is None
+    assert hp._poll_fresh(facts(wall_clock_lag_s=u()))[0] is None
 
 
 class _Loop:
@@ -2723,12 +2724,19 @@ def test_review_8_service_restart_never_passes_path_or_recovery_on_nothing() -> 
     assert mgmt.status is CS.UNKNOWN and mgmt.blocks
     assert rec.status is CS.UNKNOWN and rec.blocks
     assert rec.reason == "manual_recovery_needs_path"
-    assert set(mgmt.facts_used) >= {"poll_ok", "dependants", "wall_clock_behind"}
+    assert set(mgmt.facts_used) >= {"poll_ok", "dependants", "wall_clock_lag_s"}
     assert rec.facts_used == mgmt.facts_used
     # the router not reachable: the path fails
     r = run("service.restart", DNSMASQ, poll_ok=False)
     assert r.check("management_path_available").reason == "router_unreachable"
-    assert r.check("recovery_path_checked").status is CS.UNKNOWN
+    rec = r.check("recovery_path_checked")
+    # second review of PR #80: a known-unreachable router fails the
+    # recovery too, like the path check (was unknown)
+    assert (rec.status, rec.reason, rec.blocks) == (
+        CS.FAIL,
+        "router_unreachable",
+        True,
+    )
     # green: both pass (path holds, a person approves)
     r = run("service.restart", DNSMASQ)
     assert r.check("management_path_available").status is CS.PASS
@@ -2943,3 +2951,264 @@ def test_review_13_incident_families_are_clamped() -> None:
     f = facts(incident_type=k("dhcp_down"), incident_families=k(500))
     inc = hp.incident_facts_for(f, "service.restart", DNSMASQ)
     assert inc is not None and inc.source_families == 64
+
+
+# --- second review of PR #80 -------------------------------------------------
+
+
+def _clock_store(clock: hm.SafetyClock) -> Any:
+    """A store whose safety clock is ``clock`` (``now`` does not observe)."""
+    loop = _Loop()
+    loop.clock = clock
+    return SimpleNamespace(
+        loop=loop,
+        actions={},
+        settings=SimpleNamespace(limits=None),
+        maintenance=[],
+        now=lambda: float(clock.safe or 0.0),
+        effective_mode=lambda rid: hm.HealMode.APPROVAL,
+    )
+
+
+def _coord_at(last_wall: float) -> Any:
+    from datetime import UTC, datetime, timedelta
+
+    return SimpleNamespace(
+        last_update_success=True,
+        data=SimpleNamespace(last_seen=datetime.fromtimestamp(last_wall, UTC)),
+        update_interval=timedelta(seconds=60),
+    )
+
+
+def _collect(clock: hm.SafetyClock, wall: float, last_poll: float) -> hp.PreflightFacts:
+    src = hp.FactSources(store=_clock_store(clock), coordinator=_coord_at(last_poll))
+    return hp.facts_from_sources(src, R1, wall_now=wall)
+
+
+def test_review2_1_an_ntp_step_back_before_the_poll_costs_only_its_size() -> None:
+    """Reviewer: one NTP step back of 5 s kept every poll stale for the whole
+    run. Now the lag (5 s) is added to the age: fresh polls stay fresh."""
+    c = hm.SafetyClock().observe(T0)
+    wall = T0
+    for _ in range(3):
+        wall += 60
+        c = c.observe(wall, 60.0)
+    wall -= 5.0  # NTP step back
+    seen = []
+    for i in range(24 * 60):  # one day, one observation a minute
+        wall += 60
+        c = c.observe(wall, 60.0)
+        if i in (0, 60, 24 * 60 - 1):
+            f = _collect(c, wall, wall - 10)
+            seen.append((f.wall_clock_lag_s.value, hp._poll_fresh(f)))
+    assert seen == [(5.0, (True, "last_poll_ok"))] * 3
+    # the lag still counts: a poll whose age plus lag passes the limit
+    f = _collect(c, wall, wall - (hp.STALE_POLLS * 60 - 4))
+    assert hp._poll_fresh(f) == (None, "wall_clock_set_back")
+
+
+def test_review2_1_known_strict_a_clock_once_far_ahead_still_blocks() -> None:
+    """Pins today's STRICT behaviour, not a wish (docs §7.1): the store keeps
+    no time of a step, so a wall clock that was a day ahead once (persisted
+    high-water mark) and then corrected looks set back by a day. Every
+    wall age is too old until the gap is gone - in-run never, the mark runs
+    on with the monotonic clock; only Home Assistant downtime shrinks it."""
+    c = hm.SafetyClock().observe(T0 + 86_400)  # wrong, one day ahead
+    c = c.observe(T0)  # corrected (first observation after a restart)
+    f = _collect(c, T0, T0 - 10)
+    assert f.wall_clock_lag_s.value == 86_400.0
+    r = hp.run_preflight(f, "diag.refresh", None)
+    assert r.check("router_reachable").reason == "wall_clock_set_back"
+    for _ in range(10):  # an hour later in the same run: unchanged
+        c = c.observe(T0 + 360.0 * (_ + 1), 360.0)
+    assert c.high - (T0 + 3600.0) == 86_400.0
+
+
+def test_review2_1_a_step_back_after_the_poll_still_blocks() -> None:
+    """The poll is 500 s old in real time (stale); the clock is set back by
+    400 s after it, so the wall age is 100 s. Lag + age: still stale."""
+    c = hm.SafetyClock().observe(T0)
+    poll_wall = T0
+    wall = T0
+    for _ in range(5):
+        wall += 60
+        c = c.observe(wall, 60.0)
+    wall -= 400.0  # set back after the poll
+    for _ in range(3):
+        wall += 60
+        c = c.observe(wall, 60.0)
+    f = _collect(c, wall, poll_wall)
+    assert f.poll_age_s.value == 80.0  # looks fresh on the wall clock alone
+    assert f.wall_clock_lag_s.value == 400.0
+    assert hp._poll_fresh(f) == (None, "wall_clock_set_back")
+    r = hp.run_preflight(f, "diag.refresh", None)
+    c_r = r.check("router_reachable")
+    assert (c_r.status, c_r.reason, c_r.blocks) == (
+        CS.UNKNOWN,
+        "wall_clock_set_back",
+        True,
+    )
+    # the same facts with the lag unknown: never fresh (fail-closed)
+    blind = dataclasses.replace(f, wall_clock_lag_s=u("safety_clock_unknown"))
+    assert hp._poll_fresh(blind) == (None, "safety_clock_unknown")
+
+
+def test_review2_1_a_step_back_after_the_decision_still_blocks() -> None:
+    """Decided at T0 for 600 s; 700 s of real time later (expired) the
+    clock was set back by 300 s: the wall says 400 s. Lag + wall: expired."""
+    f = facts(wall_at=T0 + 400.0, wall_clock_lag_s=300.0)
+    rec = approved(f, expires_at=T0 + 600.0)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason, c.blocks) == (CS.FAIL, "wall_clock_set_back", True)
+    # a small NTP step (5 s) does not cost the approval
+    f = facts(wall_at=T0 + 400.0, wall_clock_lag_s=5.0)
+    rec = approved(f, expires_at=T0 + 600.0)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert (c.status, c.reason) == (CS.PASS, "approval_bound_and_current")
+    # exactly used up by the lag: expired (exclusive, like ``left == 0``)
+    f = facts(wall_at=T0 + 400.0, wall_clock_lag_s=200.0)
+    rec = approved(f, expires_at=T0 + 600.0)
+    c = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert c.reason == "wall_clock_set_back"
+
+
+@pytest.mark.parametrize("bad", [-1.0, -0.001, True])
+def test_review2_1_a_negative_lag_is_refused(bad: Any) -> None:
+    with pytest.raises(hp.PreflightError):
+        facts(wall_clock_lag_s=bad)
+
+
+def test_known_gap_c2_duty_7_approval_survives_restart_clock_set_back() -> None:
+    """NOT a guarantee - it documents a gap C2 must close (docs §7.1, duty 7).
+
+    Decided at T0 for 600 s; right after, the wall clock is set back by an
+    hour; Home Assistant restarts after 1 h 30 s of downtime. The store's
+    first observation after the load does not advance the mark during the
+    downtime, so the collector sees no lag, and wall and safety clock both
+    show 50 s since the decision: the long-expired approval PASSES here.
+    C2 must treat every approval decided before the current start as
+    expired."""
+    c = hm.SafetyClock().observe(T0)  # the decision
+    c = c.observe(T0 - 3600.0, 1.0)  # set back by an hour, same run
+    c_restart = c.observe(T0 + 50.0)  # after 1 h + 30 s down (+ 20 s run)
+    f = _collect(c_restart, T0 + 50.0, T0 + 40.0)
+    assert f.wall_clock_lag_s.value == 0.0
+    assert c_restart.safe - c.safe <= 50.0
+    rec = approved(f, expires_at=T0 + 600.0)
+    check = hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec).check(
+        "approval_valid"
+    )
+    assert check.status is CS.PASS  # the gap: C2 duty 7 expires it
+
+
+def test_review2_4_shared_fact_objects_are_caught_as_tampered() -> None:
+    """The result's copy of the facts is shallow: the Fact objects are the
+    caller's. A forced change of one is not kept out, it is TAMPERED."""
+    f = facts(run_path="auto")
+    r = hp.run_preflight(f, "diag.refresh", None)
+    assert r.facts is not f
+    assert r.facts.poll_ok is f.poll_ok
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.VALID
+    object.__setattr__(f.poll_ok, "value", False)
+    assert _valid_at(r, SAFE0 + 1) is hp.Validity.TAMPERED
+
+
+def test_review2_3_the_view_form_carries_the_not_applicable_ids() -> None:
+    """``to_model_checks`` leaves them out; ``to_dict`` keeps them (C2 duty 9:
+    store them or the mode with the record)."""
+    for path in ("auto", "approval"):
+        r = run("diag.refresh", None, run_path=path)
+        stored = {c.check for c in r.to_model_checks()}
+        d = r.to_dict()
+        assert set(d["not_applicable"]) == set(r.not_applicable)
+        assert stored | set(d["not_applicable"]) == {c.check for c in r.checks}
+        assert not stored & set(d["not_applicable"])
+
+
+@pytest.mark.parametrize(
+    ("drift", "status", "reason"),
+    [
+        (False, CS.PASS, "saved_config_is_running"),
+        (True, CS.FAIL, "saved_config_not_running"),
+        (None, CS.UNKNOWN, "config_drift_unknown"),
+    ],
+)
+def test_review2_a_reboot_applies_the_saved_config_too(
+    drift: bool | None, status: CS, reason: str
+) -> None:
+    """Coordinator answer: ``router.reboot`` is in ``CONFIG_APPLYING``."""
+    assert "router.reboot" in hp.CONFIG_APPLYING
+    value: Any = u("config_drift_unknown") if drift is None else drift
+    c = run("router.reboot", {}, service_config_unapplied=value).check(
+        "config_captured"
+    )
+    assert (c.status, c.reason, c.critical) == (status, reason, True)
+    assert c.facts_used == ("service_config_unapplied",)
+    # still blocked as a whole (catalog v1: no recovery mechanism)
+    r = run("router.reboot", {}, service_config_unapplied=value)
+    assert "recovery_path_checked" in r.blocking
+
+
+def test_review2_6_an_unreachable_router_fails_the_manual_recovery() -> None:
+    r = run("service.restart", DNSMASQ, poll_ok=False)
+    mgmt = r.check("management_path_available")
+    rec = r.check("recovery_path_checked")
+    assert (mgmt.status, mgmt.reason) == (CS.FAIL, "router_unreachable")
+    assert (rec.status, rec.reason, rec.blocks) == (CS.FAIL, "router_unreachable", True)
+    assert rec.facts_used == mgmt.facts_used
+    # stale (unknown) stays unknown
+    r = run("service.restart", DNSMASQ, poll_age_s=10_000.0)
+    rec = r.check("recovery_path_checked")
+    assert (rec.status, rec.reason) == (CS.UNKNOWN, "manual_recovery_needs_path")
+
+
+def test_review2_n06_a_record_without_its_decision_step_is_refused() -> None:
+    """Reviewer mutant N06 (``decided is None`` passes) is equivalent: the
+    model ends every history in the record's state, so only a forced record
+    lacks the step into APPROVED, and the binding check rebuilds the record
+    (``replace``), which the model refuses before the decision is read.
+    Pinned: such a record never yields a result."""
+    f = facts()
+    rec = approved(f)
+    object.__setattr__(
+        rec, "history", tuple(h for h in rec.history if h.to_state is not S.APPROVED)
+    )
+    with pytest.raises(hm.HealModelError):
+        hp.run_preflight(f, "service.restart", DNSMASQ, approval=rec)
+
+
+def test_review2_n11_a_stretched_validity_without_the_limits_is_tampered() -> None:
+    """Reviewer mutant N11: ``_valid_for_s`` and ``valid_until`` moved alike,
+    the limits left at 120 s: the private copy no longer matches them."""
+    r = run("diag.refresh", None, run_path="auto")
+    assert r.limits.valid_for_s == 120
+    object.__setattr__(r, "_valid_for_s", 300)
+    object.__setattr__(r, "valid_until", r.safe_at + 300)
+    assert _valid_at(r, SAFE0 + 200) is hp.Validity.TAMPERED
+
+
+def test_review2_n20_a_collected_fact_of_the_wrong_shape_is_unreadable() -> None:
+    """Reviewer mutant N20: a fact in the wrong shape is kept as unknown with
+    ``value_unreadable`` (not dropped to ``not_collected``)."""
+    out = hp._sane(
+        {
+            "poll_ok": k("yes", "coordinator"),
+            "dependants": k(-1, "registry"),
+            "wall_clock_lag_s": k(-5.0, "heal_store.loop.clock"),
+            "role": k("gateway", "registry"),
+        }
+    )
+    for name, source in (
+        ("poll_ok", "coordinator"),
+        ("dependants", "registry"),
+        ("wall_clock_lag_s", "heal_store.loop.clock"),
+    ):
+        assert out[name].value is None, name
+        assert (out[name].reason, out[name].source) == ("value_unreadable", source)
+    assert out["role"].value == "gateway"

@@ -141,10 +141,11 @@ CONFIG_CHANGING: Final = frozenset({"config.restore"})
 # restart loads what is saved, so a saved change that is not running yet
 # would go live with it. ``config_captured`` asks for the fact
 # ``service_config_unapplied`` there (unknown until package G tracks the
-# drift: unknown blocks). DECIDED (E, review of PR #80): only
-# ``service.restart``; ``router.reboot`` applies all saved configuration too,
-# but it is blocked by ``no_recovery_mechanism`` in catalog v1.
-CONFIG_APPLYING: Final = frozenset({"service.restart"})
+# drift: unknown blocks). DECIDED (E, second review of PR #80):
+# ``service.restart`` and ``router.reboot`` - a reboot applies all saved
+# configuration (it is also blocked by ``no_recovery_mechanism`` in catalog
+# v1; this keeps the preflight strict on its own).
+CONFIG_APPLYING: Final = frozenset({"service.restart", "router.reboot"})
 
 # The one state a record is in when its execution starts (APPROVED ->
 # EXECUTING): an approval counts only on a record in that state.
@@ -343,7 +344,7 @@ def _nc() -> Fact:
 
 # Shapes of the fact fields (validated in PreflightFacts).
 _BOOL, _COUNT, _NUM, _CODE, _CODES = "bool", "count", "num", "code", "codes"
-_SERVICES, _BACKUPS = "services", "backups"
+_SERVICES, _BACKUPS, _LAG = "services", "backups", "lag"
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -363,9 +364,10 @@ class PreflightFacts:
     poll_ok: Fact = field(default_factory=_nc)
     poll_age_s: Fact = field(default_factory=_nc)
     poll_interval_s: Fact = field(default_factory=_nc)
-    # the wall clock is behind the highest wall time the store has seen
-    # (set back): wall-clock ages and the approval expiry cannot be trusted
-    wall_clock_behind: Fact = field(default_factory=_nc)
+    # seconds the wall clock is behind the highest wall time the store has
+    # seen (0.0: not set back). Wall ages and the approval expiry are
+    # measured against that mark: wall time + lag (docs §7.1)
+    wall_clock_lag_s: Fact = field(default_factory=_nc)
     # Unified Router Identity (core registry)
     record_active: Fact = field(default_factory=_nc)
     identity_status: Fact = field(default_factory=_nc)
@@ -471,7 +473,7 @@ _SHAPES: Final[Mapping[str, str]] = MappingProxyType(
         "poll_ok": _BOOL,
         "poll_age_s": _NUM,
         "poll_interval_s": _NUM,
-        "wall_clock_behind": _BOOL,
+        "wall_clock_lag_s": _LAG,
         "record_active": _BOOL,
         "identity_status": _CODE,
         "identity_bindings": _COUNT,
@@ -523,7 +525,7 @@ _SHAPES: Final[Mapping[str, str]] = MappingProxyType(
 
 # Facts that change all the time; the fingerprint takes the derived
 # threshold flags instead (``_fingerprint_view``: poll freshness, which also
-# reads ``wall_clock_behind``, memory, CPU, recent reboot). The routers
+# reads ``wall_clock_lag_s``, memory, CPU, recent reboot). The routers
 # holding a lease (``lease_routers``) and the incident's type, status,
 # severity and cause DO enter it (review of PR #80): a new dependant router
 # or a resolved incident is another state than the one approved.
@@ -531,7 +533,7 @@ VOLATILE_FACTS: Final = frozenset(
     {
         "poll_age_s",
         "poll_interval_s",
-        "wall_clock_behind",
+        "wall_clock_lag_s",
         "memory_pressure_pct",
         "memory_available_bytes",
         "cpu_load_pct",
@@ -559,6 +561,13 @@ def _check_shape(name: str, value: Any) -> None:
         ok = isinstance(value, int) and not isinstance(value, bool) and value >= 0
     elif shape == _NUM:
         ok = isinstance(value, int | float) and not isinstance(value, bool)
+    elif shape == _LAG:
+        # a negative lag would make wall ages look fresher
+        ok = (
+            isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and value >= 0
+        )
     elif shape == _CODE:
         ok = isinstance(value, str) and _CODE_RE.fullmatch(value) is not None
     elif shape == _CODES:
@@ -795,13 +804,9 @@ def _poll_fresh(f: PreflightFacts) -> tuple[bool | None, str]:
         return False, "last_poll_failed"
     if ok is None:
         return None, f.poll_ok.reason or "poll_unknown"
-    behind = f.wall_clock_behind.value
-    if behind is True:
-        # the age is wall time minus a wall stamp: with the wall clock set
-        # back, stale data would look fresh
-        return None, "wall_clock_set_back"
-    if behind is None:
-        return None, f.wall_clock_behind.reason or "wall_clock_unknown"
+    lag = f.wall_clock_lag_s.value
+    if lag is None:
+        return None, f.wall_clock_lag_s.reason or "wall_clock_unknown"
     age, interval = f.poll_age_s.value, f.poll_interval_s.value
     if age is None:
         return None, f.poll_age_s.reason or "poll_age_unknown"
@@ -809,12 +814,20 @@ def _poll_fresh(f: PreflightFacts) -> tuple[bool | None, str]:
         return None, f.poll_interval_s.reason or "poll_interval_unknown"
     if age < 0:
         return None, "poll_time_ahead"
-    if age > STALE_POLLS * interval:
+    limit = STALE_POLLS * interval
+    if age > limit:
         return None, "poll_stale"
+    # The age is wall time minus a wall stamp. A wall clock set back after
+    # the poll would make stale data look fresh, so the age is taken
+    # against the highest wall time seen (wall + lag). The store keeps no
+    # time of the step: a step before the poll costs its size as well
+    # (strict, docs §7.1).
+    if age + lag > limit:
+        return None, "wall_clock_set_back"
     return True, "last_poll_ok"
 
 
-_POLL_FACTS: Final = ("poll_ok", "poll_age_s", "poll_interval_s", "wall_clock_behind")
+_POLL_FACTS: Final = ("poll_ok", "poll_age_s", "poll_interval_s", "wall_clock_lag_s")
 
 
 def _risk(ctx: _Ctx) -> RiskClass:
@@ -1344,8 +1357,11 @@ def _c_recovery_path_checked(ctx: _Ctx, mgmt: CheckResult) -> CheckResult:
     # recovery if the service does not come back (accepted for Risk 2 with
     # an approval, catalog v1). DECIDED (review of PR #80): that is a pass
     # only while the management path itself passed (someone can still get
-    # in) AND a person approves; otherwise unknown.
+    # in) AND a person approves; a known-failed path (router unreachable) is
+    # a fail like the path check (second review); otherwise unknown.
     used = mgmt.facts_used
+    if mgmt.status is CheckStatus.FAIL:
+        return _res(cid, CheckStatus.FAIL, True, mgmt.reason, used, (statement,))
     if mgmt.status is CheckStatus.PASS and _needs_approval(ctx):
         return _res(
             cid, CheckStatus.PASS, True, "manual_recovery_statement", used, (statement,)
@@ -1381,7 +1397,7 @@ def _c_approval_valid(ctx: _Ctx) -> CheckResult:
     if not _needs_approval(ctx):
         return _na(cid, "no_approval_needed", ("run_path",))
 
-    used = ("wall_clock_behind",)
+    used = ("wall_clock_lag_s",)
 
     def fail(code: str) -> CheckResult:
         return _res(cid, CheckStatus.FAIL, True, code, used)
@@ -1416,18 +1432,19 @@ def _c_approval_valid(ctx: _Ctx) -> CheckResult:
     if ap.expires_at is None:
         return fail("approval_without_expiry")
     # The expiry is a wall time and the record carries no safety time of
-    # the decision (heal_model unchanged in E). So: no pass while the wall
-    # clock is behind the highest wall time seen (set back), nor before the
-    # decision itself; the remaining obligation is C2's (docs §7.1).
-    behind = f.wall_clock_behind.value
-    if behind is True:
-        return fail("wall_clock_set_back")
-    if behind is None:
+    # the decision (heal_model unchanged in E). So: no pass before the
+    # decision itself, and the expiry is also measured against the highest
+    # wall time seen (wall + lag), so a clock set back after the decision
+    # cannot stretch it. The store keeps no time of the step: a gap from
+    # before the decision shortens the approval too (strict). Restarts are
+    # C2's (docs §7.1, duty 7).
+    lag = f.wall_clock_lag_s.value
+    if lag is None:
         return _res(
             cid,
             CheckStatus.UNKNOWN,
             True,
-            f.wall_clock_behind.reason or "wall_clock_unknown",
+            f.wall_clock_lag_s.reason or "wall_clock_unknown",
             used,
         )
     decided = _approved_at(rec)
@@ -1436,6 +1453,8 @@ def _c_approval_valid(ctx: _Ctx) -> CheckResult:
     left = ap.expires_at - f.wall_at
     if left <= 0:
         return fail("approval_expired")
+    if left - lag <= 0:
+        return fail("wall_clock_set_back")
     if left > APPROVAL_TTL_MAX_S or ap.expires_at - decided > APPROVAL_TTL_MAX_S:
         return fail("approval_expiry_implausible")
     return _res(cid, CheckStatus.PASS, True, "approval_bound_and_current", used)
@@ -1574,8 +1593,11 @@ class PreflightResult:
         if self.approval is not None and type(self.approval) is not RemediationAction:
             raise _fail("approval")
         set_ = object.__setattr__
-        # an own, re-validated copy: a later change of the caller's object
-        # does not reach this result
+        # a re-validated shallow copy: the PreflightFacts object is new,
+        # but its Fact objects are the caller's (frozen, shared). A later
+        # change of a shared Fact (only by force, it is frozen) is not kept
+        # out; ``validity()`` reports it as TAMPERED, because the checks no
+        # longer follow from the stored facts.
         set_(self, "facts", replace(self.facts))
         params = _frozen_params(self.params)
         set_(self, "params", params)
@@ -2017,18 +2039,21 @@ def _poll_facts(src: FactSources, wall: float) -> dict[str, Fact]:
 
 
 def _clock_fact(store: Any, wall: float) -> Fact:
-    """Is the wall clock behind the highest wall time the store observed?
+    """Seconds the wall clock is behind the highest wall time observed.
 
     The store's safety clock keeps that mark (``SafetyClock.high``, never
-    lowered). A wall time below it means the clock was set back: every age
-    computed from wall stamps (the poll's ``last_seen``) and every wall
-    expiry (an approval's ``expires_at``) cannot be trusted then."""
+    lowered). A wall time below it means the clock was set back: ages from
+    wall stamps (the poll's ``last_seen``) and wall expiries (an approval's
+    ``expires_at``) are then also measured against the mark. The store
+    keeps no time of the step, so the lag counts whether the step came
+    before or after the thing being aged (strict, docs §7.1)."""
     s = "heal_store.loop.clock"
     clock = getattr(getattr(store, "loop", None), "clock", None)
     high = _num(getattr(clock, "high", None))
     if high is None:
         return unknown("safety_clock_unknown", s)
-    return known(wall < high - CLOCK_BACK_TOLERANCE_S, s, 0.0)
+    lag = high - wall
+    return known(lag if lag > CLOCK_BACK_TOLERANCE_S else 0.0, s, 0.0)
 
 
 def _router_state_facts(
@@ -2750,9 +2775,9 @@ def facts_from_sources(
 
     part(_POLL_FACTS[:3], "coordinator", lambda: (_poll_facts(src, wall), None))
     part(
-        ("wall_clock_behind",),
+        ("wall_clock_lag_s",),
         "heal_store.loop.clock",
-        lambda: ({"wall_clock_behind": _clock_fact(src.store, wall)}, None),
+        lambda: ({"wall_clock_lag_s": _clock_fact(src.store, wall)}, None),
     )
     poll_f = PreflightFacts(
         router_id=router_id, safe_at=safe, wall_at=wall, **_sane(facts)

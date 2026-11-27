@@ -875,9 +875,39 @@ Wahrheitswerte, Zahlen, kurze Codes oder Tupel davon; ein Wert, der wie eine IPv
 MAC-Adresse aussieht, wird abgelehnt. Daten eines Polls, der fehlschlug oder älter als zwei
 Poll-Intervalle ist, werden nicht benutzt (`poll_failed`, `poll_stale`); dann sind alle
 Router-Zustandsfakten unbekannt, nie aus dem alten Poll geraten. Das Alter des Polls ist
-Wanduhr minus Wandstempel; steht die Wanduhr hinter der höchsten Wanduhrzeit, die der Speicher
-je gesehen hat (`SafetyClock.high`, Toleranz 1 s), ist sie zurückgestellt (`wall_clock_behind`)
-und der Poll gilt nicht als frisch (`wall_clock_set_back`); weiß man das nicht, auch nicht.
+Wanduhr minus Wandstempel. Damit ein Zurückstellen der Wanduhr nach dem Poll alte Daten nicht
+frisch aussehen lässt, liefert der Sammler den **Rückstand** der Wanduhr hinter der höchsten
+Wanduhrzeit, die der Speicher je gesehen hat (`wall_clock_lag_s` = `SafetyClock.high` minus
+Wanduhr; bis 1 s Toleranz 0; nie negativ, ein negativer Wert wird abgelehnt). Der Poll ist nur
+frisch, wenn **Alter plus Rückstand** höchstens zwei Intervalle ist – das ist das Alter gegen
+die Marke des Speichers gemessen –, sonst `wall_clock_set_back`; ist der Rückstand unbekannt,
+ist der Poll nicht frisch. Die Frist einer Freigabe wird genauso gemessen (Tabelle,
+`approval_valid`). Den Poll auf der Sicherheitsuhr zu altern geht nicht: die Coordinator-Daten
+tragen nur den Wandstempel `last_seen`, der Speicher sieht keinen Poll.
+
+**Strenge, die bleibt (zweites Review von PR #80):** Gewünscht war, dass ein Zurückstellen nur
+zählt, wenn es **nach** dem Gealterten geschah (nach dem Poll, nach der Entscheidung). Wann es
+geschah, weiß der Speicher nicht: er hält nur die Marke `high`, keine Zeit eines Sprungs, und
+Paket E ändert `heal_model`/`heal_store` nicht. Deshalb zählt der Rückstand immer, auch wenn
+der Sprung vor dem Poll oder vor der Entscheidung lag. Was das heißt:
+
+- Ein kleiner NTP-Schritt kostet nur seine Größe (5 s zurück: ein 10 s alter Poll zählt als
+  15 s alt). Vorher sperrte jeder Schritt über 1 s jeden Poll für den ganzen Lauf.
+- Ein **großer Abstand sperrt weiter.** Stand die Wanduhr einmal einen Tag vor (die Marke wird
+  gespeichert) und wurde dann korrigiert, ist jeder Poll und jede Freigabe einen Tag zu alt:
+  `router_reachable` bleibt `unknown wall_clock_set_back` für jede Aktion mit Router-Aufruf,
+  jede Freigabe `fail`. In einer laufenden Instanz endet das **nie** – die Marke läuft mit der
+  monotonen Uhr weiter, der Abstand bleibt gleich. **Auch ein Neustart beendet es nicht
+  sofort:** beim ersten Beobachten nach dem Laden rückt die Marke nicht um die Ausfallzeit vor,
+  der Abstand schrumpft also nur um die Zeit, die Home Assistant aus war. Es endet, wenn die
+  Ausfallzeiten den Abstand aufgebraucht haben. Abhilfe braucht eine Änderung am Speicher (etwa
+  den Abstand beim Start festhalten oder die Sicherheitszeit jedes Sprungs speichern); das ist
+  einzuplanen. Bis dahin gilt: lieber sperren als auf Verdacht frisch.
+- Reste, die der Rückstand nicht abdeckt: (1) ein Sprung **vor** dem Poll nach vorn, den keine
+  Beobachtung des Speichers sah, und danach ein Sprung zurück – der Poll wirkt um den
+  Vorwärtssprung jünger (die Marke kannte die vorgestellte Zeit nie; so auch vorher). (2) Stand
+  die Engine länger als 900 s (`CLOCK_STEP_MAX_S`, die Marke rückt je Beobachtung höchstens so
+  weit vor), geht der Teil des Rückstands verloren, der darüber liegt.
 
 Der Sammler wirft nie wegen dessen, was er liest (Review PR #80): jeder Teil läuft geschützt,
 eine Ausnahme macht seine Fakten `unknown collector_error`, ein Wert in falscher Form
@@ -889,7 +919,7 @@ nicht lesbar.
 
 | Prüfung | kritisch für | liest (Quelle) | heute unbekannt / Grenze |
 |---|---|---|---|
-| `router_reachable` | jede Aktion mit Router-Aufruf oder Schreiben (auch `diag.refresh`); `n/a` für `observe.evaluate`, `diag.ha_probes` | `coordinator.last_update_success`, `data.last_seen`, `update_interval`, `wall_clock_behind` (Speicher) | älter als 2 Intervalle oder Wanduhr zurückgestellt: `unknown` |
+| `router_reachable` | jede Aktion mit Router-Aufruf oder Schreiben (auch `diag.refresh`); `n/a` für `observe.evaluate`, `diag.ha_probes` | `coordinator.last_update_success`, `data.last_seen`, `update_interval`, `wall_clock_lag_s` (Speicher) | älter als 2 Intervalle (`poll_stale`) oder Alter plus Rückstand der Wanduhr darüber (`wall_clock_set_back`): `unknown` |
 | `identity_unique` | schreibende | Registry: Zustand des Datensatzes, Identitätsflags (`primary_identity_status`), Zahl der Datensätze mit dieser Kennung oder diesem Eintrag | – |
 | `action_supported` | immer | Katalog (Status, Ablehnung), Fähigkeiten der Registry (`transport.ubus`, `data.services`, `data.wireless`, `config.restore`), `diag_enabled` | gesperrte Katalogeinträge immer `fail` |
 | `permissions_present` | schreibende; `n/a` ohne Router-Aufruf bzw. bei HA-seitigen Proben | Cache der von rpcd abgelehnten Methoden der api (`_acl_blocked`, Speicher; api.py hat keinen öffentlichen Zugriff, gelesen hinter `_safe_call`, andere Form → `unknown acl_cache_shape_changed`), Anmeldung als root (`config_ssh_user_is_root`, kein Netz), für `diag.refresh` der frische Poll | **heute nie `pass` für eine schreibende Aktion:** `rc/init` steht nicht in ACL v8 → ohne root `fail acl_does_not_grant`, mit root `unknown root_rights_not_verified`; Rechte aus ACL v8 → `unknown deployed_acl_not_verified` (ob die Datei auf dem Router liegt, ist nicht im Speicher). Füllt: C2 (eine geprüfte Rechteprobe) |
@@ -898,10 +928,10 @@ nicht lesbar.
 | `no_critical_state` | schreibende | frischer Poll: Speicherdruck (> 85 % oder < 16 MiB frei), CPU-Last (> 100 % der Kerne, nur mit gemessenem Load-Average), Laufzeit (< 600 s, einstellbar 300–3600 s; 0 ist der Vorgabewert vor dem ersten Lesen → `unknown`); Sperre des Configuration Managers; offene Security-Funde (auch flottenweite ohne Router-Kennung); Vorfälle auf dem Uplink und hinter dem Router (Network Intelligence) | Security Center aus → `unknown security_center_off` (ein ausgeschaltetes Modul sagt nicht „nichts gefunden“) |
 | `management_path_available` | schreibende mit Unterbrechung | Katalog (`disruption`), frischer Poll, abhängige Router (Topologie), Funk-Uplink (`sta_interfaces`) | Dienst-Neustart `pass` (kein Link, keine Route, keine Adresse fällt weg) nur mit frischem Poll und bekannter Topologie, sonst `unknown`, Router nicht erreichbar `fail router_unreachable`; Router-Neustart `fail cuts_own_management_path`; Funk mit Routern dahinter `unknown` (deren Uplink-Medium ist nicht bekannt); `lan` `fail`, `wan`/`wan6` `unknown`; leere STA-Liste heißt „keine“ **oder** „Erkennung gescheitert“ → `unknown` |
 | `components_known` | schreibende | frischer Poll: `services` (`enabled`), Funk (`wifi_radios.phy`), Schnittstellen (`logical_name`); Versionsindex; Registry | **`odhcpd` wird nicht gepollt** (`DEFAULT_SERVICES`) → `unknown service_not_in_poll`; Funk über den iwinfo-Weg trägt andere Namen → `unknown radio_not_identified`; ein absichtlich abgeschalteter Dienst `fail service_disabled_on_purpose` |
-| `config_captured` | Konfiguration ändernde Aktionen (Katalog v1: `config.restore`) und gespeicherte Konfiguration anwendende (`CONFIG_APPLYING`: `service.restart`), sonst `n/a` | Restore: Versionsindex des Core (Speicher), neueste `ok`/`partial`-Sicherung jünger als 24 h; Dienst-Neustart: `service_config_unapplied` | **Dienst-Neustart heute immer `unknown config_drift_not_tracked`** (die Abweichung verfolgt erst Paket G; unbekannt sperrt) |
+| `config_captured` | Konfiguration ändernde Aktionen (Katalog v1: `config.restore`) und gespeicherte Konfiguration anwendende (`CONFIG_APPLYING`: `service.restart`, `router.reboot`), sonst `n/a` | Restore: Versionsindex des Core (Speicher), neueste `ok`/`partial`-Sicherung jünger als 24 h; Dienst- und Router-Neustart: `service_config_unapplied` | **Dienst- und Router-Neustart heute immer `unknown config_drift_not_tracked`** (die Abweichung verfolgt erst Paket G; unbekannt sperrt) |
 | `backup_present` | wie oben | Versionsindex: `ok`, Prüfstatus `valid`, Prüfsumme vorhanden, jünger als 24 h | `unverified` → `fail backup_not_validated` |
-| `recovery_path_checked` | schreibende | Katalog (Rollback-Art, Grundrisiko), Fähigkeit `config.restore`, Sicherungen, Ergebnis von `management_path_available` | Wiederherstellen ist ein Probelauf: **Sicherung vorhanden, aber nicht wiederherstellbar → `fail restore_unavailable_dry_run_only`** (Detail `backup_present_not_restorable`); Risiko 3 → `fail no_recovery_mechanism`; Funk: zweiter Aufruf nur, solange der Weg hält; Dienst-Neustart `pass manual_recovery_statement` (die ehrliche Aussage des Katalogs) **nur, wenn `management_path_available` bestand und eine Freigabe nötig ist**, sonst `unknown`; liest dann die Fakten der Weg-Prüfung |
-| `approval_valid` | schreibende ab Risiko 2; Risiko 1 außerhalb von Auto-Heal; sonst `n/a` | der übergebene `RemediationAction`-Datensatz: gleicher Router, Aktion, Parameter; **Datensatz im Zustand `approved`** (`EXECUTION_START_STATE`, von dort beginnt die Ausführung; sonst `fail approval_record_state`); Freigabe `approved`; Guard-Kennung; `binding_hash` = `binding_hash(Datensatz mit diesem Fingerabdruck)`; Wanduhr nicht zurückgestellt (`wall_clock_behind`, unbekannt → `unknown`), nicht vor der Entscheidung (Zeit des Schritts nach `approved` in der Historie); Frist gegen die Wanduhr der Momentaufnahme, höchstens 15 min voraus und höchstens 15 min nach der Entscheidung | die Freigabe des Guard selbst prüft C2 (siehe Pflichten unten) |
+| `recovery_path_checked` | schreibende | Katalog (Rollback-Art, Grundrisiko), Fähigkeit `config.restore`, Sicherungen, Ergebnis von `management_path_available` | Wiederherstellen ist ein Probelauf: **Sicherung vorhanden, aber nicht wiederherstellbar → `fail restore_unavailable_dry_run_only`** (Detail `backup_present_not_restorable`); Risiko 3 → `fail no_recovery_mechanism`; Funk: zweiter Aufruf nur, solange der Weg hält; Dienst-Neustart `pass manual_recovery_statement` (die ehrliche Aussage des Katalogs) **nur, wenn `management_path_available` bestand und eine Freigabe nötig ist**; Router nicht erreichbar (Weg-Prüfung `fail`) → `fail router_unreachable` wie dort; sonst `unknown`; liest dann die Fakten der Weg-Prüfung |
+| `approval_valid` | schreibende ab Risiko 2; Risiko 1 außerhalb von Auto-Heal; sonst `n/a` | der übergebene `RemediationAction`-Datensatz: gleicher Router, Aktion, Parameter; **Datensatz im Zustand `approved`** (`EXECUTION_START_STATE`, von dort beginnt die Ausführung; sonst `fail approval_record_state`); Freigabe `approved`; Guard-Kennung; `binding_hash` = `binding_hash(Datensatz mit diesem Fingerabdruck)`; Rückstand der Wanduhr bekannt (`wall_clock_lag_s`, unbekannt → `unknown`), Wanduhr nicht vor der Entscheidung (Zeit des Schritts nach `approved` in der Historie); Frist gegen die Wanduhr der Momentaufnahme (`approval_expired`) **und** gegen Wanduhr plus Rückstand (`wall_clock_set_back`), höchstens 15 min voraus und höchstens 15 min nach der Entscheidung | die Freigabe des Guard selbst prüft C2; über einen Neustart sieht E ein Zurückstellen nicht (Pflichten 4 und 7 unten) |
 
 **Fingerabdruck** (`state_fingerprint`, `PreflightResult.fingerprint`): sha256
 (`canonical_sha256`) über die Router-Kennung und die Werte der Fakten in `FINGERPRINT_FACTS`;
@@ -926,8 +956,11 @@ verlängert oder beendet ein Ergebnis nicht.
 den Datensatz mit der Freigabe (genau `RemediationAction`) und Grenzen (genau
 `PreflightLimits`). Urteil, Prüfungen, Fingerabdruck und Frist sind `init=False` und werden in
 `__post_init__` berechnet; `dataclasses.replace` kann nur Eingaben tauschen und prüft dann neu.
-Die Aktion wird erneut gegen den Katalog geprüft (`try_validate`). Das Ergebnis hält eine
-eigene, neu geprüfte Kopie der Fakten; die Grenzen werden bei jedem Ergebnis und bei jeder
+Die Aktion wird erneut gegen den Katalog geprüft (`try_validate`). Das Ergebnis hält eine neu
+geprüfte **flache** Kopie der Fakten: das `PreflightFacts`-Objekt ist neu, die einzelnen
+`Fact`-Objekte teilt es mit dem Aufrufer (sie sind eingefroren). Ändert jemand ein geteiltes
+`Fact` mit Gewalt, hält die Kopie das nicht fern – `validity()` meldet es als `tampered`, weil
+die Prüfungen nicht mehr aus den gespeicherten Fakten folgen (Test). Die Grenzen werden bei jedem Ergebnis und bei jeder
 Nachprüfung erneut gegen ihre Schranken geprüft, die geteilte Standard-Instanz zusätzlich gegen
 die Standardwerte, und die Gültigkeitsdauer wird in ein privates Feld kopiert. `validity()`
 rechnet vor `valid` alles aus den gespeicherten Fakten nach (auch `in_release` und
@@ -940,8 +973,11 @@ gespeicherten Eingaben folgt; Grenzen außerhalb ihrer Schranken; die geänderte
 eine Dauer, die nicht zur bei der Erzeugung geprüften passt. Wer Eingaben **und** alle
 abgeleiteten Felder stimmig ändert (etwa `facts.safe_at`, `safe_at` und `valid_until` gleich
 weit nach vorn, oder Grenzen innerhalb der Schranken samt privatem Feld), wird nicht erkannt;
-ein Test hält genau diese Grenze fest. Auch geschmiedete Fakten (etwa `wall_clock_behind=False`
-nach einem Zurückstellen) sieht der Kern nicht. Deshalb gelten die Pflichten für C2 unten.
+ein Test hält genau diese Grenze fest. Auch geschmiedete Fakten (etwa `wall_clock_lag_s=0`
+nach einem Zurückstellen) sieht der Kern nicht. **Und nicht nur geschmiedete:** über einen
+Neustart von Home Assistant liefert auch der Sammler selbst ehrliche Fakten, mit denen eine
+längst abgelaufene Freigabe besteht (Pflicht 7, mit Beispiel). Deshalb gelten die Pflichten für
+C2 unten.
 
 **Verbindliche Pflichten für das Paket, das die Vorabprüfung anbindet (C2):**
 
@@ -957,11 +993,27 @@ nach einem Zurückstellen) sieht der Kern nicht. Deshalb gelten die Pflichten f�
    Übergang `approved → executing` atomar mit der Prüfung).
 6. Den **echten Ausführungsweg** übergeben, nicht den eingestellten Modus (davon hängt ab, ob
    `maintenance_window_ok` kritisch ist).
-7. **Frist der Freigabe an die Sicherheitsuhr binden:** `Approval` trägt nur die Wanduhrzeit
-   `expires_at`, der Datensatz keine Sicherheitszeit der Entscheidung (Paket E ändert
-   `heal_model` nicht). E sperrt bei zurückgestellter Wanduhr und vor der Entscheidung; C2
-   speichert die Sicherheitszeit der Entscheidung (oder fragt den Guard) und misst die Frist
-   darauf.
+7. **Freigaben überleben keinen Neustart von Home Assistant:** C2 behandelt jede Freigabe,
+   die vor dem aktuellen Start entschieden wurde, als abgelaufen, und zählt die vergangene Zeit
+   zusätzlich als das Größere aus Wanduhr- und Sicherheitszeit seit der Entscheidung. Grund:
+   `Approval` trägt nur die Wanduhrzeit `expires_at`, der Datensatz keine Sicherheitszeit der
+   Entscheidung (Paket E ändert `heal_model` nicht), und über einen Neustart sieht der Speicher
+   ein Zurückstellen nicht. Beispiel: entschieden um T0 für 600 s, gleich danach die Wanduhr
+   eine Stunde zurück, Home Assistant nach 1 h 30 s Ausfall neu gestartet. Die Fakten des
+   Sammlers zeigen keinen Rückstand, Wanduhr und Sicherheitsuhr je 50 s seit der Entscheidung –
+   die längst abgelaufene Freigabe **besteht** `approval_valid`.
+   `test_known_gap_c2_duty_7_approval_survives_restart_clock_set_back` hält dieses heutige
+   Verhalten fest; es ist keine Zusage. In einer laufenden Instanz misst E die Frist gegen
+   Wanduhr plus Rückstand und sperrt vor der Entscheidung.
+8. **Den Fingerabdruck beim Freigeben mit denselben Sammler-Eingaben bilden** wie die letzte
+   Vorabprüfung vor dem Router-Aufruf (`incident_id`, `exclude_action_id` an
+   `facts_from_sources`/`collect_preflight_facts`). Sonst passt die Bindung nie
+   (`approval_bound_to_other_state`: sicher gesperrt, aber nie ausführbar).
+9. **Die nicht zutreffenden Prüfungen mit dem Datensatz speichern:** `to_model_checks()` lässt
+   sie weg (das Modell kennt kein `not_applicable`), deshalb lässt sich die gespeicherte Liste
+   allein nicht nachprüfen – fehlt eine Prüfung, weil sie nicht zutraf oder weil sie verloren
+   ging? C2 bzw. das Adapter-Paket speichert die Kennungen (`to_dict()["not_applicable"]`) oder
+   den Ausführungsweg, aus dem sie folgen, mit dem Datensatz.
 
 **Fakten für die Richtlinie** (für das Adapter-Paket): `risk_context_for(facts, aktion,
 params)` → `heal_policy.RiskContext`, `incident_facts_for(facts, aktion, params)` →
@@ -995,11 +1047,16 @@ Paket; heute das private `_acl_blocked` hinter `_safe_call`).
   Speicherformat bleibt unverändert (kein neuer Wert). Das Adapter-Paket kann den Wert ergänzen.
 - Eine Freigabe zählt nur auf einem Datensatz im Zustand `approved` (`EXECUTION_START_STATE`).
 - Ein Dienst-Neustart wendet die gespeicherte Konfiguration an: `config_captured` verlangt
-  `service_config_unapplied = false` (heute unbekannt, sperrt); `router.reboot` täte das auch,
-  ist aber über `no_recovery_mechanism` gesperrt.
+  `service_config_unapplied = false` (heute unbekannt, sperrt). Seit dem zweiten Review von
+  PR #80 auch für `router.reboot` (er wendet alle gespeicherte Konfiguration an; zusätzlich
+  bleibt er über `no_recovery_mechanism` gesperrt).
 - `management_path_available` für den Dienst-Neustart besteht nur mit frischem Poll und
   bekannter Topologie; `recovery_path_checked` dort nur, wenn der Weg bestand und eine Freigabe
-  nötig ist.
+  nötig ist; ist der Router nicht erreichbar, scheitern beide (`router_unreachable`).
+- Die Wanduhr-Prüfung rechnet mit dem Rückstand hinter der Marke des Speichers statt mit
+  „zurückgestellt ja/nein“ (zweites Review von PR #80). Die Zeit eines Sprungs ist im Speicher
+  nicht bekannt, also zählt der Rückstand auch für Sprünge vor dem Poll oder der Entscheidung;
+  die Strenge bei großem Abstand steht oben („Strenge, die bleibt“).
 - Flottenweite Security-Vorfälle (ohne Router-Kennung) zählen für jeden Router.
 - Speicherdruck: über der Schwelle ist hoch, auf ihr nicht (`>`, die Regel des Coordinators);
   eine Freigabe mit `expires_at` gleich jetzt ist abgelaufen (die Frist ist exklusiv).
@@ -1641,7 +1698,7 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   Reviewers M06, M10, M15, M18, M20, M23, M27, M28): Ausnahme im Empfänger, Ausnahme im Takt,
   Obergrenze der Warteliste, Abbruch der Core-Bindung beim Stopp, nur eigene Planungs-
   Datensätze schließen, gescheitertes Entladen.
-- `tests/test_heal_preflight_v1530.py` (Paket E, 238 Tests nach dem Review von PR #80): Auftragstest 8 (eine
+- `tests/test_heal_preflight_v1530.py` (Paket E, 255 Tests nach dem zweiten Review von PR #80): Auftragstest 8 (eine
   gescheiterte kritische Prüfung sperrt; eine nicht kritische nicht; heute sperrt jede
   schreibende Aktion), 9 (Router offline: `router_reachable` scheitert für jede Aktion mit
   Router-Aufruf, der Zustand des Routers wird nicht aus dem alten Poll gelesen; veraltet,
@@ -1687,12 +1744,32 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   Korrektur der Befunde 1–11, 13 und 14 zurück; jeder lässt seine Review-Tests scheitern. Die
   20 Angriffe des Reviewers gegen den neuen Stand: 16 scheitern jetzt; 4 bestehen weiter und
   sind keine Lücke des Kerns (gleicher-Router-Fall und Katalogtabelle sind richtiges Verhalten;
-  `validity()` liest nur die eigenen Fakten und geschmiedete Fakten mit
-  `wall_clock_behind=false` sind die Pflichten 1 und 2 von C2, Abschnitt 7.1).
+  `validity()` liest nur die eigenen Fakten, Pflicht 2 von C2). **Korrektur (zweites Review):**
+  Hier stand, das Wiederaufleben einer abgelaufenen Freigabe gehe nur mit geschmiedeten Fakten
+  (Pflicht 1). Das war falsch: über einen Neustart von Home Assistant liefert auch der Sammler
+  selbst solche Fakten (Beispiel und Test bei Pflicht 7, Abschnitt 7.1). Pflicht 7 verlangt
+  deshalb, dass Freigaben keinen Neustart überleben.
 - **Mutationsprüfung nach dem Review** (grüne Grundlinie, Python 3.14): die 36 Mutanten des
   Reviewers M01–M36 alle getötet (drei Muster an den neuen Code angepasst: M19, M25, M33),
   darunter die neun Überlebenden M10, M20, M21, M22, M23, M29, M31, M32, M33; die eigenen 97
   ebenfalls alle (ein Muster angepasst: `mgmt: not critical`).
+- **Zweites Review von PR #80** (Tests `test_review2_…`, `test_known_gap_…`): die Uhrprüfung
+  mit dem Rückstand statt „zurückgestellt ja/nein“ – NTP-Schritt von 5 s vor dem Poll über einen
+  ganzen Tag (frisch), die Uhr einmal einen Tag vor (sperrt weiter, Strenge festgehalten), ein
+  Zurückstellen nach dem Poll und nach der Entscheidung (sperrt), negativer Rückstand
+  abgelehnt; der Neustart-Fall von Pflicht 7 als bekannte Lücke (der Test hält das heutige
+  Bestehen fest, keine Zusage); geteilte `Fact`-Objekte als `tampered`; die nicht zutreffenden
+  Kennungen in `to_dict()`; `router.reboot` in `CONFIG_APPLYING`; Wiederherstellung des
+  Dienst-Neustarts scheitert bei nicht erreichbarem Router. Dazu Tests für drei Überlebende
+  der neuen Reviewer-Mutanten (N11, N20; N06 ist gleichwertig: ein Datensatz ohne Schritt nach
+  `approved` wird schon beim Neubau für die Bindung vom Modell abgelehnt, ein Test hält das fest).
+- **Beweis und Mutation nach dem zweiten Review** (grüne Grundlinie, Python 3.14): 13
+  Rückbau-Mutanten (je einer pro Code-Änderung: alte strenge Regel in Poll und Freigabe,
+  Rückstand ignoriert, Grenzen um eins verschoben, unbekannter Rückstand als 0, Sammler ohne
+  Rückstand oder ohne Toleranz, negativer Rückstand angenommen, Wiederherstellung wieder
+  `unknown`, `router.reboot` aus `CONFIG_APPLYING`) lassen alle ihre Tests scheitern. Die 61
+  Reviewer-Mutanten M01–M36 und N01–N25 (sechs Muster an den neuen Code angepasst: M01, N01,
+  N02, N04, N05, N21): 60 getötet, N06 gleichwertig (oben). Die eigenen 97: alle getötet.
 - Nach dem ganzen Testlauf darf kein Verzeichnis `MagicMock` stehen (Hook
   `pytest_sessionfinish` in `tests/conftest.py`, der Lauf scheitert sonst).
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
@@ -1701,7 +1778,8 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
 Nicht geprüft (Paket E): ob der Sicherheitsuhr-Stand `high` in einer laufenden Instanz bei
 einem echten Zurückstellen der Systemuhr so steht wie im Test (die Tests stellen die Uhr des
 Speichers von Hand); die Sicherheitszeit der Entscheidung einer Freigabe (gibt es im Modell
-nicht, Pflicht 7 für C2); der Sammler gegen den echten Core, das echte Network Intelligence und
+nicht, Pflicht 7 für C2); die Zeit eines Sprungs der Wanduhr (kennt der Speicher nicht; große
+Abstände sperren deshalb lange, Abschnitt 7.1 „Strenge, die bleibt“); der Sammler gegen den echten Core, das echte Network Intelligence und
 das echte Security Center in einem laufenden HA (die Tests nehmen Attrappen mit denselben
 Attributen; nur api, Coordinator und Speicher sind echt); ob `primary_identity_status`,
 Fähigkeiten und Versionsindex auf der Flotte die Werte tragen, die die Tabelle in 7.1 annimmt;
