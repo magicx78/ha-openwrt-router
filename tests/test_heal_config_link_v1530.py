@@ -220,7 +220,7 @@ def test_version_row_normalises_odd_values() -> None:
         created_at=True,
         last_seen_at=float("nan"),
         status="OK",
-        validation="192.168.1.1",
+        validation="192.0.2.1",
         has_checksum="yes",
         content_hash="AB" * 32,
         backup_type="tarball",
@@ -320,7 +320,7 @@ def test_knowledge_from_versions_reports_unknown_with_reasons() -> None:
         loaded = True
 
         def records(self, router_id: str) -> Any:
-            raise RuntimeError("192.168.1.1 secret")
+            raise RuntimeError("192.0.2.1 secret")
 
     class BadRecord:
         @property
@@ -1015,7 +1015,7 @@ def _parity_records() -> list[Any]:
         rec(1, T0, 1, validation=ValidationStatus.VALID),
         rec(2, T0 + 1.9, 2, status=VersionStatus.PARTIAL, archive=False),
         rec(3, T0 + 2, 3, status="weird status", validation=" x"),
-        rec(4, T0 + 3, 4, status=VersionStatus.FAILED, validation="192.168.1.1"),
+        rec(4, T0 + 3, 4, status=VersionStatus.FAILED, validation="192.0.2.1"),
         SimpleNamespace(backup_id="bkp_bad", created_at=dt(T0 + 4)),
         SimpleNamespace(backup_id=bid(6), created_at=datetime(2026, 1, 1)),
         *(rec(10 + i, T0 + 10 + i, 5) for i in range(70)),
@@ -1226,12 +1226,12 @@ def test_errors_are_logged_by_type_only(caplog: pytest.LogCaptureFixture) -> Non
         loaded = True
 
         def records(self, router_id: str) -> Any:
-            raise RuntimeError("192.168.1.1 hunter2")
+            raise RuntimeError("192.0.2.1 s3cr3t-value")
 
     with caplog.at_level(logging.DEBUG, logger=hcl.__name__):
         hcl.knowledge_from_versions(Broken(), RID)
     assert "RuntimeError" in caplog.text
-    assert "192.168.1.1" not in caplog.text and "hunter2" not in caplog.text
+    assert "192.0.2.1" not in caplog.text and "s3cr3t-value" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1275,7 +1275,7 @@ async def test_reader_never_raises_and_asks_nothing_without_a_change() -> None:
     k = knowledge(rec(1, T0, 1), rec(2, T0 + 100, 2))
     assert await hcl.async_read_stored_diff(api, k, before="soon") is None
     assert api.calls == []
-    failing = Api(error=RuntimeError("10.0.0.1"))
+    failing = Api(error=RuntimeError("198.51.100.7"))
     sd = await hcl.async_read_stored_diff(failing, k)
     assert sd is not None and (sd.proven, sd.reason) == (None, "diff_failed")
     odd = await hcl.async_read_stored_diff(Api(answer="diff"), k)
@@ -1429,7 +1429,6 @@ async def test_real_provider_compares_stored_versions_without_the_router() -> No
         changed,
         collect,
         make_ctx,
-        methods,
         router_record,
     )
 
@@ -1442,8 +1441,9 @@ async def test_real_provider_compares_stored_versions_without_the_router() -> No
     other = store.put(
         "rtr_" + "a" * 32, await collect(FakeApi(files=changed(channel=True)))
     )
-    watched = FakeApi()
+    store.reads.clear()
     provider = ConfigManagerProvider()
+    # the comparison gets no router connection at all: only the store
     diff = await provider.async_compare(
         base,
         other,
@@ -1451,7 +1451,11 @@ async def test_real_provider_compares_stored_versions_without_the_router() -> No
         base_router=router_record(),
         other_router=router_record(),
     )
-    assert methods(watched) == []
+    assert store.reads  # it really read stored artifacts
+    assert {version for version, _kind in store.reads} == {
+        base.backup_id,
+        other.backup_id,
+    }
     sd = hcl.stored_diff_from(diff, base.backup_id, other.backup_id)
     assert sd.proven is True and sd.areas == frozenset({"wlan"})
 
@@ -1492,7 +1496,7 @@ def test_wall_clock_after_restore_window_constant() -> None:
 
 
 def test_a_code_carrying_an_address_is_unknown() -> None:
-    for odd in ("v10.0.0.1", "ma00:11:22:33:44:55", "x::1"):
+    for odd in ("v198.51.100.7", "ma00:11:22:33:44:55", "x::1"):
         row = hcl.VersionRow(status=odd, validation=odd)
         assert (row.status, row.validation) == ("unknown", "unknown")
     assert hcl.VersionRow(status="ok.v1").status == "ok.v1"
