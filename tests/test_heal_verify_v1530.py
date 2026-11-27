@@ -589,6 +589,22 @@ def test_order_15_failed_repair_partial_and_not_resolved() -> None:
     assert r.criterion("service_restarted").reason == "restart_not_seen"
 
 
+def test_partial_becomes_final_only_at_the_maximum_wait() -> None:
+    b = before(
+        services=(("dnsmasq", False), ("dropbear", True)),
+        service_pids=(("dropbear", 1),),
+    )
+    open_ = {
+        "incident_status": "active",
+        "incident_resolve_reason": "open",
+        "incident_resolved_age_s": u(),
+    }
+    r = run(b=b, a=after(at=T0 + 3500, **open_), now=T0 + 3599.999)
+    assert (r.result, r.final) == (VR.PARTIAL, False)
+    r = run(b=b, a=after(at=T0 + 3500, **open_), now=T0 + 3600)
+    assert (r.result, r.final) == (VR.PARTIAL, True)
+
+
 def test_cleared_but_the_restart_not_seen_is_never_credited() -> None:
     a = after(service_pids=(("dnsmasq", 100), ("dropbear", 1)))
     r = run(a=a)
@@ -1066,8 +1082,18 @@ def test_interface_cycle_target() -> None:
 
 def test_service_restart_of_a_service_missing_before_is_unknown() -> None:
     r = run(params=ODHCPD)
-    assert r.criterion("service_running").reason == "service_not_in_before"
+    c = r.criterion("service_running")
+    assert (c.reason, c.comparison) == ("service_not_in_before", C.UNKNOWN)
     assert r.result is VR.UNKNOWN
+    # even when it runs afterwards with a new pid: no "before" to compare
+    a = after(
+        services=(("dnsmasq", True), ("dropbear", True), ("odhcpd", True)),
+        service_pids=(("dnsmasq", 100), ("dropbear", 1), ("odhcpd", 77)),
+    )
+    r = run(params=ODHCPD, a=a)
+    assert r.criterion("service_restarted").comparison is C.IMPROVED
+    assert r.criterion("service_running").comparison is C.UNKNOWN
+    assert r.result is VR.UNKNOWN and r.credited_to_action is False
 
 
 # ---------------------------------------------------------------------------
@@ -1340,9 +1366,24 @@ def test_the_binding_digest_covers_every_input() -> None:
         run(b=before(clients=11)),
         run(a=after(clients=11)),
         run(b=before(clients=hp.known(10, "other_source"))),
+        run(params=ODHCPD),
+        run("router.reboot", params={}),
     ]
     digests = {v.binding for v in variants}
     assert base not in digests and len(digests) == len(variants)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), [("VERIFY_SETTLE_S", 650), ("VERIFY_MAX_WAIT_S", 3000)]
+)
+def test_the_binding_digest_covers_the_time_constants(monkeypatch, name, value) -> None:
+    """Same inputs, same class, other constants: another digest (a result
+    judged under other waits is never taken for this one)."""
+    base = run()
+    monkeypatch.setattr(hv, name, value)
+    other = run()
+    assert other.result is base.result is VR.RESOLVED
+    assert other.binding != base.binding
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1881,9 @@ def test_random_scenarios_against_the_oracle(seed: int) -> None:
                 if hv.ROLE_OF[cid] is hv.Role.EFFECT:
                     assert comparison is C.IMPROVED, cid
         assert r.escalate is (r.result is VR.NEW_FAULT)
+        # the primary is never "held" (it changed or it did not)
+        if r.criteria:
+            assert r.criterion("incident_cleared").comparison is not C.HELD
         assert r.credited_to_action is (
             r.result is VR.RESOLVED and call is CallResult.OK
         )
