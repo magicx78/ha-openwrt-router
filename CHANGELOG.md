@@ -289,8 +289,9 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
 
 - **Entscheidung über `heal_policy.gate`:** der laufende Engine-Entscheider ist
   `PolicyDecider`. Er baut aus dem Kontext der Engine einen `DecisionInput` und fragt den Gate;
-  der Datensatz trägt die Entscheidung des Gates (Ergebnis, Risiko, Wert, Regeln). Scheitert
-  die Richtlinie, bleibt es bei der Observe-Empfehlung, und der Fehler wird gezählt.
+  der Datensatz trägt die Entscheidung des Gates über seine eigene Aktion `observe.evaluate`
+  (Ergebnis, Risiko, Wert, Regeln). Scheitert die Richtlinie, bleibt es bei der
+  Observe-Empfehlung, und der Fehler wird gezählt.
 - **Fakten:** gefüllt wird nur, was die Engine selbst kennt (Router-Identität und Rolle,
   Sperre des Routers, Flotten-Pause, Wartung, ob der Vorfall Wurzel ist, Versuche, Schutzschalter,
   Allowlist, Sicherheitsuhr). Alles andere bleibt unbekannt und zählt damit als hohes Risiko
@@ -308,11 +309,17 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
 - **Review-Punkte a–k:**
   - a: ein gelöster oder ignorierter Vorfall bekommt nie einen Datensatz.
   - b: wiederholte Ereignisse zu einem schon erfassten Vorfall zählen nicht als Doppelte;
-    erfundene Ereignisse treiben keinen Zähler.
+    ein Doppeltes, das erst der Speicher erkennt, zählt höchstens einmal je Öffnung.
+    Ereignisse mit einer Vorfall-Nummer, die Network Intelligence nicht kennt, zählen je Nummer
+    nur einmal (`incidents_seen`, `skipped_unknown_incident`). Jedes Ereignis zu einem
+    bekannten Vorfall zählt weiter in `incidents_seen`, jedes fehlerhafte in
+    `skipped_bad_event`.
   - c: zurückgestellte Vorfälle werden nicht bei jedem Takt neu gebaut; der Merkzettel ist
     begrenzt.
   - d: eine nach einem Neustart von Network Intelligence wiederverwendete Vorfall-Nummer ist
-    ein neuer Vorfall (`first_seen`); der alte Datensatz wird als erledigt geschlossen.
+    ein neuer Vorfall (späteres `first_seen`, andere Art oder anderer Router); der alte
+    Datensatz wird als verschwunden geschlossen (`incident_gone`), der neue bekommt einen
+    eigenen.
   - e: ein übrig gebliebener `MagicMock`-Ordner macht den Testlauf rot und steht in der
     Zusammenfassung.
   - f: der Optionstext sagt in einfachen Worten, was das Modul tut.
@@ -322,10 +329,41 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
   - i: eine unbekannte letzte Ausführung sperrt eine schreibende Aktion (`interval_unknown`).
   - j: Tests für die drei Mutationen, die das Review überlebt hatten.
   - k: `ATTEMPT_WINDOW_S` steht nur noch im Modell.
-- Tests: `tests/test_heal_x_policy_v1530.py` (50), `tests/test_heal_x_engine_v1530.py` (74)
-  und `tests/test_heal_x_misc_v1530.py` (2). Mutationsprüfung: jede der 47 gezielten
-  Lockerungen lässt mindestens einen Test scheitern (zehn erst nach eigenen Tests für einen
-  Schutz, der hinter einem zweiten lag).
+- Tests: `tests/test_heal_x_policy_v1530.py` (50), `tests/test_heal_x_engine_v1530.py`
+  (102) und `tests/test_heal_x_misc_v1530.py` (2).
+
+#### Nach dem Review von PR #81
+
+- **Eine Faktenquelle kann keinen Datensatz mehr verändern.** Entscheider und Faktenquelle
+  bekommen je eine tiefe Kopie des Kontexts (Datensatz, Ursache, Hold, Allowlist, Versuche und
+  Schutzschalter neu aus ihrer JSON-Form gebaut). Vorher war die Kopie flach, und über
+  `object.__setattr__` ließ sich ein gespeicherter Datensatz bis EXECUTING schieben. Dahinter
+  prüft die Engine den Datensatz nach jeder Entscheidung: hat er sich geändert, wird nichts
+  angewandt, er wird wiederhergestellt und der Fall gezählt (`decision_tampered`).
+- **Unbekannte Wartung bleibt unbekannt:** scheitert die Abfrage bei Network Intelligence oder
+  kommt kein echter Wahrheitswert zurück, gilt die Wartung als unbekannt, nicht als „nicht in
+  Wartung“.
+- **Der Datensatz trägt nur die Entscheidung über seine eigene Aktion.** Der Kandidat einer
+  Faktenquelle (etwa `service.restart`) erscheint nur in der Erklärung von `plans`, als
+  Kandidat gekennzeichnet, nie als Ergebnis, Risiko, Playbook oder geplante Änderung des
+  Datensatzes. Ein späteres Paket muss einen Kandidaten zu einem eigenen Datensatz machen,
+  damit eine Freigabe die wirklich laufende Aktion bindet.
+- **Derselbe Vorfall** heißt jetzt auch gleiche Art und gleicher Router; ein späteres
+  `first_seen` ist schon ab einer Sekunde ein anderer Vorfall (Network Intelligence verschiebt
+  die Zeit nur zurück).
+- **Schwere** kommt aus dem Vorfall von Network Intelligence, **gleichzeitige Reparatur** aus
+  dem Speicher (Reparatursperre oder ein anderer Datensatz in Ausführung); beides kann eine
+  Faktenquelle nicht mehr setzen. `diag_enabled` bleibt bei der Faktenquelle (kein
+  Eintragsschalter).
+- Unbekanntes der Engine schlägt jede Behauptung einer Faktenquelle (Rolle, Identität,
+  Schutzschalter, Wurzel, Quellenfamilien, Ursachenstatus); Tests halten das jetzt fest, ebenso
+  die Größen der Merklisten und der Erklärung als feste Zahlen.
+- Mutationsprüfung auf grünem Stand: die 61 Mutationen des Reviewers (an den geänderten
+  Stellen sinngleich übertragen, E24 durch E24b ersetzt) und 21 neue an den Änderungen dieses
+  Reviews. Im ersten Lauf überlebten 6, darunter keine der vom Review geforderten. Vier
+  bekamen eigene Tests. Zwei bleiben, weil sie nichts ändern: der Vorab-Check des Slots greift
+  schon vorher, und die Ablehnung des Gates hat ohne den Code dieselbe Begründung aus dem
+  Katalog.
 
 ## [1.52.3] - 2026-11-27
 

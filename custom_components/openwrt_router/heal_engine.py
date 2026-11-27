@@ -86,6 +86,8 @@ from .const import (
 )
 from .core_models import ROUTER_ID_PREFIX, is_valid_id
 from .heal_model import (
+    IN_FLIGHT_STATES,
+    LOCKING_STATES,
     ROUTER_COMPONENT,
     TERMINAL_STATES,
     TIME_MAX,
@@ -144,6 +146,10 @@ EVIDENCE_FAMILIES_MIN: Final = 2
 SKIP_MEMO_MAX: Final = 1000
 # Open periods whose store-level dedupe was counted once (package X, b).
 DEDUPE_SEEN_MAX: Final = 1000
+# Incident ids unknown to NI that were counted once (review of PR #81).
+UNKNOWN_SEEN_MAX: Final = 1000
+# States of another record that mean a repair runs on the router now.
+_BUSY_STATES: Final = IN_FLIGHT_STATES | LOCKING_STATES
 # Record params that only tie an observe record to its incident period
 # (``observe.evaluate`` itself takes none): incident id and first seen.
 _BOOKKEEPING_PARAMS: Final = frozenset({"incident", "first_seen"})
@@ -209,6 +215,7 @@ _COUNTERS: Final = (
     "closed",
     "decider_failed",
     "decision_clamped",
+    "decision_tampered",
     "ticks",
     "errors",
 )
@@ -252,6 +259,47 @@ class DecisionContext:
     )
     safe_now: float | None = None
     allowlist: tuple[AllowEntry, ...] = ()
+    # review of PR #81: NI's severity of the record's incident (None:
+    # unknown) and whether a repair runs on the router now (the store's
+    # repair lock or another record in flight; None: unknown)
+    severity: str | None = None
+    concurrent_repair: bool | None = None
+
+
+def _detached(context: DecisionContext) -> DecisionContext:
+    """A deep copy of ``context`` that shares no record with the store.
+
+    The record, its cause, the hold, the allowlist entries and the loop
+    records are rebuilt from their JSON form (``to_dict``/``from_dict``),
+    so even ``object.__setattr__`` on what a provider or decider is handed
+    cannot reach the store (review of PR #81, P1).
+    """
+    return replace(
+        context,
+        action=RemediationAction.from_dict(context.action.to_dict()),
+        hold=(
+            None
+            if context.hold is None
+            else RouterHold.from_dict(context.hold.to_dict())
+        ),
+        cause=(
+            None if context.cause is None else Cause.from_dict(context.cause.to_dict())
+        ),
+        source_families=tuple(str(f) for f in context.source_families),
+        attempts=MappingProxyType(
+            {
+                tuple(k): AttemptRecord.from_dict(v.to_dict())
+                for k, v in context.attempts.items()
+            }
+        ),
+        breakers=MappingProxyType(
+            {
+                tuple(k): BreakerRecord.from_dict(v.to_dict())
+                for k, v in context.breakers.items()
+            }
+        ),
+        allowlist=tuple(AllowEntry.from_dict(e.to_dict()) for e in context.allowlist),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,8 +417,10 @@ class HealFacts:
     """What a facts provider knows beyond the engine (None: unknown).
 
     The seam for packages E (preflight facts) and F (playbooks): a provider
-    names the candidate action of a record (default: the record's own
-    ``observe.evaluate``) and the facts the engine does not hold - the
+    may name a candidate action (shown in the plan's explanation, labelled
+    as a candidate; the record keeps the decision of its own
+    ``observe.evaluate``, review of PR #81) and the facts the engine does
+    not hold - the
     router's reachability, clients, dependants, the target service, open
     findings, the evidence's freshness and target fact, a recent
     configuration change, the playbook. Validated on construction and again
@@ -438,7 +488,9 @@ class HealFactsProvider(Protocol):
 
     Called by :class:`PolicyDecider` for every decision (the plans route
     too), in the event loop: pure and fast, no I/O, no router call, no
-    store change. It gets a copy of the context. Anything but a valid
+    store change. It gets its own deep copy of the context (records
+    rebuilt from their JSON form: changing it changes nothing in the store
+    or in what the policy reads). Anything but a valid
     :class:`HealFacts` (an exception, another type, a value set after
     construction) counts as "nothing known" and is counted.
     """
@@ -546,12 +598,19 @@ class PolicyDecider:
     Maps the :class:`DecisionContext` to a ``heal_policy.DecisionInput``
     and asks :func:`heal_policy.gate`, which decides itself; the proposal is
     built from the gate's own decision and is never executable. Facts the
-    engine holds in memory are filled and win over a provider's: role,
-    identity confirmed, maintenance, breaker state, root or child, cause
-    level, status and confidence, source families, incident type, failed
+    engine holds in memory are filled and win over a provider's, also when
+    the engine's value is unknown: role, identity confirmed, maintenance,
+    breaker state, concurrent repair, root or child, cause level, status
+    and confidence, source families, incident type, severity, failed
     attempts in 24 h (loop state on the safety clock). Mode, hold, fleet
     pause and the module switch go to the gate. Everything else comes from
     the facts provider (:class:`HealFactsProvider`) or stays unknown.
+
+    The proposal (what the record stores) is the decision of the record's
+    own action. A provider's candidate is decided too, but only shown in
+    the explanation under ``candidate`` (review of PR #81, P2b): a later
+    package must make a candidate its own record, so that an approval binds
+    the action that would really run.
 
     A policy error propagates: the engine counts it (``decider_failed``)
     and uses :class:`ObserveOnlyDecider` instead.
@@ -568,11 +627,17 @@ class PolicyDecider:
             provider if provider is not None else UnknownFactsProvider()
         )
         self.limits = hp.DEFAULT_POLICY_LIMITS if limits is None else limits
-        self.counters: dict[str, int] = {"facts_failed": 0, "facts_invalid": 0}
+        self.counters: dict[str, int] = {
+            "facts_failed": 0,
+            "facts_invalid": 0,
+            "candidate_failed": 0,
+        }
 
     def _facts(self, context: DecisionContext) -> HealFacts:
         try:
-            raw = self.provider.facts(replace(context))
+            # its own deep copy: nothing it changes reaches the store or the
+            # context the policy reads (review of PR #81, P1)
+            raw = self.provider.facts(_detached(context))
         except Exception as err:  # noqa: BLE001 - nothing known instead
             self.counters["facts_failed"] += 1
             _LOGGER.debug("Self-Healing facts failed (%s)", type(err).__name__)
@@ -623,6 +688,7 @@ class PolicyDecider:
             identity_confirmed=identity,
             in_maintenance=maintenance,
             breaker_open=breaker_open,
+            concurrent_repair=context.concurrent_repair,
         )
         incident: hp.IncidentFacts | None = None
         if action.incident_id is not None:
@@ -637,6 +703,9 @@ class PolicyDecider:
                 confidence=cause.confidence if cause is not None else None,
                 source_families=min(len(context.source_families), 64),
                 is_root=context.incident_is_root,
+                severity=(
+                    context.severity if context.severity in hp.SEVERITIES else None
+                ),
             )
         return hp.DecisionInput(
             action_type=action_type,
@@ -647,10 +716,7 @@ class PolicyDecider:
             config_change_24h=facts.config_change_24h,
         )
 
-    def propose(self, context: DecisionContext) -> Proposal:
-        """The gate's own decision as a proposal (never executable)."""
-        facts = self._facts(context)
-        inp = self.decision_input(context, facts)
+    def _gate(self, inp: hp.DecisionInput, context: DecisionContext) -> hp.GateVerdict:
         verdict = hp.gate(
             inp,
             mode=context.configured_mode,
@@ -663,30 +729,79 @@ class PolicyDecider:
         )
         if type(verdict) is not hp.GateVerdict:
             raise TypeError("not a gate verdict")
+        return verdict
+
+    def _candidate(self, context: DecisionContext, facts: HealFacts) -> dict[str, Any]:
+        """The provider's candidate, decided and explained; never the
+        record's outcome (review of PR #81, P2b)."""
+        out: dict[str, Any] = {
+            "label": "candidate",
+            "note": "not_the_record_decision",
+            "action_type": facts.candidate_action,
+            "params": dict(facts.candidate_params or {}),
+            "playbook_id": facts.playbook_id,
+            "playbook_version": facts.playbook_version,
+        }
+        try:
+            inp = self.decision_input(context, facts)
+            verdict = self._gate(inp, context)
+        except Exception as err:  # noqa: BLE001 - the record is not affected
+            self.counters["candidate_failed"] += 1
+            _LOGGER.debug("Self-Healing candidate failed (%s)", type(err).__name__)
+            out["error"] = "candidate_failed"
+            return out
+        decision = verdict.decision
+        out.update(_explanation(verdict, inp))
+        out["outcome"] = None if decision is None else decision.outcome.value
+        out["planned_changes"] = [
+            c.to_dict() for c in (() if decision is None else _changes_of(decision))
+        ]
+        return out
+
+    def propose(self, context: DecisionContext) -> Proposal:
+        """The gate's decision on the record's own action as the proposal
+        (never executable); a provider's candidate only in the explanation."""
+        facts = self._facts(context)
+        own = replace(
+            facts,
+            candidate_action=None,
+            candidate_params=None,
+            playbook_id=None,
+            playbook_version=None,
+        )
+        inp = self.decision_input(context, own)
+        verdict = self._gate(inp, context)
         explanation = _explanation(verdict, inp)
+        if facts.candidate_action is not None:
+            explanation["candidate"] = self._candidate(context, facts)
         decision = verdict.decision
         if decision is None:
             # refused before deciding (module off): the safe default
             return replace(DEFAULT_DECIDER.propose(context), explanation=explanation)
-        changes: tuple[Change, ...] = ()
-        acting = decision.outcome not in _NON_ACTING
-        if decision.writes and acting and decision.action_type is not None:
-            va = hc.validate(decision.action_type, decision.params)
-            changes = tuple(
-                Change(kind=c.kind.value, target=c.name, effect=va.action_type)
-                for c in (tuple(va.components) or (ROUTER_COMPONENT,))
-            )
         return Proposal(
             decision=decision.to_model(),
             risk=decision.risk.to_model(),
-            playbook_id=facts.playbook_id,
-            playbook_version=facts.playbook_version,
-            planned_changes=changes,
+            planned_changes=_changes_of(decision),
             expected_impact=decision.to_impact() if decision.writes else None,
             executable=False,
             action_type=decision.action_type,
             explanation=explanation,
         )
+
+
+def _changes_of(decision: hp.PolicyDecision) -> tuple[Change, ...]:
+    """What a decision plans to change: only a writing decision that acts."""
+    if (
+        not decision.writes
+        or decision.outcome in _NON_ACTING
+        or decision.action_type is None
+    ):
+        return ()
+    va = hc.validate(decision.action_type, decision.params)
+    return tuple(
+        Change(kind=c.kind.value, target=c.name, effect=va.action_type)
+        for c in (tuple(va.components) or (ROUTER_COMPONENT,))
+    )
 
 
 def _plain(value: Any, depth: int = 0) -> Any:
@@ -794,15 +909,31 @@ def _first_seen(inc: Any) -> float | None:
     return _seen_at(getattr(inc, "first_seen", None))
 
 
-def _same_incident(action: RemediationAction, first_seen: float | None) -> bool:
+def _same_incident(
+    action: RemediationAction,
+    first_seen: float | None,
+    incident_type: str | None = None,
+    router_id: str | None = None,
+) -> bool:
     """The record belongs to this incident, not to an older one with the
     same id (NI numbers incidents again from 1 after its store was reset;
     package X, d).
 
-    Unknown on either side: the id decides (records of C1 carry no first
-    seen). NI moves ``first_seen`` back after a backward clock jump
-    (``_shift``), never forward: a later first seen is another incident.
+    Another incident type or another router is another incident (review of
+    PR #81, P2c). First seen: NI moves it back after a backward clock jump
+    (``NetRules._shift``, only for steps back) and never forward, so there
+    is no slack: a first seen even one second later is another incident.
+    Unknown on either side: that part does not decide (records of C1 carry
+    no first seen; the router id is unknown while the core is down).
     """
+    if (
+        incident_type is not None
+        and action.incident_type is not None
+        and action.incident_type != incident_type
+    ):
+        return False
+    if router_id is not None and action.router_id != router_id:
+        return False
     stored = _seen_at(action.params.get("first_seen"))
     return stored is None or first_seen is None or first_seen <= stored
 
@@ -920,6 +1051,8 @@ class HealEngine:
         self._dedupe_seen: OrderedDict[tuple[str, int, float | None], None] = (
             OrderedDict()
         )
+        # incident ids unknown to NI, counted once (review of PR #81)
+        self._unknown_seen: OrderedDict[str, None] = OrderedDict()
 
     # -- start / stop ------------------------------------------------------------------
 
@@ -960,6 +1093,7 @@ class HealEngine:
         self._pending.clear()
         self._skip_memo.clear()
         self._dedupe_seen.clear()
+        self._unknown_seen.clear()
         await self.store.async_close()
 
     async def async_bind_core(self) -> None:
@@ -1113,22 +1247,29 @@ class HealEngine:
         if incident_id is None:
             self.counters["skipped_bad_event"] += 1
             return
-        self.counters["incidents_seen"] += 1
         ni = self._ni()
         if ni is None:
+            self.counters["incidents_seen"] += 1
             self.counters["skipped_ni_unavailable"] += 1
             return
         known = self._incidents(ni)
         inc = known.get(incident_id)
         if inc is None:
-            self.counters["skipped_unknown_incident"] += 1
+            # an id NI does not know: counted once per id (bounded), so
+            # events with made-up ids cannot drive the counters (review of
+            # PR #81)
+            if incident_id not in self._unknown_seen:
+                self._unknown_seen[incident_id] = None
+                while len(self._unknown_seen) > UNKNOWN_SEEN_MAX:
+                    self._unknown_seen.popitem(last=False)
+                self.counters["incidents_seen"] += 1
+                self.counters["skipped_unknown_incident"] += 1
             return
+        self.counters["incidents_seen"] += 1
         status = _value(getattr(inc, "status", None))
         if status in _CLOSED_STATUS:
             self._pending.pop(incident_id, None)
-            if self._close_incident(
-                incident_id, _CLOSED_STATUS[status], _first_seen(inc)
-            ):
+            if self._close_incident(inc, _CLOSED_STATUS[status]):
                 self._retry_pending(ni, known)
             return
         if status != _ACTIVE_STATUS:
@@ -1183,6 +1324,39 @@ class HealEngine:
             and count == _reopen(inc)
         )
 
+    @staticmethod
+    def _inc_entries(inc: Any) -> list[str]:
+        """The router entries of an incident (the fleet pseudo-router out)."""
+        from .net_engine import FLEET_ROUTER
+
+        raw = getattr(inc, "routers", None)
+        return [
+            r
+            for r in dict.fromkeys(
+                r
+                for r in (raw if isinstance(raw, list | tuple) else ())
+                if isinstance(r, str)
+            )
+            if r != FLEET_ROUTER
+        ]
+
+    def _inc_router_id(self, inc: Any) -> str | None:
+        """The router id of a single-router incident (None: unknown)."""
+        entries = self._inc_entries(inc)
+        return self.router_id_for_entry(entries[0]) if len(entries) == 1 else None
+
+    def _matches(
+        self, action: RemediationAction, inc: Any, router_id: str | None = None
+    ) -> bool:
+        """``action`` is a record of ``inc`` (id aside): same first seen
+        rule, same type, same router (:func:`_same_incident`)."""
+        return _same_incident(
+            action,
+            _first_seen(inc),
+            _value(getattr(inc, "type", None)),
+            router_id if router_id is not None else self._inc_router_id(inc),
+        )
+
     def _periods(self) -> dict[str, list[RemediationAction]]:
         """Observe records by incident id (one pass over the store)."""
         index: dict[str, list[RemediationAction]] = {}
@@ -1193,28 +1367,28 @@ class HealEngine:
 
     def _recorded(
         self,
-        incident_id: str,
-        reopen: int,
-        first_seen: float | None,
+        inc: Any,
+        router_id: str | None = None,
         index: Mapping[str, list[RemediationAction]] | None = None,
     ) -> bool:
         """An observe record of this incident's open period exists (in any
         state): one record per period, also after it closed. The same id
-        with a later first seen is another incident (package X, d)."""
-        found = (index if index is not None else self._periods()).get(incident_id, ())
+        with a later first seen, another type or on another router is
+        another incident (package X, d; review of PR #81)."""
+        found = (index if index is not None else self._periods()).get(inc.id, ())
+        reopen = _reopen(inc)
         return any(
-            a.incident_reopen == reopen and _same_incident(a, first_seen) for a in found
+            a.incident_reopen == reopen and self._matches(a, inc, router_id)
+            for a in found
         )
 
-    def _close_stale(self, incident_id: str, first_seen: float | None) -> None:
-        """Close open records of an older incident with the same id."""
-        if first_seen is None:
-            return
+    def _close_stale(self, inc: Any, router_id: str | None = None) -> None:
+        """Close open records of another incident with the same id."""
         for action in self.store.open_actions():
             if (
-                action.incident_id == incident_id
+                action.incident_id == inc.id
                 and action.action_type == OBSERVE_ACTION
-                and not _same_incident(action, first_seen)
+                and not self._matches(action, inc, router_id)
             ):
                 self._close(action, "incident_gone")
 
@@ -1253,18 +1427,7 @@ class HealEngine:
             return skip("skipped_not_announced", "not_announced")
         if self._is_child(ni, inc, known):
             return skip("skipped_child", "child")
-        from .net_engine import FLEET_ROUTER
-
-        raw = getattr(inc, "routers", None)
-        routers = [
-            r
-            for r in dict.fromkeys(
-                r
-                for r in (raw if isinstance(raw, list | tuple) else ())
-                if isinstance(r, str)
-            )
-            if r != FLEET_ROUTER
-        ]
+        routers = self._inc_entries(inc)
         if len(routers) != 1:
             return skip("skipped_no_single_router", "no_single_router")
         entry_id = routers[0]
@@ -1276,12 +1439,12 @@ class HealEngine:
             return skip("skipped_no_router_id", "no_router_id")
         reopen = _reopen(inc)
         first_seen = _first_seen(inc)
-        if self._recorded(incident_id, reopen, first_seen, index):
+        if self._recorded(inc, router_id, index):
             # a repeat of a recorded period (or an event reusing its id):
             # not counted, so no event can drive a counter (package X, b)
             return "deduplicated"
-        # an older incident with the same id (NI reset) still holds a record
-        self._close_stale(incident_id, first_seen)
+        # another incident with the same id (NI reset) still holds a record
+        self._close_stale(inc, router_id)
         period = (incident_id, reopen, first_seen)
         slot = component_dedupe_id(router_id, ROUTER_COMPONENT)
         holder = self._slot_holder(slot, incident_id)
@@ -1334,7 +1497,7 @@ class HealEngine:
         self._skip_memo.pop(period, None)
         if index is not None:
             index.setdefault(incident_id, []).append(action)
-        if self._in_maintenance(ni, entry_id):
+        if self._in_maintenance(ni, entry_id) is True:
             with contextlib.suppress(HealStoreError, HealModelError):
                 self.store.update_flags(action.action_id, in_maintenance=True)
         self._advance(action.action_id, inc, ni)
@@ -1400,11 +1563,14 @@ class HealEngine:
         return suppressed_child(inc, known, getattr(ni.machine, "last_now", None))
 
     @staticmethod
-    def _in_maintenance(ni: Any, entry_id: str) -> bool:
+    def _in_maintenance(ni: Any, entry_id: str) -> bool | None:
+        """NI's answer (None: unknown - an error or anything but a bool;
+        review of PR #81, P2a)."""
         try:
-            return bool(ni.in_maintenance(entry_id))
-        except Exception:  # noqa: BLE001
-            return False
+            value = ni.in_maintenance(entry_id)
+        except Exception:  # noqa: BLE001 - unknown, never "not in maintenance"
+            return None
+        return value if type(value) is bool else None
 
     def _cause(self, ni: Any, inc: Any) -> tuple[Cause | None, tuple[str, ...]]:
         """The cause as NI reports it (never recomputed) and its families."""
@@ -1465,8 +1631,11 @@ class HealEngine:
             )
             self.counters["analyzed"] += 1
         if action.state is ActionState.ANALYZED:
+            before = action.to_dict()
             context = self.context_for(action)
             proposal, _clamped = self._decide(context)
+            if not self._untouched(action_id, action, before):
+                return
             changes: dict[str, Any] = {
                 "decision": proposal.decision,
                 "risk": proposal.risk,
@@ -1500,6 +1669,28 @@ class HealEngine:
                 )
             self.counters["proposed"] += 1
 
+    def _untouched(
+        self, action_id: str, action: RemediationAction, before: dict[str, Any]
+    ) -> bool:
+        """The record is what it was before the decision. Else nothing is
+        applied, the record is put back as it was and the case is counted
+        (``decision_tampered``; review of PR #81, P1)."""
+        live = self.store.get(action_id)
+        try:
+            same = live is action and live.to_dict() == before
+        except Exception:  # noqa: BLE001 - a damaged record is a changed one
+            same = False
+        if same:
+            return True
+        self.counters["decision_tampered"] += 1
+        _LOGGER.warning("Self-Healing: a record changed during its decision")
+        if live is action or live is None:
+            # the store still holds this object (or lost it): the last
+            # state the store itself wrote, rebuilt from its JSON form
+            self.store.actions[action_id] = RemediationAction.from_dict(before)
+            self.store.schedule()
+        return False
+
     def effective_mode(self, router_id: str) -> HealMode:
         """The mode in force for anything that acts (Risk 1 or more), as
         the policy sees it (``heal_policy.effective_mode``): Observe with
@@ -1514,18 +1705,49 @@ class HealEngine:
             risk=RiskClass.LOW,
         )
 
-    def _is_root_now(self, ni: Any, action: RemediationAction) -> bool | None:
-        """The record's incident is a root in NI now (None: NI does not say)."""
+    def _ni_incident(
+        self, ni: Any, action: RemediationAction
+    ) -> tuple[Any, Mapping[str, Any]]:
+        """NI's incident of the record (None when NI does not know it or it
+        is another incident with the same id) and NI's incidents."""
         if ni is None or action.incident_id is None:
-            return None
+            return None, {}
         known = self._incidents(ni)
         inc = known.get(action.incident_id)
-        if inc is None or not _same_incident(action, _first_seen(inc)):
+        if inc is None or not self._matches(action, inc):
+            return None, known
+        return inc, known
+
+    def _is_root_now(self, ni: Any, action: RemediationAction) -> bool | None:
+        """The record's incident is a root in NI now (None: NI does not say)."""
+        inc, known = self._ni_incident(ni, action)
+        if inc is None:
             return None
         return not self._is_child(ni, inc, known)
 
+    def _severity(self, ni: Any, action: RemediationAction) -> str | None:
+        """NI's severity of the record's incident (None: unknown)."""
+        inc, _known = self._ni_incident(ni, action)
+        value = _value(getattr(inc, "severity", None)) if inc is not None else None
+        return value if value in hp.SEVERITIES else None
+
+    def _concurrent_repair(self, action: RemediationAction) -> bool:
+        """A repair runs on the record's router now: its repair lock is held
+        (any holder) or another record of it is in flight. The store is the
+        only path to a repair in this integration (review of PR #81)."""
+        rid = action.router_id
+        if self.store.loop.lock_holder(rid) is not None:
+            return True
+        return any(
+            a.action_id != action.action_id and a.state in _BUSY_STATES
+            for a in self.store.open_actions(rid)
+        )
+
     def context_for(self, action: RemediationAction) -> DecisionContext:
-        """The decider's view of one record (reads the safety clock)."""
+        """The decider's view of one record (reads the safety clock).
+
+        A deep copy: record, cause, hold, allowlist and the router's loop
+        records are rebuilt from their JSON form (:func:`_detached`)."""
         rid = action.router_id
         store = self.store
         safe = store.now()
@@ -1542,8 +1764,13 @@ class HealEngine:
         fleet_paused = store.loop.fleet.paused(safe)
         module = self.module_enabled()
         configured = store.settings.router(rid).mode
-        maintenance_known = ni is not None and entry_id is not None
-        return DecisionContext(
+        # NI's own answer; an error or anything but a bool stays unknown
+        maintenance = (
+            self._in_maintenance(ni, entry_id)
+            if ni is not None and entry_id is not None
+            else None
+        )
+        context = DecisionContext(
             action=action,
             router_id=rid,
             configured_mode=configured,
@@ -1557,23 +1784,29 @@ class HealEngine:
             hold=hold,
             fleet_paused=fleet_paused,
             module_enabled=module,
-            in_maintenance=bool(
-                action.flags.in_maintenance
-                or (maintenance_known and self._in_maintenance(ni, entry_id))
-            ),
+            in_maintenance=bool(action.flags.in_maintenance or maintenance is True),
             router_loaded=entry_id is not None and self._entry_usable(entry_id) is None,
             identity_status=status,
             role=role,
             cause=cause,
             source_families=tuple(families),
             evidence_sufficient=sufficient,
-            maintenance_known=maintenance_known,
+            maintenance_known=maintenance is not None,
             incident_is_root=self._is_root_now(ni, action),
-            attempts=MappingProxyType(dict(store.loop.attempts)),
-            breakers=MappingProxyType(dict(store.loop.breakers)),
+            # the loop records of this router only
+            attempts=MappingProxyType(
+                {k: v for k, v in store.loop.attempts.items() if k[0] == rid}
+            ),
+            breakers=MappingProxyType(
+                {k: v for k, v in store.loop.breakers.items() if k[0] == rid}
+            ),
             safe_now=safe,
             allowlist=tuple(store.settings.router(rid).allowlist),
+            severity=self._severity(ni, action),
+            concurrent_repair=self._concurrent_repair(action),
         )
+        # a deep copy: nothing a decider changes reaches the store (P1)
+        return _detached(context)
 
     def _decide(self, context: DecisionContext) -> tuple[Proposal, bool]:
         """The decider's proposal, validated and clamped. (proposal, clamped)"""
@@ -1670,20 +1903,18 @@ class HealEngine:
         self.counters["closed"] += 1
         return True
 
-    def _close_incident(
-        self, incident_id: str, reason: str, first_seen: float | None = None
-    ) -> bool:
+    def _close_incident(self, inc: Any, reason: str) -> bool:
         """Close the open records of one incident; True if any closed.
 
-        Only records of this incident: an older incident with the same id
+        Only records of this incident: another incident with the same id
         (NI reset) is closed as gone by the reconcile (package X, d).
         """
         closed = False
         for action in self.store.open_actions():
             if (
-                action.incident_id == incident_id
+                action.incident_id == inc.id
                 and action.action_type == OBSERVE_ACTION
-                and _same_incident(action, first_seen)
+                and self._matches(action, inc)
             ):
                 closed = self._close(action, reason) or closed
         return closed
@@ -1708,7 +1939,7 @@ class HealEngine:
                 continue  # a later package's state: never touched here
             inc = known.get(action.incident_id)
             status = _value(getattr(inc, "status", None))
-            if inc is None or not _same_incident(action, _first_seen(inc)):
+            if inc is None or not self._matches(action, inc):
                 self._close(action, "incident_gone")
             elif status in _CLOSED_STATUS:
                 self._close(action, _CLOSED_STATUS[status])
@@ -1749,7 +1980,7 @@ class HealEngine:
                 continue
             if _value(getattr(inc, "status", None)) != _ACTIVE_STATUS:
                 continue
-            if self._recorded(incident_id, _reopen(inc), _first_seen(inc), index):
+            if self._recorded(inc, None, index):
                 continue
             if self._still_waiting(inc):
                 continue

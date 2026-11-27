@@ -158,6 +158,27 @@ def gate_of(plan: he.Plan) -> dict[str, Any]:
     return explanation["gate"]
 
 
+def candidate_of(plan: he.Plan) -> dict[str, Any]:
+    """The provider's candidate as the plan shows it (never the record's)."""
+    explanation = plan.to_dict()["explanation"]
+    assert explanation is not None
+    candidate = explanation["candidate"]
+    assert candidate["label"] == "candidate"
+    assert candidate["note"] == "not_the_record_decision"
+    return candidate
+
+
+def assert_own_read_only(record: hm.RemediationAction) -> None:
+    """The record carries the decision of its own ``observe.evaluate``
+    (review of PR #81, P2b): Recommended, Risk 0, nothing planned."""
+    assert record.action_type == "observe.evaluate"
+    assert record.decision.outcome is O.RECOMMENDED
+    assert record.risk.risk_class is hm.RiskClass.READ_ONLY
+    assert record.planned_changes == ()
+    assert record.expected_impact == hm.Impact()  # the model's empty default
+    assert record.playbook_id is None and record.playbook_version is None
+
+
 # ---------------------------------------------------------------------------
 # The adapter
 # ---------------------------------------------------------------------------
@@ -236,10 +257,12 @@ async def test_unknown_facts_give_insufficient_evidence_and_are_named(
     world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
     [record] = world.records()
     assert record.state is S.PROPOSED
-    assert record.decision.outcome is O.INSUFFICIENT_EVIDENCE
-    assert record.decision.why_not == "context_missing"
-    plan = engine.plan_for(record).to_dict()
-    explanation = plan["explanation"]
+    assert_own_read_only(record)
+    full = engine.plan_for(record)
+    plan = full.to_dict()
+    explanation = candidate_of(full)
+    assert explanation["outcome"] == "insufficient_evidence"
+    assert explanation["policy"]["why_not"] == "context_missing"
     missing = next(
         r for r in explanation["policy"]["rules"] if r["code"] == "context_missing"
     )
@@ -273,6 +296,7 @@ async def test_the_engine_fills_only_what_it_holds(world: World) -> None:
     c = inp.context
     assert c.role == "gateway" and c.identity_confirmed is True
     assert c.in_maintenance is False and c.breaker_open is False
+    assert c.concurrent_repair is False  # the store answers it (review of PR #81)
     for name in (
         "reachable",
         "dependants",
@@ -286,7 +310,6 @@ async def test_the_engine_fills_only_what_it_holds(world: World) -> None:
         "clients_on_router",
         "clients_on_target",
         "open_security_findings",
-        "concurrent_repair",
         "diag_enabled",
     ):
         assert getattr(c, name) is None, name
@@ -337,17 +360,28 @@ async def test_a_favourable_provider_gives_at_most_requires_approval(
         world.open(iid, cause="dns_upstream", cause_status="confirmed")
         record = world.of(iid)
         assert record.state is S.PROPOSED
-        assert record.decision.outcome is O.REQUIRES_APPROVAL
-        assert record.decision.why == "risk_needs_approval"
-        assert record.risk.risk_class is hm.RiskClass.MEDIUM
-        assert record.playbook_id == "dns_recovery"
-        assert record.planned_changes == (
-            hm.Change(kind="service", target="dnsmasq", effect="service.restart"),
-        )
+        assert_own_read_only(record)
         plan = engine.plan_for(record)
         assert plan.executable is False and plan.proposal.executable is False
-        gate = gate_of(plan)
-        assert gate["permission"] in ("recommend", "needs_approval")
+        assert gate_of(plan)["permission"] == "run_read_only"
+        candidate = candidate_of(plan)
+        assert candidate["outcome"] == "requires_approval"
+        assert candidate["policy"]["why"] == "risk_needs_approval"
+        assert candidate["policy"]["risk"]["risk_class"] == int(hm.RiskClass.MEDIUM)
+        assert candidate["playbook_id"] == "dns_recovery"
+        assert candidate["planned_changes"] == [
+            {"kind": "service", "target": "dnsmasq", "effect": "service.restart"}
+        ]
+        gate = candidate["gate"]
+        # exactly one permission per mode (risk 2: never above approval)
+        assert (
+            gate["permission"]
+            == {
+                M.OBSERVE: "recommend",
+                M.APPROVAL: "needs_approval",
+                M.AUTO_HEAL: "needs_approval",
+            }[mode]
+        )
         assert gate["executable_now"] is False
         for _ in range(3):
             world.tick()
@@ -391,11 +425,10 @@ async def test_engine_facts_win_over_the_provider(world: World, measured: None) 
     world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
     [record] = world.records()
     # the engine's facts: a confirmed gateway root, no maintenance, no breaker
-    assert record.decision.outcome is O.REQUIRES_APPROVAL
-    rules = {
-        r["code"]
-        for r in engine.plan_for(record).to_dict()["explanation"]["policy"]["rules"]
-    }
+    assert_own_read_only(record)
+    candidate = candidate_of(engine.plan_for(record))
+    assert candidate["outcome"] == "requires_approval"
+    rules = {r["code"] for r in candidate["policy"]["rules"]}
     assert not rules & {"not_root_incident", "identity_not_confirmed", "breaker_open"}
 
 
@@ -416,7 +449,7 @@ async def test_an_open_breaker_and_failed_attempts_come_from_the_loop_state(
     )
     world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
     first = world.of("inc-1")
-    plan = engine.plan_for(first).to_dict()["explanation"]
+    plan = candidate_of(engine.plan_for(first))
     prior = next(
         c
         for c in plan["policy"]["score"]["contributions"]
@@ -429,8 +462,10 @@ async def test_an_open_breaker_and_failed_attempts_come_from_the_loop_state(
     )
     world.open("inc-2", cause="dns_upstream", cause_status="confirmed")
     second = world.of("inc-2")
-    assert second.decision.outcome is O.NOT_SAFE
-    assert second.decision.why_not == "breaker_open"
+    assert_own_read_only(second)
+    candidate = candidate_of(engine.plan_for(second))
+    assert candidate["outcome"] == "not_safe"
+    assert candidate["policy"]["why_not"] == "breaker_open"
 
 
 # ---------------------------------------------------------------------------
@@ -562,8 +597,9 @@ async def test_any_valid_candidate_stops_at_proposed(
     world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
     [record] = world.records()
     assert record.state is S.PROPOSED
-    assert record.decision.outcome is outcome
+    assert_own_read_only(record)
     plan = engine.plan_for(record)
+    assert candidate_of(plan)["outcome"] == outcome.value
     assert plan.executable is False and plan.proposal.executable is False
     for _ in range(3):
         world.tick()
@@ -600,23 +636,86 @@ def test_heal_facts_validate_their_input() -> None:
     assert dict(facts.candidate_params) == {"service": "dnsmasq"}
 
 
+LOOP_KEY = (R1, "service.restart", "service:dnsmasq")
+
+
+def _seed_loop(store: Any) -> tuple[hm.AttemptRecord, hm.BreakerRecord]:
+    safe = store.now()
+    attempt = hm.AttemptRecord(
+        count=1,
+        window_start=safe - 60,
+        last_at=safe - 60,
+        cooldown_until=safe + 1800,
+        recent=(safe - 60,),
+        last_result="not_resolved",
+    )
+    breaker = hm.BreakerRecord(state=hm.BreakerState.OPEN, opened_at=safe)
+    store.loop.attempts[LOOP_KEY] = attempt
+    store.loop.breakers[LOOP_KEY] = breaker
+    return attempt, breaker
+
+
+def _meddle(context: he.DecisionContext) -> None:
+    """Everything a hostile provider or decider could try on what it gets."""
+    object.__setattr__(context, "hold", None)
+    object.__setattr__(context, "fleet_paused", False)
+    object.__setattr__(context, "effective_mode", M.AUTO_HEAL)
+    object.__setattr__(context.action, "state", hm.ActionState.EXECUTING)
+    object.__setattr__(context.action, "incident_type", "provider_was_here")
+    for record in context.attempts.values():
+        object.__setattr__(record, "cooldown_until", 0.0)
+        object.__setattr__(record, "count", 0)
+    for record in context.breakers.values():
+        object.__setattr__(record, "state", hm.BreakerState.CLOSED)
+
+
 async def test_the_provider_gets_a_copy_of_the_context(world: World) -> None:
+    """A deep copy (review of PR #81, P1): changing what the provider is
+    handed leaves the store (state, incident type, cooldowns, breakers) and
+    the context the policy reads untouched."""
+    seen: list[hp.DecisionInput] = []
+    real_gate = hp.gate
+
+    def spy(inp: hp.DecisionInput, **kw: Any) -> hp.GateVerdict:
+        seen.append(inp)
+        return real_gate(inp, **kw)
+
     class Meddler:
+        def __init__(self) -> None:
+            self.handed: list[he.DecisionContext] = []
+
         def facts(self, context: he.DecisionContext) -> he.HealFacts:
-            object.__setattr__(context, "hold", None)
-            object.__setattr__(context, "fleet_paused", False)
-            object.__setattr__(context, "effective_mode", M.AUTO_HEAL)
+            self.handed.append(context)
+            _meddle(context)
             return he.HealFacts()
 
-    engine = await world.start(decider=he.PolicyDecider(Meddler()))
+    meddler = Meddler()
+    engine = await world.start(decider=he.PolicyDecider(meddler))
     store = engine.store
+    attempt, breaker = _seed_loop(store)
+    assert store.loop.breakers[LOOP_KEY] == breaker
     safe = store.now()
     store.loop.fleet = hm.FleetPause(paused_until=safe + 3600, since=safe)
-    world.open("inc-1")
+    with patch.object(hp, "gate", spy):
+        world.open("inc-1")
     [record] = world.records()
+    assert record.state is S.PROPOSED
+    assert record.incident_type == "dns_failure"
+    assert store.loop.attempts[LOOP_KEY] == attempt
+    assert store.loop.attempts[LOOP_KEY].cooldown_until == safe + 1800
+    assert store.loop.breakers[LOOP_KEY].state is hm.BreakerState.OPEN
+    assert [a.state for a in store.open_actions()] == [S.PROPOSED]
+    assert meddler.handed[0].action is not store.get(record.action_id)
+    # the policy read the engine's own copy, not the meddled one
+    assert seen[0].incident is not None
+    assert seen[0].incident.incident_type == "dns_failure"
+    assert engine.counters["decision_tampered"] == 0
     plan = engine.plan_for(record)
     assert "fleet_paused" in plan.blockers
     assert gate_of(plan)["effective_mode"] == "observe"
+    assert engine.store.get(record.action_id).state is S.PROPOSED
+    payload = store.payload()
+    assert [a["state"] for a in payload["actions"]] == ["proposed"]
 
 
 # ---------------------------------------------------------------------------
@@ -644,10 +743,14 @@ async def test_a_gate_without_a_decision_falls_back(world: World) -> None:
     )
     with patch.object(hp, "gate", MagicMock(return_value=refused)):
         world.open("inc-1")
-    [record] = world.records()
+        [record] = world.records()
+        refused_gate = engine.plan_for(record).to_dict()["explanation"]["gate"]
     assert record.decision.why_not == "no_decision_policy"
+    assert refused_gate["permission"] == "none"
+    assert refused_gate["reasons"] == ["module_disabled"]
+    # the real gate again: the record's own Risk 0 step
     plan_gate = engine.plan_for(record).to_dict()["explanation"]["gate"]
-    assert plan_gate["permission"] in ("none", "run_read_only")
+    assert plan_gate["permission"] == "run_read_only"
 
 
 # ---------------------------------------------------------------------------
@@ -690,7 +793,9 @@ async def test_a_held_router_and_a_paused_fleet_show_observe(
     assert held.state is paused.state is S.PROPOSED
     for record, reason in ((held, "router_held"), (paused, "fleet_paused")):
         plan = engine.plan_for(record)
-        gate = gate_of(plan)
+        # the record's own Risk 0 step is not held; the candidate is
+        assert gate_of(plan)["permission"] == "run_read_only"
+        gate = candidate_of(plan)["gate"]
         assert gate["effective_mode"] == "observe"
         assert gate["permission"] == "recommend"
         assert reason in gate["reasons"]
@@ -731,13 +836,18 @@ async def test_a_read_only_recommendation_is_not_clamped(world: World) -> None:
     assert "insufficient_evidence_sources" in engine.plan_for(record).blockers
 
 
-async def test_a_risk_one_recommendation_is_still_clamped(world: World) -> None:
+async def test_a_risk_one_candidate_never_becomes_the_record(world: World) -> None:
+    """A Risk 1 candidate stays in the explanation; the record keeps its own
+    Risk 0 step (the clamp for a decider that puts Risk 1 on the record:
+    ``test_a_claimed_read_only_write_is_clamped``)."""
     engine = await world.start(decider=he.PolicyDecider(Candidate("diag.refresh")))
     world.open("inc-1", cause="dns_upstream", cause_status="hypothesis")
     [record] = world.records()
-    assert record.decision.outcome is O.INSUFFICIENT_EVIDENCE
-    assert record.decision.why_not == "insufficient_evidence_sources"
-    assert engine.counters["decision_clamped"] == 1
+    assert_own_read_only(record)
+    assert engine.counters["decision_clamped"] == 0
+    candidate = candidate_of(engine.plan_for(record))
+    assert candidate["action_type"] == "diag.refresh"
+    assert candidate["policy"]["risk"]["risk_class"] == int(hm.RiskClass.LOW)
 
 
 class Claiming:
@@ -817,8 +927,10 @@ async def test_the_plan_explains_the_policy_decision(
         assert engine.store.loop.to_dict() == before_loop
     assert len(world.hass.data) == delayed
     assert body["executable"] is False
-    explanation = body["explanation"]
-    json.dumps(explanation)
+    json.dumps(body["explanation"])
+    explanation = candidate_of(engine.plan_for(record))
+    assert body["explanation"]["policy"]["outcome"] == "recommended"
+    assert body["explanation"]["policy"]["action_type"] == "observe.evaluate"
     policy = explanation["policy"]
     assert policy["outcome"] == "requires_approval"
     assert policy["action_type"] == "service.restart"
@@ -834,7 +946,10 @@ async def test_the_plan_explains_the_policy_decision(
     codes |= set(explanation["gate"]["reasons"])
     for code in codes:
         assert texts.get(code) == hp.REASON_TEXT_DE[code], code
-    assert body["decision"]["outcome"] == "requires_approval"
+    # the record's outcome is its own, never the candidate's
+    assert body["decision"]["outcome"] == "recommended"
+    assert body["proposed_action_type"] == "observe.evaluate"
+    assert body["planned_changes"] == []
 
 
 async def test_the_plans_route_reads_only(world: World, measured: None) -> None:
@@ -862,8 +977,10 @@ async def test_the_plans_route_reads_only(world: World, measured: None) -> None:
     [plan] = data["plans"]
     assert plan["action_id"] == record.action_id
     assert plan["executable"] is False
-    assert plan["explanation"]["policy"]["outcome"] == "requires_approval"
-    assert plan["explanation"]["texts_de"]
+    assert plan["decision"]["outcome"] == "recommended"
+    assert plan["explanation"]["candidate"]["label"] == "candidate"
+    assert plan["explanation"]["candidate"]["outcome"] == "requires_approval"
+    assert plan["explanation"]["candidate"]["texts_de"]
     assert engine.store.actions == snapshot
 
 
@@ -891,13 +1008,16 @@ async def test_real_network_intelligence_with_the_real_policy(
         [inc] = open_of(intel, "wan_down")
         assert record.incident_id == inc.id and record.state is S.PROPOSED
         assert record.params.get("first_seen") == round(inc.first_seen, 3)
-        if provider is None:
-            assert record.decision.outcome is O.RECOMMENDED
-            assert record.risk.risk_class is hm.RiskClass.READ_ONLY
-        else:
-            assert record.decision.outcome is O.INSUFFICIENT_EVIDENCE
-            assert record.decision.why_not == "context_missing"
+        assert record.decision.outcome is O.RECOMMENDED
+        assert record.risk.risk_class is hm.RiskClass.READ_ONLY
+        assert record.planned_changes == ()
         plan = engine.plan_for(record)
+        if provider is not None:
+            candidate = candidate_of(plan)
+            assert candidate["outcome"] == "insufficient_evidence"
+            assert candidate["policy"]["why_not"] == "context_missing"
+        else:
+            assert "candidate" not in plan.to_dict()["explanation"]
         assert plan.executable is False
         for _ in range(3):
             w.tick()
@@ -954,7 +1074,10 @@ async def test_zero_extra_router_calls_with_the_policy(
     coordinator.async_refresh.assert_not_awaited()
     assert coordinator._listeners == {}
     assert engine.counters["records_created"] == 2
-    assert {r.decision.outcome for r in world.records()} == {O.REQUIRES_APPROVAL}
+    assert {r.decision.outcome for r in world.records()} == {O.RECOMMENDED}
+    assert {candidate_of(engine.plan_for(r))["outcome"] for r in world.records()} == {
+        "requires_approval"
+    }
     hass.services.async_call.assert_not_called()
     await he.async_release_self_healing(hass, E1)
     await he.async_release_self_healing(hass, E2)
@@ -1012,7 +1135,7 @@ async def test_spoofed_events_do_not_drive_the_dedupe_counter(world: World) -> N
     for _ in range(300):
         world.bus.fire(EVENT_INCIDENT, payload("inc-9", entry_ids=[E2]))
     assert engine.counters["deduplicated"] == 1
-    assert len(engine._dedupe_seen) <= he.DEDUPE_SEEN_MAX
+    assert len(engine._dedupe_seen) <= 1000
 
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +1172,7 @@ async def test_the_tick_does_not_rebuild_deferred_incidents(world: World) -> Non
         world.tick()
         world.tick()
     assert calls == [] and adds == []
-    assert len(engine._skip_memo) <= he.SKIP_MEMO_MAX
+    assert len(engine._skip_memo) <= 1000
     assert len(world.records()) == 1
     # the slot frees: the next incident gets its record
     world.resolve("inc-1")
@@ -1060,14 +1183,14 @@ async def test_the_tick_does_not_rebuild_deferred_incidents(world: World) -> Non
 
 async def test_the_memo_stays_bounded(world: World) -> None:
     engine = await world.start()
-    for n in range(1, 3 * he.SKIP_MEMO_MAX):
+    for n in range(1, 3000):
         iid = f"inc-{n}"
         world.ni.incidents[iid] = incident(iid, [E1])
         world.ni.announced[iid] = 0
     world.tick()
     world.tick()
-    assert len(engine._skip_memo) <= he.SKIP_MEMO_MAX
-    assert engine.pending_count() <= he.PENDING_MAX
+    assert len(engine._skip_memo) == 1000  # SKIP_MEMO_MAX, the oldest dropped
+    assert engine.pending_count() == 200  # PENDING_MAX
 
 
 # ---------------------------------------------------------------------------
@@ -1311,10 +1434,517 @@ async def test_a_blocked_write_plans_no_change(world: World) -> None:
     proposal = he.PolicyDecider(
         Candidate("service.restart", service="dnsmasq")
     ).propose(context)
-    assert proposal.action_type == "service.restart"
-    assert proposal.decision.outcome in he._NON_ACTING
+    assert proposal.action_type == "observe.evaluate"
     assert proposal.planned_changes == ()
     assert proposal.executable is False
+    assert proposal.explanation is not None
+    candidate = proposal.explanation["candidate"]
+    assert candidate["action_type"] == "service.restart"
+    assert candidate["outcome"] == "insufficient_evidence"
+    assert candidate["planned_changes"] == []
+
+
+# ---------------------------------------------------------------------------
+# Review of PR #81
+# ---------------------------------------------------------------------------
+
+
+def _spy_gate() -> tuple[list[hp.DecisionInput], list[dict[str, Any]], Any]:
+    inputs: list[hp.DecisionInput] = []
+    kwargs: list[dict[str, Any]] = []
+    real = hp.gate
+
+    def spy(inp: hp.DecisionInput, **kw: Any) -> hp.GateVerdict:
+        inputs.append(inp)
+        kwargs.append(kw)
+        return real(inp, **kw)
+
+    return inputs, kwargs, spy
+
+
+# P1: nothing handed to a provider or decider reaches the store
+
+
+async def test_a_decider_cannot_change_the_stored_record(world: World) -> None:
+    class MeddlingDecider:
+        def propose(self, context: he.DecisionContext) -> he.Proposal:
+            _meddle(context)
+            return he.DEFAULT_DECIDER.propose(context)
+
+    engine = await world.start(decider=MeddlingDecider())
+    attempt, _breaker = _seed_loop(engine.store)
+    world.open("inc-1")
+    [record] = world.records()
+    assert record.state is S.PROPOSED
+    assert record.incident_type == "dns_failure"
+    assert engine.store.loop.attempts[LOOP_KEY] == attempt
+    assert engine.store.loop.breakers[LOOP_KEY].state is hm.BreakerState.OPEN
+    engine.plan_for(record)
+    assert engine.store.get(record.action_id).state is S.PROPOSED
+    assert engine.counters["decision_tampered"] == 0
+
+
+async def test_a_record_changed_during_its_decision_is_not_applied(
+    world: World,
+) -> None:
+    """Defence behind the copy: a decider that reaches the live record some
+    other way changes it; nothing is applied, the record is put back and
+    the case is counted."""
+
+    class Reaching:
+        def propose(self, context: he.DecisionContext) -> he.Proposal:
+            assert world.engine is not None
+            live = world.engine.store.get(context.action.action_id)
+            object.__setattr__(live, "state", hm.ActionState.EXECUTING)
+            object.__setattr__(live, "incident_type", "decider_was_here")
+            return he.DEFAULT_DECIDER.propose(context)
+
+    engine = await world.start(decider=Reaching())
+    world.open("inc-1")
+    [record] = world.records()
+    assert engine.counters["decision_tampered"] == 1
+    assert record.state is S.ANALYZED
+    assert record.incident_type == "dns_failure"
+    assert states_of(record) == [S.DETECTED, S.ANALYZED]
+    assert engine.counters["proposed"] == 0
+    assert [a["state"] for a in engine.store.payload()["actions"]] == ["analyzed"]
+
+
+# P2a: an NI maintenance lookup that fails or answers oddly stays unknown
+
+
+@pytest.mark.parametrize("answer", ["raise", "yes", None, 1])
+async def test_an_unusable_maintenance_answer_stays_unknown(
+    world: World, answer: Any
+) -> None:
+    def lookup(entry_id: str) -> Any:
+        if answer == "raise":
+            raise RuntimeError("ni broken")
+        return answer
+
+    world.ni.in_maintenance = lookup
+    engine = await world.start(decider=he.PolicyDecider())
+    inputs, _kw, spy = _spy_gate()
+    with patch.object(hp, "gate", spy):
+        world.open("inc-1")
+    [inp] = inputs
+    assert inp.context.in_maintenance is None
+    [record] = world.records()
+    assert record.flags.in_maintenance is False
+    context = engine.context_for(record)
+    assert context.maintenance_known is False
+    assert context.in_maintenance is False  # the plan's blocker flag only
+
+
+# P2b: the record keeps its own decision; the candidate is only explained
+
+
+async def test_the_record_keeps_its_own_decision_not_the_candidates(
+    world: World, measured: None
+) -> None:
+    engine = await world.start(decider=he.PolicyDecider(Favourable()))
+    world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
+    [record] = world.records()
+    assert_own_read_only(record)
+    assert record.target_components == (hm.ROUTER_COMPONENT,)  # observe's own
+    assert record.history[-1].reason == "decision_recommended"
+    candidate = candidate_of(engine.plan_for(record))
+    assert candidate["action_type"] == "service.restart"
+    assert candidate["params"] == {"service": "dnsmasq"}
+    assert candidate["outcome"] == "requires_approval"
+
+
+# P2c: another type or another router is another incident
+
+
+async def test_a_reused_id_on_another_router_is_a_new_incident(world: World) -> None:
+    engine = await world.start(decider=he.PolicyDecider())
+    world.open("inc-1", first_seen=5000.0)
+    [old] = world.records()
+    # NI's store reset; the new inc-1 is on the other router, first seen
+    # earlier (its evidence started before), another type
+    world.ni.incidents.clear()
+    world.ni.announced.clear()
+    world.clock.now += 60
+    world.open("inc-1", router=E2, first_seen=4000.0, type="wan_down")
+    closed = engine.store.get(old.action_id)
+    assert closed.state is S.CANCELLED
+    assert closed.history[-1].reason == "incident_gone"
+    new = world.of("inc-1")
+    assert new.action_id != old.action_id
+    assert new.router_id == R2 and new.incident_type == "wan_down"
+    assert new.state is S.PROPOSED
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"type": "wan_down"}, {"router": "other"}],
+    ids=["type", "router"],
+)
+async def test_same_id_and_first_seen_but_another_incident(
+    world: World, change: dict[str, str]
+) -> None:
+    engine = await world.start(decider=he.PolicyDecider())
+    world.open("inc-1", first_seen=5000.0)
+    [old] = world.records()
+    world.ni.incidents.clear()
+    world.ni.announced.clear()
+    world.clock.now += 60
+    router = E2 if "router" in change else E1
+    fields = {"type": change["type"]} if "type" in change else {}
+    world.open("inc-1", router=router, first_seen=5000.0, **fields)
+    assert engine.store.get(old.action_id).history[-1].reason == "incident_gone"
+    records = [r for r in world.records() if r.incident_id == "inc-1"]
+    assert len(records) == 2 and records[1].state is S.PROPOSED
+
+
+@pytest.mark.parametrize("later", [1.0, 60.0, 3599.0, 3600.0])
+async def test_a_first_seen_even_a_second_later_is_another_incident(
+    world: World, later: float
+) -> None:
+    """No slack: NI only ever moves ``first_seen`` back (``_shift`` on a step
+    back of its clock), so any later value is another incident."""
+    engine = await world.start(decider=he.PolicyDecider())
+    world.open("inc-1", first_seen=5000.0)
+    [old] = world.records()
+    world.ni.incidents["inc-1"] = incident("inc-1", [E1], first_seen=5000.0 + later)
+    world.ni.announced["inc-1"] = 0
+    world.tick()
+    assert engine.store.get(old.action_id).history[-1].reason == "incident_gone"
+    assert he._same_incident(old, 5000.0) is True
+    assert he._same_incident(old, 4999.0) is True
+    assert he._same_incident(old, 5000.0 + later) is False
+
+
+async def test_root_state_of_another_incident_with_the_id_is_unknown(
+    world: World,
+) -> None:
+    engine = await world.start(decider=he.PolicyDecider())
+    world.open("inc-1", first_seen=5000.0)
+    [old] = world.records()
+    assert engine.context_for(old).incident_is_root is True
+    world.ni.incidents["inc-1"] = incident("inc-1", [E1], first_seen=9000.0)
+    assert engine.context_for(old).incident_is_root is None
+    assert engine.context_for(old).severity is None
+
+
+# P3: the engine's unknown wins over a provider's claim
+
+
+class Claimer:
+    """Claims every engine-owned fact, favourably."""
+
+    def facts(self, context: he.DecisionContext) -> he.HealFacts:
+        return he.HealFacts(
+            context=dataclasses.replace(
+                GOOD_CONTEXT,
+                role="gateway",
+                identity_confirmed=True,
+                breaker_open=False,
+                in_maintenance=False,
+                concurrent_repair=False,
+            ),
+            incident=dataclasses.replace(
+                GOOD_INCIDENT,
+                is_root=True,
+                source_families=5,
+                cause_status=hm.CauseStatus.CONFIRMED,
+                cause_level=hm.CauseLevel.CONFIRMED,
+                confidence=0.99,
+                severity="critical",
+            ),
+            config_change_24h=False,
+        )
+
+
+async def test_the_engines_unknown_wins_over_a_provider_claim(world: World) -> None:
+    engine = await world.start(decider=he.PolicyDecider())
+    world.open("inc-1")
+    [record] = world.records()
+    known = engine.context_for(record)
+    unknown = dataclasses.replace(
+        known,
+        role=None,
+        identity_status=None,
+        safe_now=None,
+        incident_is_root=None,
+        cause=None,
+        source_families=(),
+        maintenance_known=False,
+        in_maintenance=False,
+        severity=None,
+        concurrent_repair=None,
+    )
+    decider = he.PolicyDecider(Claimer())
+    inp = decider.decision_input(unknown, decider._facts(unknown))
+    c, i = inp.context, inp.incident
+    assert i is not None
+    assert c.role is None
+    assert c.identity_confirmed is None
+    assert c.breaker_open is None
+    assert c.in_maintenance is None
+    assert c.concurrent_repair is None
+    assert i.is_root is None
+    assert i.source_families == 0
+    assert i.cause_status is hm.CauseStatus.HYPOTHESIS
+    assert i.cause_level is hm.CauseLevel.UNKNOWN
+    assert i.confidence is None
+    assert i.severity is None
+    assert inp.prior_failed_attempts is None
+    # what the provider may fill stays its own
+    assert c.reachable is True and i.target_fact is hp.TargetFact.DIRECT
+
+
+async def test_severity_comes_from_network_intelligence(
+    world: World, measured: None
+) -> None:
+    engine = await world.start(decider=he.PolicyDecider(Claimer()))
+    inputs, _kw, spy = _spy_gate()
+    with patch.object(hp, "gate", spy):
+        world.open(
+            "inc-1", cause="dns_upstream", cause_status="confirmed", severity="info"
+        )
+        world.open(
+            "inc-2",
+            router=E2,
+            cause="dns_upstream",
+            cause_status="confirmed",
+            severity=SimpleNamespace(value="warning"),
+        )
+    severities = [inp.incident.severity for inp in inputs if inp.incident]
+    assert severities == ["info", "warning"]  # the provider said critical
+    record = world.of("inc-1")
+    assert engine.context_for(record).severity == "info"
+    for odd in ("loud", None, 3):
+        world.ni.incidents["inc-1"].severity = odd
+        assert engine.context_for(record).severity is None
+    del world.ni.incidents["inc-1"].severity
+    assert engine.context_for(record).severity is None
+
+
+async def test_concurrent_repair_comes_from_the_store(world: World) -> None:
+    engine = await world.start(decider=he.PolicyDecider(Claimer()))
+    world.open("inc-1")
+    [record] = world.records()
+    assert engine.context_for(record).concurrent_repair is False
+    lock = hm.LockRecord.external(R1, "button.reboot", T0)
+    engine.store.loop.locks[R1] = lock
+    context = engine.context_for(record)
+    assert context.concurrent_repair is True
+    decider = he.PolicyDecider(Claimer())
+    inp = decider.decision_input(context, decider._facts(context))
+    assert inp.context.concurrent_repair is True  # the provider said False
+    del engine.store.loop.locks[R1]
+    busy = SimpleNamespace(action_id="rem_other", state=S.EXECUTING)
+    real_open = engine.store.open_actions
+
+    def with_busy(router_id: str | None = None) -> list[Any]:
+        return [*real_open(router_id), busy]
+
+    with patch.object(engine.store, "open_actions", with_busy):
+        assert engine.context_for(record).concurrent_repair is True
+    assert engine.context_for(record).concurrent_repair is False
+
+
+# P3: a reopened period gets its own record (E23)
+
+
+async def test_a_reopened_period_gets_its_own_record(world: World) -> None:
+    await world.start(decider=he.PolicyDecider())
+    world.open("inc-1", first_seen=5000.0)
+    world.resolve("inc-1")
+    inc = world.ni.incidents["inc-1"]
+    inc.status = IncidentStatus.ACTIVE
+    inc.reopen_count = 1
+    world.ni.announced["inc-1"] = 1
+    world.clock.now += 60
+    world.bus.fire(EVENT_INCIDENT, payload("inc-1", "reopened"))
+    records = world.records()
+    assert [(r.incident_reopen, r.state) for r in records] == [
+        (0, S.CANCELLED),
+        (1, S.PROPOSED),
+    ]
+
+
+# P3: the gate's inputs (E30, E31)
+
+
+async def test_the_gate_gets_the_module_switch_and_no_green_guards(
+    world: World, measured: None
+) -> None:
+    good = dataclasses.replace(GOOD_CONTEXT, diag_enabled=True)
+
+    class Refresh:
+        def facts(self, context: he.DecisionContext) -> he.HealFacts:
+            return he.HealFacts(
+                candidate_action="diag.refresh",
+                candidate_params={},
+                context=good,
+                incident=GOOD_INCIDENT,
+                config_change_24h=False,
+            )
+
+    engine = await world.start(decider=he.PolicyDecider(Refresh()))
+    engine.store.set_settings(
+        hm.HealSettings(
+            routers={
+                R1: hm.RouterSettings(
+                    mode=M.AUTO_HEAL,
+                    allowlist=(
+                        hm.AllowEntry(
+                            action_type="diag.refresh", params={}, max_risk=1
+                        ),
+                    ),
+                )
+            }
+        )
+    )
+    _inputs, kwargs, spy = _spy_gate()
+    with patch.object(hp, "gate", spy):
+        world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
+    assert {kw["guards_green"] for kw in kwargs} == {None}
+    assert {kw["module_enabled"] for kw in kwargs} == {True}
+    [record] = world.records()
+    candidate = candidate_of(engine.plan_for(record))
+    assert candidate["outcome"] == "recommended"
+    # Auto-Heal, allowlisted, Risk 1: only the preflight guards are missing
+    assert candidate["gate"]["permission"] == "needs_approval"
+    assert candidate["gate"]["reasons"] == ["guards_not_green"]
+    # the module switch off: the gate refuses before deciding
+    engine.store.set_settings(hm.HealSettings(enabled=False))
+    plan = engine.plan_for(record).to_dict()["explanation"]
+    assert plan["gate"]["permission"] == "none"
+    assert plan["gate"]["reasons"] == ["module_disabled"]
+    assert plan["candidate"]["gate"]["reasons"] == ["module_disabled"]
+
+
+# P3: events with unknown ids count once per id
+
+
+async def test_events_with_unknown_ids_count_once_per_id(world: World) -> None:
+    engine = await world.start(decider=he.PolicyDecider())
+    before = dict(engine.counters)
+    for _ in range(10):
+        for n in range(10):
+            world.bus.fire(EVENT_INCIDENT, payload(f"inc-{n + 900}"))
+    diff = {k: v - before[k] for k, v in engine.counters.items() if v != before[k]}
+    assert diff == {"incidents_seen": 10, "skipped_unknown_incident": 10}
+    for n in range(1001):
+        world.bus.fire(EVENT_INCIDENT, payload(f"x-{n}"))
+    assert len(engine._unknown_seen) == 1000  # UNKNOWN_SEEN_MAX
+    assert "x-0" not in engine._unknown_seen and "x-1000" in engine._unknown_seen
+
+
+# P3: size bounds pinned by literal numbers (E34, E40)
+
+
+def test_the_explanation_bounds_are_literal() -> None:
+    nested: Any = "x"
+    for _ in range(8):
+        nested = [nested]
+    assert he._plain(nested) == [[[[[[None]]]]]]  # depth 6
+    assert len(he._plain(list(range(100)))) == 64
+    assert he._plain({"k": "y" * 300})["k"] == "y" * 256
+    assert he._plain({"k" * 300: 1}) == {"k" * 256: 1}
+
+
+async def test_the_dedupe_memory_holds_1000_periods(world: World) -> None:
+    engine = await world.start()
+    for n in range(1000):
+        engine._dedupe_seen[(f"old-{n}", 0, None)] = None
+    other = hm.RemediationAction.new(
+        router_id=R2,
+        action_type="diag.refresh",
+        ts=T0,
+        incident_id="inc-9",
+        actor=hm.Actor.ENGINE,
+        reason="x",
+    )
+    engine.store.add(other)
+    world.ni.incidents["inc-9"] = incident("inc-9", [E2])
+    world.ni.announced["inc-9"] = 0
+    world.bus.fire(EVENT_INCIDENT, payload("inc-9", entry_ids=[E2]))
+    assert engine.counters["deduplicated"] == 1
+    assert len(engine._dedupe_seen) == 1000
+    assert ("old-0", 0, None) not in engine._dedupe_seen
+    assert ("inc-9", 0, None) in engine._dedupe_seen
+
+
+# Guards behind guards, second round (mutation rerun of the review of PR #81)
+
+
+async def test_a_resolved_pending_incident_is_dropped_without_a_detect(
+    world: World,
+) -> None:
+    world.ni.incidents["inc-1"] = incident("inc-1", [E1])
+    world.ni.announced["inc-1"] = 0
+    engine = await world.start()
+    world.open("inc-2")
+    assert engine.pending_count() == 1
+    world.ni.incidents["inc-2"].status = IncidentStatus.RESOLVED
+    with patch.object(engine, "_detect", wraps=engine._detect) as spy:
+        engine._retry_pending()
+    spy.assert_not_called()
+    assert engine.pending_count() == 0
+
+
+async def test_a_reopen_while_the_old_period_is_open_is_not_deferred(
+    world: World,
+) -> None:
+    """The router's slot is held by this incident's own record: that is the
+    store's incident dedupe, not a deferral behind another incident."""
+    engine = await world.start()
+    world.open("inc-1")
+    inc = world.ni.incidents["inc-1"]
+    inc.reopen_count = 1
+    world.ni.announced["inc-1"] = 1
+    world.bus.fire(EVENT_INCIDENT, payload("inc-1", "reopened"))
+    assert engine.pending_count() == 0
+    assert engine.counters["deferred"] == 0
+    assert engine.counters["deduplicated"] == 1
+
+
+async def test_first_seen_is_kept_to_the_millisecond(world: World) -> None:
+    await world.start()
+    world.open("inc-1", first_seen=5000.123456)
+    assert world.of("inc-1").params["first_seen"] == 5000.123
+
+
+async def test_the_context_holds_only_the_routers_loop_records(
+    world: World,
+) -> None:
+    engine = await world.start()
+    _seed_loop(engine.store)
+    other = (R2, "service.restart", "service:dnsmasq")
+    engine.store.loop.attempts[other] = engine.store.loop.attempts[LOOP_KEY]
+    engine.store.loop.breakers[other] = engine.store.loop.breakers[LOOP_KEY]
+    world.open("inc-1")
+    context = engine.context_for(world.of("inc-1"))
+    assert set(context.attempts) == {LOOP_KEY}
+    assert set(context.breakers) == {LOOP_KEY}
+
+
+async def test_a_failing_candidate_leaves_the_record_alone(
+    world: World, measured: None
+) -> None:
+    real = hp.gate
+
+    def gate(inp: hp.DecisionInput, **kw: Any) -> hp.GateVerdict:
+        if inp.action_type == "service.restart":
+            raise hp.PolicyError("candidate only")
+        return real(inp, **kw)
+
+    decider = he.PolicyDecider(Favourable())
+    engine = await world.start(decider=decider)
+    with patch.object(hp, "gate", gate):
+        world.open("inc-1", cause="dns_upstream", cause_status="confirmed")
+        [record] = world.records()
+        explanation = engine.plan_for(record).to_dict()["explanation"]
+    assert_own_read_only(record)
+    assert engine.counters["decider_failed"] == 0
+    assert decider.counters["candidate_failed"] == 2  # the step and the plan
+    assert explanation["candidate"]["error"] == "candidate_failed"
+    assert "outcome" not in explanation["candidate"]
 
 
 __all__ += ["R2", "Event", "FakeNI", "hc"]

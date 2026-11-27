@@ -151,7 +151,10 @@ Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intellige
    1 bis 64 Zeichen und, falls vorhanden, `entry_ids` als Liste von Zeichenketten zählen;
    alles andere wird gezählt (`skipped_bad_event`, ohne Warnung) und verworfen.
 2. Network Intelligence nicht geladen: nichts (`skipped_ni_unavailable`). Kennt es den Vorfall
-   nicht: nichts (`skipped_unknown_incident`). Gelöst oder ignoriert laut Network
+   nicht: nichts; `skipped_unknown_incident` und `incidents_seen` zählen eine unbekannte
+   Kennung nur **einmal** (gemerkt in einer begrenzten Liste, 1000; Review PR #81), damit
+   Meldungen mit erfundenen Kennungen keinen Zähler treiben. Meldungen zu einem bekannten
+   Vorfall zählen in `incidents_seen` weiter je Meldung. Gelöst oder ignoriert laut Network
    Intelligence: die Datensätze schließen (unten). Bestätigt (`acknowledged`): kein neuer
    Datensatz, ein offener bleibt.
 3. Modul im Speicher aus (`settings.enabled`): nichts (`skipped_module_disabled`).
@@ -171,13 +174,17 @@ Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intellige
    gezählt (Paket X, b): sonst triebe jede gefälschte Meldung mit einer bekannten Kennung den
    Zähler hoch. `deduplicated` zählt nur, wenn erst der Speicher ein Doppeltes erkennt, und
    dann höchstens einmal je Öffnung (gemerkt in einer begrenzten Liste, 1000).
-   **Dieselbe Öffnung** heißt: gleiche Kennung, gleiche Zahl der Wiedereröffnungen und
-   `first_seen` des Vorfalls nicht später als der gespeicherte (Paket X, d). Network
-   Intelligence zählt nach einem Zurücksetzen seines Speichers wieder ab `inc-1`; ein Vorfall
-   mit derselben Kennung und späterem `first_seen` ist ein anderer. Offene Datensätze des
-   älteren schließen als `incident_gone`. Rückwärts verschoben (`first_seen` früher, wie
-   `_shift` nach einem Uhrsprung) bleibt es derselbe; fehlt die Zeit auf einer Seite (Datensätze
-   aus C1), entscheidet die Kennung.
+   **Dieselbe Öffnung** heißt: gleiche Kennung, gleiche Zahl der Wiedereröffnungen, gleiche
+   Vorfallart, gleicher Router und `first_seen` des Vorfalls nicht später als der gespeicherte
+   (Paket X, d; Art und Router seit dem Review von PR #81). Network Intelligence zählt nach
+   einem Zurücksetzen seines Speichers wieder ab `inc-1`; ein Vorfall mit derselben Kennung und
+   späterem `first_seen`, anderer Art oder auf einem anderen Router ist ein anderer. Offene
+   Datensätze des älteren schließen als `incident_gone`, der neue bekommt seinen eigenen.
+   Rückwärts verschoben (`first_seen` früher, wie `NetRules._shift` nach einem Rücksprung der
+   Uhr) bleibt es derselbe. Einen Spielraum nach vorn gibt es nicht: Network Intelligence
+   verschiebt `first_seen` nur zurück, schon eine Sekunde später ist ein anderer Vorfall. Fehlt
+   ein Teil auf einer Seite (Datensätze aus C1 ohne Zeit, Router-Kennung unbekannt, solange der
+   Core fehlt), entscheidet dieser Teil nicht.
 9. `RemediationAction.new` mit Aktion `observe.evaluate`, Parameter `{"incident": "inc-N",
    "first_seen": …}` (`first_seen` auf Millisekunden, nur wenn Network Intelligence ihn hat),
    Vorfallkennung, -art und Zahl der Wiedereröffnungen, Zeitpunkt = Wanduhr der Engine in
@@ -195,7 +202,8 @@ Zustand, Router, Art und Ursache liest sie aus dem Vorfall von Network Intellige
     Gelöste, ignorierte oder bestätigte Vorfälle bekommen auf keinem Weg einen Datensatz, auch
     wenn Network Intelligence sie noch als gemeldet führt (Paket X, a).
 11. Meldet Network Intelligence für den Router Wartung, bekommt der Datensatz die Markierung
-    `in_maintenance`.
+    `in_maintenance`. Nur ein echtes `True` zählt; eine Ausnahme oder eine andere Antwort heißt
+    „Wartung unbekannt“ (Review PR #81), nie „nicht in Wartung“.
 12. DETECTED → ANALYZED mit der Ursache, **wie Network Intelligence sie meldet** (Code, Status,
     Stufe, Konfidenz, Quellenfamilien); ohne Ursache Grund `no_cause_reported`, nichts wird
     erfunden.
@@ -227,8 +235,15 @@ beim Start noch in `SETUP_IN_PROGRESS` steht, wird mit dem nächsten Takt nachge
 Datensatz, die Router-Kennung, eingestellten und geltenden Modus, Hold, Flotten-Pause,
 Modulschalter, Wartung (und ob sie bekannt ist), ob der Router geladen ist, Identitätsstatus
 und Rolle aus dem Core, die Ursache, die Quellenfamilien, ob der Vorfall jetzt eine Wurzel
-ist, `evidence_sufficient`, Kopien von Versuchen und Schutzschaltern, die Zeit der
-Sicherheitsuhr, die Allowlist und `write_path_available` (in 1.53.0 immer `False`).
+ist, `evidence_sufficient`, die Versuche und Schutzschalter dieses Routers, die Zeit der
+Sicherheitsuhr, die Allowlist, die Schwere laut Network Intelligence, ob gerade eine Reparatur
+läuft, und `write_path_available` (in 1.53.0 immer `False`). Der Kontext ist eine **tiefe
+Kopie** (Review PR #81, P1): Datensatz, Ursache, Hold, Allowlist-Einträge und Versuchs- und
+Schutzschalter-Datensätze werden aus ihrer JSON-Form neu gebaut (`to_dict`/`from_dict`).
+Auch `object.__setattr__` auf dem, was ein Entscheider oder eine Faktenquelle bekommt, ändert
+nichts am Speicher. Dahinter prüft die Engine: hat sich der Datensatz während der Entscheidung
+trotzdem geändert (`to_dict()` vorher und nachher), wird nichts angewandt, der Datensatz wird
+aus seiner letzten Form wiederhergestellt und der Fall gezählt (`decision_tampered`).
 `Proposal` trägt `Decision`, `Risk`, Playbook, Voraussetzungen, geplante Änderungen,
 erwartete Wirkung, `executable`, die Katalogaktion (`action_type`) und eine Erklärung als
 reines JSON. Der Entscheider muss rein sein (kein I/O, kein Router, keine Änderung am
@@ -248,10 +263,22 @@ Eine Ausnahme der Richtlinie zählt `decider_failed`, und `ObserveOnlyDecider` g
 Ein Ablauf: Wurzelvorfall → Datensatz DETECTED → ANALYZED (Ursache von Network
 Intelligence) → `context_for` (Speicher auf der Sicherheitsuhr, Core, Network Intelligence)
 → `PolicyDecider.propose` → Faktenquelle → `DecisionInput` → `gate` → Entscheidung des
-Gates → `Proposal` → Prüfung der Engine (Typ, Klammer unten) → PROPOSED. Ohne Faktenquelle
-bewertet die Richtlinie die Aktion des Datensatzes selbst, `observe.evaluate` (Risiko 0,
-kein Router-Aufruf; die Buchungsparameter `incident`/`first_seen` werden zu `{}`, nur wenn sie
-genau die des Datensatzes sind): **Recommended**, nur lesend.
+Gates → `Proposal` → Prüfung der Engine (Typ, Klammer unten, unverändert) → PROPOSED. Der
+Datensatz trägt **nur die Entscheidung über seine eigene Aktion**, `observe.evaluate` (Risiko
+0, kein Router-Aufruf; die Buchungsparameter `incident`/`first_seen` werden zu `{}`, nur wenn
+sie genau die des Datensatzes sind): **Recommended**, nur lesend, keine geplante Änderung.
+
+**Kandidat einer Faktenquelle** (Review PR #81, P2b, Entscheidung des Koordinators): nennt eine
+Quelle eine Kandidatenaktion (etwa `service.restart`), wird sie ebenfalls über das Gate
+entschieden, erscheint aber **nur** in der Erklärung von `plans`, unter `candidate` mit
+`label: "candidate"` und `note: "not_the_record_decision"` (Aktion, Parameter, Playbook,
+Ergebnis, Entscheidung, Gate, Fakten, geplante Änderungen, deutsche Texte). Ergebnis, Risiko,
+Playbook und geplante Änderungen des Datensatzes kommen nie vom Kandidaten; am Modell ändert
+sich nichts. Scheitert die Bewertung des Kandidaten, steht dort `error: candidate_failed`
+(gezählt), der Datensatz bleibt unberührt. **Pflicht für ein späteres Paket:** soll ein
+Kandidat ausgeführt werden können, muss er ein eigener Datensatz werden (eigene Aktion,
+eigene Parameter, eigene Bauteile), damit die Bindung einer Freigabe die Aktion abdeckt, die
+wirklich laufen würde, und nicht den Observe-Datensatz.
 
 **Welche Fakten die Engine füllt** (nur, was sie im Speicher hat; ihr Wert gilt immer, auch
 `None`, nie der einer Faktenquelle): Rolle (`gateway`, `access_point`, `unknown`, sonst
@@ -262,16 +289,30 @@ die Schlüssel der Kandidatenaktion, Wurzel oder Kind, Vorfallart, Ursachenstufe
 -konfidenz, Zahl der Quellenfamilien. Modus, Hold, Flotten-Pause, Modulschalter und Allowlist
 gehen an das Gate, `guards_green` ist `None`. **Unbekannt bleiben** Erreichbarkeit, abhängige
 Router, Clients, Management-Weg, Funk-Uplink, Dienstfakten, Security-Erkennungen,
-gleichzeitige Reparatur, `diag_enabled`, Schwere, Frische, Befund am Ziel, Ursache außerhalb,
-zeitliche Nähe und Konfigurationsänderungen in 24 h. Ein geladener Router-Eintrag sagt nichts
-über die Erreichbarkeit und wird nicht als `reachable` gelesen.
+`diag_enabled`, Frische, Befund am Ziel, Ursache außerhalb, zeitliche Nähe und
+Konfigurationsänderungen in 24 h. Ein geladener Router-Eintrag sagt nichts über die
+Erreichbarkeit und wird nicht als `reachable` gelesen. Seit dem Review von PR #81 gehören der
+Engine auch:
+
+- **Schwere** aus dem Vorfall von Network Intelligence (`info`, `warning`, `critical`; jeder
+  andere Wert, ein fehlender oder ein anderer Vorfall mit derselben Kennung: unbekannt).
+- **Gleichzeitige Reparatur** aus dem Speicher: die Reparatursperre des Routers ist gehalten
+  (jeder Halter) oder ein anderer Datensatz des Routers steht in `EXECUTING`, `VERIFYING`,
+  `ROLLBACK_PENDING` oder `ROLLING_BACK`. Der Speicher ist in dieser Integration der einzige
+  Weg zu einer Reparatur, also beantwortet er die Frage wahrheitsgemäß; eine Faktenquelle kann
+  sie nicht setzen.
+- `diag_enabled` bleibt bei der Faktenquelle: der Schalter der Netzwerkdiagnose ist keine
+  Option des Router-Eintrags, sondern der Zustand des Moduls `NetDiagnostics`
+  (`hass.data`); ein späteres Paket kann ihn dort lesen.
 
 **Naht für E und F** (`HealFactsProvider`): ein Protocol mit `facts(context) -> HealFacts`.
 `HealFacts` (eingefroren, geprüft) nennt eine Kandidatenaktion mit Parametern (Standard: die
 des Datensatzes), einen `RiskContext`, `IncidentFacts`, `config_change_24h` und das Playbook.
-Standard ist `UnknownFactsProvider` (alles unbekannt). Die Quelle bekommt eine Kopie des
-Kontexts; eine Ausnahme (`facts_failed`), ein anderer Typ oder ein nachträglich veränderter
-Wert (`facts_invalid`, `HealFacts` wird mit `replace` neu geprüft) heißt „nichts bekannt“.
+Standard ist `UnknownFactsProvider` (alles unbekannt). Die Quelle bekommt ihre **eigene tiefe
+Kopie** des Kontexts (was sie daran ändert, erreicht weder den Speicher noch den Kontext, den
+die Richtlinie liest); eine Ausnahme (`facts_failed`), ein anderer Typ oder ein nachträglich
+veränderter Wert (`facts_invalid`, `HealFacts` wird mit `replace` neu geprüft) heißt „nichts
+bekannt“.
 Paket E (Vorabprüfungen) und F (Playbooks) setzen eine eigene Quelle ein:
 `HealEngine.decider = PolicyDecider(provider)`.
 
@@ -1363,7 +1404,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Automatischer Eingriff nur wegen zeitlicher Nähe | `temporal_only` muss ausdrücklich `False` sein, sonst Insufficient Evidence | **gebaut** in der Richtlinie (Abschnitt 9.3) |
 | Risiko 3 über einen allgemeinen Schalter oder eine Allowlist erlaubt | Risiko 3 nie erlaubt; Allowlist nur bis Risiko 1; der Gate prüft Katalog und Parameter selbst und trifft die Entscheidung selbst | **gebaut** in der Richtlinie (Abschnitt 10.1) |
 | Gefälschte oder veränderte Entscheidung (eigener Konstruktor, `dataclasses.replace`, andere Parameter als geprüft, nachträglich mit `object.__setattr__` geänderte Eingaben) | `gate()` nimmt nur den `DecisionInput`, prüft ihn mit `replace` neu und ruft `decide()` selbst; die Aktion kommt aus seiner eigenen Entscheidung; eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst, mit erneuter Prüfung der Parameter; Parameter werden einmal gelesen und eingefroren | **gebaut** (Review PR #77 und Paket X, Abschnitte 7 und 10.1) |
-| Faktenquelle (E/F) liefert falsche Typen oder lügt über Fakten der Engine | Typ genau `HealFacts`, erneute Prüfung, sonst „nichts bekannt“ (gezählt); Fakten der Engine gelten immer; Kopie des Kontexts; nichts geht über PROPOSED | **gebaut** (Paket X, Abschnitt 2.1) |
+| Faktenquelle (E/F) liefert falsche Typen oder lügt über Fakten der Engine | Typ genau `HealFacts`, erneute Prüfung, sonst „nichts bekannt“ (gezählt); Fakten der Engine gelten immer, auch unbekannt; tiefe Kopie des Kontexts, Prüfung des Datensatzes nach der Entscheidung (`decision_tampered`); ihr Kandidat nur in der Erklärung; nichts geht über PROPOSED | **gebaut** (Paket X und Review PR #81, Abschnitt 2.1) |
 | Gefälschte Meldungen treiben Zähler oder Rechenzeit | Meldung nur Auslöser; Wiederholung einer erfassten Öffnung nicht gezählt; wartende Vorfälle ohne neuen Datensatz je Takt, begrenzte Merkliste | **gebaut** (Paket X, Abschnitt 2.1) |
 | Unbekannter Kontext als harmlos gelesen | jedes unbekannte Feld zählt als HOCH und nicht bewertet; unbekannter Verlauf der Versuche sperrt ein Schreiben; Schalter des Gates (`held`, `fleet_paused`, `module_enabled`) müssen echte Wahrheitswerte sein | **gebaut** (Abschnitte 9 und 10.1) |
 | Versuchsgrenze am Fensterrand umgangen (zwei Versuche kurz vor und zwei kurz nach dem Ende eines festen Fensters) | gleitendes Fenster: höchstens N Versuche in jeder Spanne von 24 h; Abklingzeit nie verkürzt; offener Ausgang zählt nie als Erfolg | **gebaut** in Richtlinie und Speicher (Abschnitt 10.2) |
@@ -1580,6 +1621,24 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   alle hinter einem zweiten Schutz (z. B. Merkzettel und Vorprüfung des Slots in c, Reconcile
   und `_close_stale` in d, eine Klammer-Bedingung, die der heutige Katalog nie verletzt); für
   jede kam ein eigener Test dazu, danach ließ jede der 47 mindestens einen Test scheitern.
+- **Review PR #81** (`tests/test_heal_x_engine_v1530.py`, Abschnitt „Review of PR #81“):
+  Faktenquelle und Entscheider verändern nichts am Speicher (Zustand, Vorfallart, Abklingzeit,
+  Schutzschalter, auch in der gespeicherten Form); ein Datensatz, der sich während der
+  Entscheidung ändert, wird nicht angewandt und wiederhergestellt (`decision_tampered`);
+  unbrauchbare Wartungsantworten bleiben unbekannt; der Datensatz trägt nur seine eigene
+  Entscheidung, der Kandidat steht gekennzeichnet in der Erklärung; andere Art, anderer
+  Router oder ein um 1 s bis 3600 s späteres `first_seen` sind ein anderer Vorfall; Unbekanntes
+  der Engine schlägt die Faktenquelle; Schwere aus Network Intelligence, gleichzeitige
+  Reparatur aus dem Speicher; eine Wiedereröffnung bekommt ihren eigenen Datensatz; das Gate
+  bekommt den Modulschalter und `guards_green=None`; unbekannte Kennungen zählen je Kennung
+  einmal; Grenzen der Erklärung (Tiefe 6, 64 Einträge, 256 Zeichen) und der Merklisten (1000,
+  Warteliste 200) als feste Zahlen. Die Proben des Reviewers sind darin als Tests aufgegangen.
+- **Mutationsprüfung Review PR #81:** 82 Mutationen auf grünem Stand (die 61 des Reviewers,
+  an geänderten Stellen sinngleich übertragen, E24 durch E24b ersetzt, und 21 neue). Alle vom
+  Review geforderten (E02–E04, E06–E08, E18, E23, E30, E31, E34, E39, E40) scheitern. Von 6
+  Überlebenden bekamen 4 einen Test (E35, E41, N19, N21). Zwei bleiben gleichwertig: E36, weil
+  der Vorab-Check des Slots früher zurückkehrt, und P05, weil die Katalogprüfung danach
+  dieselbe Begründung liefert.
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 
