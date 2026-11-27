@@ -4,6 +4,88 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+## [1.52.2] - 2026-11-27
+
+Network Time Machine, Tab „Zeitreise“: drei Anzeigefehler in „Vergleich“ und „Zustand“
+behoben (alle drei gab es schon in 1.52.0). Grundsatz unverändert: „wahr oder unbekannt“. Das
+Backend ändert nur additiv (zwei neue Felder, kein Feld entfällt, keine Bedeutung ändert sich);
+kein zusätzlicher Router-Aufruf, keine neue Entität, keine geänderte unique_id, Speicher
+unverändert (Version 1.2). Entwicklerdoku: `docs/time-machine.md`, Abschnitte 20.2, 21, 24,
+25.2 und 25.3.
+
+### Behoben
+
+- **„Vergleich“ zeigt bekannte Werte nicht mehr als „unbekannt“.** War eine Seite eines
+  Merkmals unbekannt, stand bisher auch die bekannte Seite als „unbekannt“ da: Ein bekannter
+  Uplink „kein vorgeschalteter Router“ wurde zu „unbekannt“, und war der Funk zu einem der
+  Zeitpunkte unbekannt, stand eine Zeile „Funk: unbekannt | unbekannt“. Dazu trugen beide
+  Zellen denselben Grund, oft den der anderen Seite oder keinen. Gefunden nach dem Update von
+  1.51.0: „Von“ in der Zeit von 1.51.0 (noch kein Router verfolgt), „Bis“ jetzt; „Zustand“
+  zeigte für denselben Zeitpunkt die Werte, die Spalte „Nachher“ nicht. Jetzt ist jede Zelle
+  der Wert ihrer Seite, in denselben Worten wie „Zustand“ (der Block `after` von `/compare`
+  ist dieselbe Antwort wie `/state`), und jede unbekannte Zelle nennt den Grund ihrer eigenen
+  Seite. Funk: eine Zeile je Funk der bekannten Seite (die andere Seite „unbekannt“ mit
+  Grund); unveränderte Funks stehen hinter „Unverändertes zeigen“. Eine Zeile mit einer
+  unbekannten Seite zählt nie als Änderung, und die Zahl in „Keine bekannte Änderung; n
+  Merkmale sind zu einem der Zeitpunkte unbekannt.“ ist genau die Zahl dieser Zeilen (ein Funk
+  ist ein Merkmal; in dem Fall oben also mehr als vorher, wo ein ganzer Funk-Block eine Zeile
+  war).
+- **Ein geleertes Feld zeigt nicht mehr das alte Ergebnis.** Wurde „Von“, „Bis“ oder der
+  Zeitpunkt von „Zustand“ nach einer Antwort geleert, blieb das alte Ergebnis stehen, als
+  gehöre es zu den Feldern. Jetzt steht sofort der Hinweis („„Von“ und „Bis“ wählen.“ bzw.
+  „Einen Zeitpunkt wählen.“), nach der Eingabepause wird das Ergebnis gelöscht, und eine
+  Antwort, die noch unterwegs war, wird verworfen. Eine Uhrzeit, die es wegen der
+  Zeitumstellung nicht gibt, zeigt weiter ihren Fehler am Feld; auch dort verschwindet das
+  alte Ergebnis. Laden beim Öffnen, 400 ms Pause beim Tippen und Laden einer verborgenen Seite
+  beim Sichtbarwerden bleiben wie in 1.52.1.
+- **Ein deaktivierter Router heißt „deaktiviert“.** Ein Router, dessen Integrationseintrag in
+  Home Assistant deaktiviert ist, erschien in „Zustand“ mit vier Zeilen „unbekannt · noch kein
+  Wert beobachtet“ und in „Vergleich“ immer als „Router mit Unterschied“. Jetzt: In „Zustand“
+  eine Zeile „deaktiviert · in Home Assistant ausgeschaltet, zu diesem Zeitpunkt nichts
+  bekannt“. In „Vergleich“ steht ein deaktivierter Router, von dem zu beiden Zeitpunkten nichts
+  bekannt ist, nicht unter den Unterschieden und zählt nicht in „n Merkmale … unbekannt“;
+  darunter steht „1 Router ist deaktiviert und nicht aufgeführt; zu beiden Zeitpunkten ist von
+  ihm nichts bekannt.“ War er zu einem der Zeitpunkte noch eingeschaltet, steht sein Verlauf wie
+  sonst da, mit dem Abzeichen „derzeit deaktiviert“.
+- **Doku:** `docs/time-machine.md` (Abschnitte 20.3 und 24) sagte, die Zeit vor Speicher 1.2
+  sei `not_recorded`. Tatsächlich ist die Zeit, die 1.51.0 aufzeichnete, global bekannt, und
+  jeder Router ist dort `not_observed` (außer was eine aufgezeichnete Marke ergibt, etwa ein
+  laufender Ausfall); so prüft es `test_a_real_1510_file_loads_unchanged_and_saves_as_12`.
+
+### Geändert
+
+- `/state` und die Blöcke `before`/`after` von `/compare`: je Router das neue Feld `entry`
+  (`"enabled"`, `"disabled"` oder null ohne Integrationseintrag), der Stand des Eintrags beim
+  Abfragen (gelesen aus `disabled_by`), nicht der zum Zeitpunkt.
+- `/compare`, `changes.routers[]`: `reachable`, `role` und `uplink` tragen zusätzlich
+  `from_reason` und `to_reason` (Grund je Seite, null für eine bekannte Seite).
+- Beide Felder sind additiv: Ein Panel von 1.52.1 zeigt die neue Antwort wie bisher (mit den
+  alten Fehlern), und das neue Panel zeigt eine Antwort ohne die Felder wie 1.52.1 (ohne
+  „deaktiviert“). `_PANEL_VERSION` `20261127-timemachine11`.
+
+### Tests
+
+- Python: `tests/test_tm_compare_display_v1522.py` (Update von einer echten 1.51.0-Datei,
+  Polls, mit und ohne HA-Neustart: der Block `after` von `/compare` ist `/state` zum selben
+  Zeitpunkt, alle Router und Werte; ein deaktivierter Eintrag unter dreien; ein später
+  deaktivierter Router behält seinen Verlauf; schreibt `tmFixtureCompare.json`),
+  `tests/test_tm_panel_texts_v1520.py` (Text je `entry`), `tmFixtureState.json` neu erzeugt
+  (nur die zwei additiven Felder kamen hinzu).
+- Panel: `tmState.test.mjs` und `tmRender.test.mjs` (vorher unbekannt / nachher bekannt und
+  umgekehrt, Grund nur in der unbekannten Zelle, Zusammenfassung zählt die Zeilen der
+  Tabellen; `clear` beider Reducer und eine späte Antwort danach; geleertes „Von“ und „Bis“
+  nach einer Antwort; deaktivierter Router in „Zustand“ und „Vergleich“, Antwort ohne das
+  Feld). Der Test von 1.52.1, der festhielt, dass ein geleertes Feld das alte Ergebnis behält,
+  prüft jetzt das Gegenteil.
+
+### Bekannte Grenzen
+
+- `entry` ist der Stand beim Abfragen: Ein Router, der heute deaktiviert ist, trägt in jedem
+  vergangenen Zeitpunkt „derzeit deaktiviert“; wann er deaktiviert wurde, weiß die Time Machine
+  nicht (der Verlauf endet dort als „noch kein Wert beobachtet“).
+- Ein Router, dessen Eintrag gelöscht wurde, hat `entry: null` und erscheint wie bisher.
+- Nicht in einer echten HA-Instanz geprüft (siehe PR).
+
 ## [1.52.1] - 2026-11-26
 
 Network Time Machine: zwei Lücken nach einem **Rücksprung der Uhr** geschlossen, dazu
