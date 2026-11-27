@@ -132,6 +132,49 @@ Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/
   - `release_hold()` ändert nur etwas, wenn wirklich ein Hold aufgehoben wurde.
 - `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
 
+### Self-Healing, Paket D (Katalog und Richtlinie, noch nicht verdrahtet)
+
+Zweiter Baustein von Phase 7: der geschlossene Katalog der Aktionen und die Richtlinie, die
+über jede Aktion entscheidet. Beides ist reine Logik ohne HA-Import, ohne Router-Aufruf und
+ohne Ausführungsweg; nichts ruft sie bisher auf. Für Benutzer ändert sich nichts: keine Route,
+keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwicklerdoku:
+`docs/self-healing.md`, Abschnitte 7, 9 und 10.
+
+- `heal_catalog.py`: acht Aktionen als unveränderliche Daten, je mit Parametern aus einer
+  geschlossenen Menge, Router-Aufruf (nur als Name), nötigen Rechten, Grundrisiko, Fakten,
+  Prüfungen danach und einer ehrlichen Rollback-Aussage. Bereit sind nur `observe.evaluate`,
+  `diag.refresh`, `diag.ha_probes` (lesend) und `service.restart` für dnsmasq und odhcpd
+  (Risiko 2, nur mit Freigabe, für das erste Schreib-Release vorgesehen). Funk-Neustart,
+  Router-Neustart, Wiederherstellen und Schnittstelle ab/an sind modelliert und gesperrt.
+  Aktionen an Clients, Firewall, VLAN, Management-Adresse, Routing, Firmware, `network reload`
+  und ein Neustart von `wpad` kommen nie in den Katalog. Ausführbar in diesem Stand ist nur
+  `observe.evaluate`, das keinen Router aufruft.
+- `heal_policy.py`:
+  - Risiko nach Kontext: Rolle, Identität, Security-Erkennung, Wartung, absichtlich
+    abgeschalteter Dienst, Management-Weg, Funk-Uplink, Uplink anderer Router, Clients. Regeln
+    heben nur an; ein unbekannter Fakt zählt als hohes Risiko.
+  - Konfidenzwert 0–100 aus einer festen Regeltabelle (Ursache, Bestätigung, Konfidenz,
+    Quellenfamilien, Zielzustand, frühere Versuche, Konfigurationsänderung, Schwere),
+    Schwelle 60.
+  - Genau eines der fünf Ergebnisse (Nicht unterstützt, Nicht sicher, Zu wenig Hinweise,
+    Freigabe nötig, Empfohlen) mit jeder Regel, die gegriffen hat, und deutschem Text.
+    Zeitliche Nähe allein führt nie zu einer schreibenden Aktion.
+  - Modi und Prüfung vor dem Ausführen: Observe empfiehlt nur. Freigabe ab Risiko 1.
+    Auto-Heal nur für Einträge der Allowlist bis Risiko 1, außerhalb der Wartung und mit grünen
+    Vorabprüfungen. Risiko 3 erlaubt kein Modus und kein Schalter. Ein gesperrter Router und
+    eine pausierte Flotte gelten ab Risiko 1 als Observe.
+  - Prüfung einer Allowlist, bevor ein Administrator sie speichert.
+  - Schleifenschutz als Entscheidung: Wartezeiten 30 min, dann 60 min, höchstens 24 h. Der
+    Schutzschalter öffnet sofort nach jedem nicht gelösten, unbekannten, eskalierten oder
+    zurückgerollten Versuch; nach einer sauberen Ablehnung erst ab 1 automatischen bzw.
+    2 manuellen. Schließen kann ihn nur ein Administrator. Flotten-Pause 24 h ab 3
+    Fehlschlägen in 24 h. Alle Zeiten laufen auf der Sicherheitsuhr.
+- Paket B bleibt unverändert; ein Test hält fest, dass Richtlinie und Speicher Versuche gleich
+  zählen und die Richtlinie nie mehr erlaubt als der Speicher.
+- Tests: `tests/test_heal_catalog_v1530.py` (86) und `tests/test_heal_policy_v1530.py` (140).
+  Bei der Mutationsprüfung ließ jede der 32 gezielten Lockerungen mindestens einen Test
+  scheitern.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
