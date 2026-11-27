@@ -60,6 +60,78 @@ keine geänderte unique_id, Dateiformat unverändert.
   wartet wieder eine Verzögerung, jeder Schnitt gezählt, nicht atomar: je ein Test scheitert;
   geladene Datei behalten: drei Tests scheitern.
 
+### Self-Healing, Paket B (Grundlage, noch nicht verdrahtet)
+
+Erster Baustein von Phase 7 „Self-Healing“: Datenmodell mit Zustandsmaschine und Speicher. Für
+Benutzer ändert sich nichts: Nichts davon wird geladen, es gibt keinen Router-Aufruf, keine
+Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/self-healing.md`.
+
+- `heal_model.py`: ein Datensatz je Reparaturversuch mit 17 Zuständen und **einer**
+  Übergangstabelle (31 Übergänge, je Übergang die erlaubten Akteure Engine, Administrator,
+  Wiederherstellung). Ein Übergang hält Zeitpunkt, Akteur und Grund im Verlauf fest; ein
+  unerlaubter wirft einen typisierten Fehler und ändert nichts. Kein Weg führt zweimal in die
+  Ausführung. Neustartregel: Eine unterbrochene Ausführung heißt „unbekannt, muss geprüft
+  werden“ und wird nie wiederholt; Freigaben verfallen. Schleifenschutz, Router-Sperre,
+  Schreibzugriffe von außerhalb der Engine, Einstellungen (Standard: an, jeder Router im
+  Modus Observe, Auto-Heal aus, Allowlist leer und höchstens Risiko 1) und Wartungsfenster
+  als geprüfte Daten.
+- `heal_store.py`: Store `openwrt_router.self_healing` (Version 1.1, private Datei, atomares
+  Schreiben). Schritte in die Ausführung werden **vor** dem Handeln geschrieben und
+  zurückgelesen, weil HAs Store einen Schreibfehler selbst abfängt. Eine verlorene, neuere
+  oder beschädigte Datei startet leer bzw. ohne den kaputten Teil, bleibt als `.bak` liegen
+  und pausiert Auto-Heal 24 h für die ganze Flotte. Grenzen: 500 Datensätze, 20 offene je
+  Router, 90 Tage für abgeschlossene, 1 MB Datei; verdrängt werden nur abgeschlossene
+  Datensätze, nie eine laufende Aktion.
+- Nach dem unabhängigen Review von PR #75:
+  - Schreiben vor dem Handeln: Schließen und Flush warten auf den laufenden Schritt, und jedes
+    Schreiben währenddessen enthält schon den neuen Zustand.
+  - Die Felder der Doppelt-Prüfung (Aktion, Parameter, Vorfall, Bauteile, Idempotenz) sind
+    nach dem Anlegen eingefroren. Weitere Felder ändern sich nur mit ihrem Übergang;
+    „unterbrochen“ setzt nur die Neustartregel.
+  - Doppelte: eine offene Aktion je Wurzelvorfall und je Router und Bauteil.
+  - Eine Idempotenz-Kennung ohne Datensatz wird abgelehnt.
+  - Jede Router-Sperre hat einen eigenen Halter mit eigener Kennung.
+  - Ein unbekannter oder eskalierter Ausgang, ein unlesbarer Datensatz oder ein verlorener
+    Speicher setzt den Router bzw. die Flotte in Observe (Hold), bis ein Administrator oder
+    die Zeit es aufhebt.
+  - Wartezeiten laufen auf einer Sicherheitsuhr: während HA läuft, verkürzt eine springende
+    Wanduhr sie nie; ein Start von HA kann sie um höchstens 900 s je Start verkürzen
+    (Stand nach dem dritten Review, siehe unten).
+  - Beim Ausführen gelten Abklingzeit, Versuche in 24 h und offene Schutzschalter.
+  - Abgeschlossene Datensätze fallen nur, wenn das die Datei wirklich unter die Grenze bringt.
+- Nach dem zweiten Review von PR #75:
+  - Sicherheitsuhr: Während HA läuft, zählt nur die monotone Uhr; keine Änderung der Wanduhr
+    (vor, zurück, hin und her) verkürzt dann eine Wartezeit. Nach einem Start zählt die Wanduhr
+    nur, soweit sie über der höchsten je gesehenen Wanduhrzeit liegt (in der Datei), und
+    höchstens 900 s. Verkürzen kann eine Wartezeit damit nur ein Start mit einer Wanduhr über
+    dieser Marke, um höchstens 900 s je Start. Vorher lief die Uhr bei einer hin und her
+    springenden Wanduhr vielfach schneller als die echte Zeit (30 min Abklingzeit nach rund
+    16 s vorbei).
+  - Holds nach unbekanntem oder eskaliertem Ausgang setzt jedes Laden aus den Datensätzen neu,
+    ohne Ende; ein kaputter Schleifenschutz-Abschnitt macht daraus keinen 24-h-Hold mehr. Hebt
+    ein Administrator den Hold auf, wird das am Datensatz vermerkt, und der Hold kommt nicht
+    wieder.
+  - Ein kaputter Datensatz, dessen Zustand oder Verlauf noch eine Ausführung zeigt, sperrt
+    seinen Router (unlesbare Router-Kennung: die Flotte) bis ein Administrator ihn freigibt.
+  - Abgeschlossene Datensätze werden 90 Tage ab der Sicherheitszeit ihres Endes aufbewahrt,
+    nicht mehr nach ihren Wanduhr-Zeiten; ein erster Start mit falsch vorgehender Wanduhr
+    löscht keinen Verlauf mehr. Wartungsfenster fallen erst, wenn Wanduhr und Sicherheitsuhr
+    90 Tage über ihrem Ende sind.
+  - Der Speicher nimmt nur Datensätze an, wie `RemediationAction.new()` sie anlegt.
+- Nach dem dritten Review von PR #75:
+  - Sicherheitsuhr: Die Höchstmarke rückt während des Laufs um die gezählte Zeit mit. Echte
+    Zeit zählt damit nie doppelt – vorher zählte die Laufzeit nach einem Zurückstellen der
+    Wanduhr beim nächsten Start noch einmal (eine Abklingzeit von 30 min war nach rund 15 min
+    vorbei). Garantie: während HA läuft, verkürzt keine Änderung der Wanduhr eine Wartezeit; ein
+    Start von HA kann sie um höchstens 900 s je Start verkürzen (so viel zählt auch echte
+    Ausfallzeit).
+  - Der Datensatz hinter einem geltenden Hold wird nie verdrängt und nie nach 90 Tagen entfernt,
+    damit der Hold nach einem kaputten Schleifenschutz-Abschnitt wieder entsteht.
+  - Eine Sicherheitszeit nahe dem höchsten gültigen Wert führt beim Ausführen zur Ablehnung
+    `clock_invalid` statt zu einem Fehler; Holds und Pausen beim Laden enden dort.
+  - `release_hold()` ändert nur etwas, wenn wirklich ein Hold aufgehoben wurde.
+- `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
