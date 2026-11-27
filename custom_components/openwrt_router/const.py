@@ -938,13 +938,18 @@ DATA_WIFI_RF_VIEWS_BOUND = f"{DOMAIN}_wifi_rf_views_bound"
 WIFI_RF_STORE_KEY = f"{DOMAIN}.wifi_rf"
 WIFI_RF_STORE_VERSION = 1
 WIFI_RF_SAVE_DELAY_SECONDS = 300
-# Hard store limits: each series has its own quota, nothing is evicted.
+# Hard store limits: each series has its own quota; only the file limit
+# below evicts (the oldest buckets, 1.52.3).
 WIFI_RF_MAX_RADIOS = 32  # the fleet of 2026-11 has 13 radios
 WIFI_RF_MAX_HOURLY_BUCKETS = 8 * 24 + 2  # per radio and series (8 days)
 WIFI_RF_MAX_DAILY_BUCKETS = 31 + 1  # per radio and series
 # Raw points (memory only, for the 1 h window) per radio and series.
 WIFI_RF_MAX_RAW_POINTS = 240
-WIFI_RF_MAX_STORE_BYTES = 2_000_000
+# File limit (1.52.3: 8 MB, was 2 MB). The full history of 32 radios with all
+# seven series is about 7.2 MB; over the limit the oldest buckets are trimmed
+# to WIFI_RF_TRIM_HEADROOM below it (hourly first, then daily).
+WIFI_RF_MAX_STORE_BYTES = 8_000_000
+WIFI_RF_TRIM_HEADROOM = 0.05
 # Part 2 (wifi_rf_entities.py): a bounded entity set, pushed by SIGNAL_WIFI_RF.
 # Fleet: three sensors (no device). Per router with RF on and an existing
 # device: AP RF health, plus three sensors per radio for at most

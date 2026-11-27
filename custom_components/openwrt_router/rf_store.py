@@ -11,11 +11,28 @@ unload, a damaged file is kept as ``.bak``. What is kept:
 
 Limits are hard and separate per series: at most ``max_radios`` radios,
 ``max_hourly``/``max_daily`` buckets per radio and series, and a byte limit
-for the file. Nothing is evicted to make room; whatever does not fit is
-dropped and counted in :attr:`RfStore.drops` (shown in the status and the
+for the file. A new radio or bucket that does not fit its quota is dropped
+and counted in :attr:`RfStore.drops` (shown in the status and the
 diagnostics). Daily buckets follow Home Assistant's local time zone
 (DECIDED: a "day" is the user's calendar day); hourly buckets stay UTC
 (``rf_aggregate`` aligns them to epoch multiples).
+
+Writing (1.52.3; since 1.48.0 the history was written only at shutdown and
+could be reset there):
+
+* one delayed write at a time (``_save_pending``, pattern of
+  ``net_engine``/``client_engine``): HA's ``async_delay_save`` moves a
+  pending write back on every call, and every poll calls ``schedule_save``;
+* over the byte limit the oldest buckets are trimmed, fair by time across
+  all radios (hourly first, then daily; the newest bucket of every series
+  stays) to ``WIFI_RF_TRIM_HEADROOM`` below the limit, in memory too
+  (``trimmed``; pattern of ``tm_store``);
+* a payload that still does not fit keeps the last good one, and the file
+  as loaded counts as last good (pattern of ``traffic_store``); the history
+  is never written empty because of its size;
+* HA builds and serialises the payload in its executor
+  (``serialize_in_event_loop=False``): the loop only copies the bucket
+  dicts and applies the trim (8 MB of indented JSON took 25 to 35 ms).
 """
 
 from __future__ import annotations
@@ -25,6 +42,7 @@ import logging
 import math
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from typing import Any
 
@@ -42,6 +60,7 @@ from .const import (
     WIFI_RF_SAVE_DELAY_SECONDS,
     WIFI_RF_STORE_KEY,
     WIFI_RF_STORE_VERSION,
+    WIFI_RF_TRIM_HEADROOM,
 )
 from .rf_aggregate import (
     DAY_S,
@@ -81,10 +100,21 @@ _DROP_KEYS = (
     "save_over_size",
     "load_invalid",
     "load_failed",
+    # 1.52.3: buckets dropped to fit the file limit (1.52.2 ignores the key)
+    "trimmed",
 )
 _EPOCH_ORDINAL = date(1970, 1, 1).toordinal()
 _REF_SEP = "/"
 _BUCKET_FIELDS = 5
+_HOURLY = "h"
+_DAILY = "d"
+# Rounds per part: each one re-measures and drops by the new estimate.
+_TRIM_ROUNDS = 8
+
+type _Series = dict[str, dict[int, Agg]]
+# (store key, radio, hourly, daily): copies taken once per write
+type _Snapshot = list[tuple[str, RadioRef, _Series, _Series]]
+type _Cut = tuple[str, RadioRef, str, int]  # part, radio, series, bucket
 
 
 def ref_key(ref: RadioRef) -> str:
@@ -167,6 +197,89 @@ def _buckets_from_raw(raw: Any) -> dict[int, Agg] | None:
     return out
 
 
+def _series_out(series: _Series) -> dict[str, Any]:
+    return {
+        name: {str(ts): _agg_to_list(a) for ts, a in sorted(buckets.items())}
+        for name, buckets in sorted(series.items())
+    }
+
+
+def _build(snapshot: _Snapshot, drops: Mapping[str, int]) -> dict[str, Any]:
+    """The store payload of a snapshot (sorted by store key)."""
+    return {
+        "radios": {
+            key: {"h": _series_out(hourly), "d": _series_out(daily)}
+            for key, _ref, hourly, daily in snapshot
+        },
+        "drops": dict(drops),
+    }
+
+
+def _trim(
+    snapshot: _Snapshot, drops: dict[str, int], size: int, target: int
+) -> tuple[dict[str, Any] | None, int, list[_Cut]]:
+    """Drop the oldest buckets of the snapshot until it is at ``target``.
+
+    Hourly first, then daily; within a part strictly by bucket time across
+    every radio and series (never radio by radio), and the newest bucket of
+    each series always stays. Each round drops the excess divided by the
+    mean bytes per bucket of the whole file (the per-radio overhead makes
+    that a little high, so a round rather trims too little than too much)
+    and re-measures. Daily buckets go only once no hourly one is left to
+    drop. Works on the snapshot's own copies; ``drops["trimmed"]`` counts
+    the cuts. Returns the new payload (None: nothing dropped), its size and
+    the cuts.
+    """
+    payload: dict[str, Any] | None = None
+    cuts: list[_Cut] = []
+    for part in (_HOURLY, _DAILY):
+        for _round in range(_TRIM_ROUNDS):
+            if size <= target:
+                return payload, size, cuts
+            total = 0
+            candidates: list[tuple[int, str, str, RadioRef, dict[int, Agg]]] = []
+            for key, ref, hourly, daily in snapshot:
+                for series_part, series in ((_HOURLY, hourly), (_DAILY, daily)):
+                    for name, buckets in series.items():
+                        total += len(buckets)
+                        if series_part != part or len(buckets) < 2:
+                            continue
+                        newest = max(buckets)
+                        candidates.extend(
+                            (ts, key, name, ref, buckets)
+                            for ts in buckets
+                            if ts != newest
+                        )
+            if not candidates:
+                break
+            per = max(1.0, size / total)
+            drop = min(len(candidates), math.ceil((size - target) / per))
+            candidates.sort(key=lambda c: (c[0], c[1], c[2]))
+            for ts, _key, name, ref, buckets in candidates[:drop]:
+                del buckets[ts]
+                cuts.append((part, ref, name, ts))
+            drops["trimmed"] = drops.get("trimmed", 0) + drop
+            payload = _build(snapshot, drops)
+            size = store_size(payload)
+        else:
+            # rounds used up with hourly buckets left: no daily bucket goes
+            # (the payload may sit between the target and the limit)
+            return payload, size, cuts
+    return payload, size, cuts
+
+
+@dataclass(slots=True)
+class _Prepared:
+    """What one write produced (built off the loop, applied in it)."""
+
+    payload: dict[str, Any]
+    size: int
+    generation: int
+    cuts: list[_Cut] = field(default_factory=list)
+    fresh: bool = True  # False: the last good payload is written again
+    over: bool = False  # still over the limit after trimming
+
+
 class _RadioHistory:
     """Buckets of one radio: series -> {bucket start -> Agg}."""
 
@@ -192,8 +305,14 @@ class RfStore:
     ) -> None:
         """Empty history; :meth:`async_load` reads the file."""
         self.hass = hass
+        # serialize_in_event_loop=False: HA calls _data_to_save and writes
+        # the JSON in its executor (up to 8 MB; see the module docstring).
         self._store: Store[dict[str, Any]] = Store(
-            hass, WIFI_RF_STORE_VERSION, WIFI_RF_STORE_KEY, private=True
+            hass,
+            WIFI_RF_STORE_VERSION,
+            WIFI_RF_STORE_KEY,
+            private=True,
+            serialize_in_event_loop=False,
         )
         self.max_radios = max_radios
         self.max_hourly = max_hourly
@@ -206,7 +325,16 @@ class RfStore:
         self.loaded = False
         self.dirty = False
         self.last_save_bytes: int | None = None
+        # The last payload that fit (or the file as loaded): written again
+        # when a new one cannot be trimmed under the limit.
         self._last_payload: dict[str, Any] | None = None
+        # True while a delayed write is armed: HA's async_delay_save moves a
+        # pending write back on every call, so it is called once (1.52.3).
+        self._save_pending = False
+        # Counts changes: a write clears ``dirty`` only if nothing changed
+        # since its snapshot.
+        self._generation = 0
+        self._trim_warned = False
         self._lock = asyncio.Lock()
 
     # -- load / save -------------------------------------------------------------
@@ -242,6 +370,9 @@ class RfStore:
     def _apply(self, raw: Any) -> None:
         if not isinstance(raw, dict):
             return
+        # The file as read counts as the last good payload: a first write
+        # over the limit keeps it instead of an empty history (1.52.3).
+        self._last_payload = dict(raw)
         drops = raw.get("drops")
         if isinstance(drops, dict):
             for key in _DROP_KEYS:
@@ -277,44 +408,127 @@ class RfStore:
                 target[name] = buckets
         return history
 
+    def _snapshot(self) -> _Snapshot:
+        """Copies of every bucket dict, sorted by store key.
+
+        Safe from HA's executor thread: each ``list(...)``/``dict(...)`` copy
+        is one C call under the GIL and an :class:`Agg` is immutable, so a
+        copy is never torn by a poll; the series of one radio may be one poll
+        apart, which the next write evens out.
+        """
+        out: _Snapshot = []
+        for ref, history in list(self.radios.items()):
+            out.append(
+                (
+                    ref_key(ref),
+                    ref,
+                    {n: dict(b) for n, b in list(history.hourly.items())},
+                    {n: dict(b) for n, b in list(history.daily.items())},
+                )
+            )
+        out.sort(key=lambda item: item[0])
+        return out
+
     def _payload(self) -> dict[str, Any]:
-        radios: dict[str, Any] = {}
-        for ref, history in sorted(self.radios.items(), key=lambda kv: ref_key(kv[0])):
-            radios[ref_key(ref)] = {
-                "h": {
-                    name: {str(ts): _agg_to_list(a) for ts, a in sorted(b.items())}
-                    for name, b in sorted(history.hourly.items())
-                },
-                "d": {
-                    name: {str(ts): _agg_to_list(a) for ts, a in sorted(b.items())}
-                    for name, b in sorted(history.daily.items())
-                },
-            }
-        return {"radios": radios, "drops": dict(self.drops)}
+        return _build(self._snapshot(), self.drops)
+
+    def _prepare(
+        self, snapshot: _Snapshot, drops: dict[str, int], generation: int
+    ) -> _Prepared:
+        """Payload of a snapshot, trimmed to the limit (no state change)."""
+        payload = _build(snapshot, drops)
+        size = store_size(payload)
+        cuts: list[_Cut] = []
+        if size > self.max_bytes:
+            target = int(self.max_bytes * (1 - WIFI_RF_TRIM_HEADROOM))
+            trimmed, size, cuts = _trim(snapshot, drops, size, target)
+            payload = trimmed or payload
+        if size <= self.max_bytes:
+            return _Prepared(payload, size, generation, cuts)
+        if self._last_payload is not None:
+            return _Prepared(
+                self._last_payload, size, generation, fresh=False, over=True
+            )
+        # Nothing on disk to keep: write the history rather than an empty one.
+        drops["save_over_size"] = drops.get("save_over_size", 0) + 1
+        payload = _build(snapshot, drops)
+        return _Prepared(payload, store_size(payload), generation, cuts, over=True)
 
     def _data_to_save(self) -> dict[str, Any]:
-        """The payload; one over the byte limit keeps the last good one."""
-        payload = self._payload()
-        size = store_size(payload)
-        if size > self.max_bytes:
+        """The payload, trimmed to the limit; never empty because of size.
+
+        HA calls it in its executor (``serialize_in_event_loop=False``),
+        :meth:`async_flush` too; the trim and the counters are applied in the
+        event loop afterwards (directly when called from the loop).
+        """
+        self._save_pending = False
+        generation = self._generation
+        prepared = self._prepare(self._snapshot(), dict(self.drops), generation)
+        self._in_loop(self._saved, prepared)
+        return prepared.payload
+
+    def _in_loop(self, func: Callable[[_Prepared], None], prepared: _Prepared) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:  # HA's executor thread
+            try:
+                self.hass.loop.call_soon_threadsafe(func, prepared)
+            except RuntimeError:  # loop closed (after the final write)
+                _LOGGER.debug("WiFi RF history: loop closed after the write")
+            return
+        func(prepared)
+
+    def _saved(self, prepared: _Prepared) -> None:
+        """Apply a write's result in the loop: trim memory as the file was."""
+        if prepared.cuts:
+            for part, ref, name, ts in prepared.cuts:
+                history = self.radios.get(ref)
+                if history is None:
+                    continue
+                series = history.hourly if part == _HOURLY else history.daily
+                buckets = series.get(name)
+                if buckets is not None:
+                    buckets.pop(ts, None)
+            self.drops["trimmed"] += len(prepared.cuts)
+            _LOGGER.log(
+                logging.DEBUG if self._trim_warned else logging.WARNING,
+                "WiFi RF history over %d bytes; the oldest %d buckets were dropped "
+                "(hourly first); later trims are logged at debug level",
+                self.max_bytes,
+                len(prepared.cuts),
+            )
+            self._trim_warned = True
+        if prepared.over:
             self.drops["save_over_size"] += 1
             _LOGGER.warning(
-                "WiFi RF history over %d bytes; new data not written", self.max_bytes
+                "WiFi RF history still over %d bytes after trimming; %s",
+                self.max_bytes,
+                "the last good file is kept"
+                if not prepared.fresh
+                else "written over the limit",
             )
-            return self._last_payload or {"radios": {}, "drops": dict(self.drops)}
-        self.last_save_bytes = size
-        self._last_payload = payload
-        self.dirty = False
-        return payload
+        if prepared.fresh:
+            self.last_save_bytes = prepared.size
+            self._last_payload = prepared.payload
+            if self._generation == prepared.generation:
+                self.dirty = False
+
+    def _changed(self) -> None:
+        self.dirty = True
+        self._generation += 1
 
     def schedule_save(self) -> None:
-        """Write later (one write per delay at most)."""
-        self.dirty = True
+        """Arm one delayed write (none while one is pending)."""
+        self._changed()
+        if self._save_pending:
+            return
+        self._save_pending = True
         self._store.async_delay_save(self._data_to_save, WIFI_RF_SAVE_DELAY_SECONDS)
 
     async def async_flush(self) -> None:
-        """Write now (last unload)."""
-        await self._store.async_save(self._data_to_save())
+        """Write now (last unload); the payload is built in the executor."""
+        payload = await self.hass.async_add_executor_job(self._data_to_save)
+        await self._store.async_save(payload)
 
     # -- record ------------------------------------------------------------------
 
@@ -344,7 +558,7 @@ class RfStore:
             )
             self._add_daily(history, name, day, value)
             self._add_raw(history, name, ts, value)
-        self.dirty = True
+        self._changed()
 
     def _add(
         self,
@@ -437,6 +651,19 @@ class RfStore:
         gone = [ref for ref in self.radios if ref.router_id == router_id]
         for ref in gone:
             del self.radios[ref]
+        # the kept last good payload must not bring the router back (1.52.3)
+        last = self._last_payload
+        radios = last.get("radios") if last is not None else None
+        if isinstance(radios, dict):
+            prefix = f"{router_id}{_REF_SEP}"
+            self._last_payload = {
+                **last,
+                "radios": {
+                    k: v
+                    for k, v in radios.items()
+                    if not (isinstance(k, str) and k.startswith(prefix))
+                },
+            }
         if gone:
             self.schedule_save()
         return bool(gone)
