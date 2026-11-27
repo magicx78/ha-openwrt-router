@@ -1924,9 +1924,11 @@ def match(incident: IncidentInput, evidence: Evidence) -> Match:
        seen before the incident started, on a router Playbook F fits:
        Playbook F instead (the drift overlay) - unless the original playbook
        sees an outside signal (:func:`outside_signals`): then it keeps the
-       case and the change is a hint (reason ``drift_hint_outside_signal``;
-       :func:`assess` returns exactly this match). A proven change with an
-       unknown or later time is a hint only.
+       case and the change is a hint (reason ``drift_hint_outside_measured``
+       when the original playbook measures the cause outside, else
+       ``drift_hint_outside_signal``; :func:`assess` returns exactly this
+       match and puts the same reason in the finding). A proven change with
+       an unknown or later time is a hint only.
     """
     if type(incident) is not IncidentInput or type(evidence) is not Evidence:
         raise PlaybookError("invalid input")
@@ -1965,11 +1967,16 @@ def match(incident: IncidentInput, evidence: Evidence) -> Match:
     ):
         if outside_signal(found, inc, evidence):
             # the original playbook sees a sign of an outside cause: it keeps
-            # the case, the change is a hint (the same rule in assess)
+            # the case, the change is a hint; the reason says whether it
+            # measured the cause outside (assess repeats this reason)
             return Match(
                 status=MatchStatus.MATCHED,
                 playbook_id=found,
-                reason="drift_hint_outside_signal",
+                reason=(
+                    "drift_hint_outside_measured"
+                    if _measured_outside(found, inc, evidence)
+                    else "drift_hint_outside_signal"
+                ),
                 drift_hint=True,
             )
         return Match(
@@ -2461,14 +2468,14 @@ def outside_signals(
     (:data:`SHARED_OUTSIDE_SIGNALS`, minus :data:`SIGNAL_EXCEPTIONS`) plus
     the playbook's own (:data:`SPECIFIC_OUTSIDE_SIGNALS`, and a cause from
     :data:`OUTSIDE_CAUSES`); F uses those of the playbook of the incident's
-    type.
+    type, its exceptions included.
     """
     pid = playbook_id
     if pid == "drift_recovery":
         orig = _type_playbook(inc)
         if orig is not None and orig != pid:
             pid = orig
-    shared = _shared_signals(ev) - SIGNAL_EXCEPTIONS[playbook_id]
+    shared = _shared_signals(ev) - SIGNAL_EXCEPTIONS[pid]
     return shared | _specific_signals(pid, inc, ev)
 
 
@@ -3335,6 +3342,16 @@ _ANALYZERS: Final = MappingProxyType(
     }
 )
 
+_HAND_BACK_REASONS: Final = frozenset(
+    {"drift_hint_outside_measured", "drift_hint_outside_signal"}
+)
+
+
+def _measured_outside(playbook_id: str, inc: IncidentInput, ev: Evidence) -> bool:
+    """Whether the playbook's own analysis puts the cause outside (True)."""
+    probe = _ANALYZERS[playbook_id](_Run(pb=PLAYBOOKS[playbook_id], inc=inc, ev=ev))
+    return probe.incident_facts.cause_outside_router is True
+
 
 def _unsupported(run: _Run, m: Match) -> PlaybookFinding:
     run.why(m.reason)
@@ -3366,18 +3383,12 @@ def assess(incident: IncidentInput, evidence: Evidence) -> Assessment:
     run = _Run(pb=PLAYBOOKS[m.playbook_id], inc=incident, ev=evidence)
     if m.status is MatchStatus.UNSUPPORTED:
         return Assessment(match=m, finding=_unsupported(run, m))
-    if m.reason == "drift_hint_outside_signal":
+    if m.reason in _HAND_BACK_REASONS:
         # match() handed the case back: the original playbook saw a sign of an
         # outside cause, the drift is only a hint and the original finding,
-        # with its value, stays (decided by the master on PR #79). The reason
-        # says whether the playbook measured the cause outside or only saw a
-        # signal.
-        probe = _ANALYZERS[m.playbook_id](_Run(pb=run.pb, inc=incident, ev=evidence))
-        run.why(
-            "drift_hint_outside_measured"
-            if probe.incident_facts.cause_outside_router is True
-            else "drift_hint_outside_signal"
-        )
+        # with its value, stays (decided by the master on PR #79). The finding
+        # carries match()'s reason: measured outside, or only a signal.
+        run.why(m.reason)
         run.rec("rec_review_diff")
         finding = _ANALYZERS[m.playbook_id](run)
     elif m.drift_overlay:

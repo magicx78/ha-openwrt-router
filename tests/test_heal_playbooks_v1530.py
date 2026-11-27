@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import random
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -2357,7 +2358,9 @@ def _favourable_case(rng: random.Random) -> tuple[pb.IncidentInput, pb.Evidence]
     found holes (NI causes with a faulty daemon, pool readings around 90 %,
     ``temporal_only`` given as False with nothing but the link observed, a
     restart count alone, degraded chain stages, the WAN up as the only
-    "measurement", capabilities and drift times unknown)."""
+    "measurement", capabilities and drift times unknown). The WAN and
+    interface facts are drawn too, so the independent oracle reaches every
+    shared signal (third review of PR #79)."""
     itype, service = rng.choice(
         [
             ("system_service_restart", "dnsmasq"),
@@ -2428,6 +2431,27 @@ def _favourable_case(rng: random.Random) -> tuple[pb.IncidentInput, pb.Evidence]
             ],
         ),
         "wan_up": (ev_f, "wan_up", [None, False]),
+        "wan": (
+            ev_f,
+            "wan",
+            [
+                pb.WanFact(link_up=False),
+                pb.WanFact(interface_up=False),
+                pb.WanFact(has_address=False),
+                pb.WanFact(link_up=True, interface_up=True, has_address=True),
+            ],
+        ),
+        "interface": (
+            ev_f,
+            "interface",
+            [
+                pb.InterfaceFact(upstream_router_down=True),
+                pb.InterfaceFact(role="uplink", link_up=False),
+                pb.InterfaceFact(role="uplink", link_up=True),
+                pb.InterfaceFact(role="lan", link_up=False),
+                pb.InterfaceFact(upstream_router_down=False),
+            ],
+        ),
         "dns": (
             ev_f,
             "dns",
@@ -2916,3 +2940,106 @@ def test_module_is_pure() -> None:
     }, names
     for banned in ("homeassistant", "api", "coordinator", "heal_store", "time"):
         assert not any(n.split(".")[-1] == banned for n in names)
+
+
+# ---------------------------------------------------------------------------
+# Third review of PR #79: hand-back reason, F's exceptions, generator reach
+# ---------------------------------------------------------------------------
+
+
+def test_hand_back_reason_in_match_says_measured() -> None:
+    """Nit a: match() itself says whether the original playbook measured the
+    cause outside; the finding carries the same reason."""
+    cfg = pb.ConfigFact(diff_proven=True, changed_areas=("dhcp",), changed_at=T_BEFORE)
+    restarted = pb.ServiceFact(
+        enabled=True, running=True, crash_loop=False, restarts_24h=1
+    )
+    measured = (
+        incident(),
+        evidence(
+            wan_up=False,
+            services={"dnsmasq": restarted},
+            dns=pb.DnsFact(),
+            chain={},
+            config=cfg,
+        ),
+    )
+    signal = (
+        incident(),
+        evidence(
+            wan_up=False,
+            dns=pb.DnsFact(local_ok=False, upstream_ok=True, log_hint=True),
+            config=cfg,
+        ),
+    )
+    for (inc, ev), reason, out in (
+        (measured, "drift_hint_outside_measured", True),
+        (signal, "drift_hint_outside_signal", None),
+    ):
+        m = pb.match(inc, ev)
+        assert m.playbook_id == "dns_recovery" and m.reason == reason, m
+        a = pb.assess(inc, ev)
+        assert a.match == m
+        assert a.finding is not None
+        assert a.finding.incident_facts.cause_outside_router is out
+        assert reason in a.finding.reasons
+        other = {"drift_hint_outside_measured", "drift_hint_outside_signal"} - {reason}
+        assert not other & set(a.finding.reasons)
+
+
+def test_hand_back_reasons_agree_over_random_cases() -> None:
+    """Nit a, at scale: whenever match() hands back, its reason is the one in
+    the finding, and 'measured' means the finding says True."""
+    rng = random.Random(79003)
+    seen: set[str] = set()
+    for k in range(3000):
+        inc, ev = _random_case(rng) if k % 2 else _favourable_case(rng)
+        a = pb.assess(inc, ev)
+        if a.match.reason not in (
+            "drift_hint_outside_measured",
+            "drift_hint_outside_signal",
+        ):
+            continue
+        seen.add(a.match.reason)
+        assert a.finding is not None
+        assert a.match.reason in a.finding.reasons
+        measured = a.finding.incident_facts.cause_outside_router is True
+        assert measured is (a.match.reason == "drift_hint_outside_measured")
+    assert seen == {"drift_hint_outside_measured", "drift_hint_outside_signal"}, seen
+
+
+def test_f_uses_the_exceptions_of_the_playbook_it_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nit b: with a patched, non-empty exception table, F ignores exactly
+    what the replaced playbook ignores, not its own entry."""
+    inc = incident()  # dnsmasq: playbook A
+    ev = evidence(wan=pb.WanFact(link_up=False))
+    assert "sig_wan_link_down" in pb.outside_signals("drift_recovery", inc, ev)
+    table = {pid: frozenset() for pid in pb.PLAYBOOK_IDS}
+    table["dns_recovery"] = frozenset({"sig_wan_link_down"})
+    monkeypatch.setattr(pb, "SIGNAL_EXCEPTIONS", MappingProxyType(table))
+    assert "sig_wan_link_down" not in pb.outside_signals("dns_recovery", inc, ev)
+    assert "sig_wan_link_down" not in pb.outside_signals("drift_recovery", inc, ev)
+    # F's own entry does not count once F stands in for A
+    table = {pid: frozenset() for pid in pb.PLAYBOOK_IDS}
+    table["drift_recovery"] = frozenset({"sig_wan_link_down"})
+    monkeypatch.setattr(pb, "SIGNAL_EXCEPTIONS", MappingProxyType(table))
+    assert "sig_wan_link_down" in pb.outside_signals("dns_recovery", inc, ev)
+    assert "sig_wan_link_down" in pb.outside_signals("drift_recovery", inc, ev)
+
+
+@pytest.mark.parametrize(
+    "signal", ["sig_wan_link_down", "sig_upstream_router_down", "sig_uplink_port_down"]
+)
+def test_random_test_catches_a_dropped_shared_signal_for_a(
+    signal: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nit c: the favourable generator now varies WanFact and InterfaceFact;
+    dropping one of these signals for A makes the random end-to-end test
+    fail."""
+    table = {pid: frozenset() for pid in pb.PLAYBOOK_IDS}
+    table["dns_recovery"] = frozenset({signal})
+    monkeypatch.setattr(pb, "SIGNAL_EXCEPTIONS", MappingProxyType(table))
+    with pytest.raises(AssertionError):
+        test_invariants_over_random_cases_end_to_end()

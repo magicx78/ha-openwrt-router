@@ -345,13 +345,16 @@ nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Absch
   - Kein Neustart-Vorschlag, wenn ein Vergleich eine gespeicherte Änderung im Bereich des
     Dienstes belegt (der Neustart würde sie übernehmen). F sagt „auf dem Router“ nur, wenn
     die genannte Ursache auf einen geänderten Bereich zeigt, und nie bei WAN- oder
-    Port-Vorfällen. `match` und `assess` geben bei Drift dasselbe Ergebnis.
+    Port-Vorfällen. `match` und `assess` geben bei Drift dasselbe Ergebnis, auch denselben
+    Grund („außerhalb gemessen“ oder „nur Hinweis“). F übernimmt die Ausnahmen des
+    Playbooks, das es ersetzt.
   - C: keine Empfehlung „Funk von Hand neu starten“, wenn der Management-Weg darüber läuft
     oder das unbekannt ist oder der Funk nicht benannt ist; Texte sagen Unbekanntes als
     unbekannt. D: WAN-Schnittstellen und unbekannte Rollen gelten als kritisch. E sagt nie
     „auf dem Router“ (Leitung oben, Schnittstelle unten kann auch der Anbieter sein).
-  - Tests: 313 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
-    Generator nahe am Vorschlag mit den feindlichen Werten des Reviews erweitert).
+  - Tests: 319 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
+    Generator nahe am Vorschlag mit den feindlichen Werten des Reviews erweitert, auch für
+    WAN und Schnittstelle).
     Mutationsprüfung auf grünem Stand: 79 Änderungen, 77 lassen einen Test scheitern; zwei
     (zweite Prüfung beim Bauen des Vorschlags, Gegenprüfung in `assess`) sind Absicherung in
     der Tiefe, die kein Test erreicht.

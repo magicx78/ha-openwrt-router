@@ -928,9 +928,10 @@ gilt:
    (`outside_signal`, siehe 8.3; zweite Review-Runde, entschieden vom Koordinator: nicht nur
    ein gemessenes True sperrt, sondern jeder Hinweis). Das prüft schon `match` (entschieden,
    dritte Runde: `match` und `assess` geben dasselbe Ergebnis, `assess` übernimmt das von
-   `match` unverändert): sieht das ursprüngliche Playbook einen Hinweis, behält es den Fall
-   (Grund `drift_hint_outside_signal`), sein Befund samt Wert bleibt, die Änderung ist nur ein
-   Hinweis; im Befund steht `drift_hint_outside_measured`, wenn es True gemessen hat, sonst
+   `match` unverändert): sieht das ursprüngliche Playbook einen Hinweis, behält es den Fall,
+   sein Befund samt Wert bleibt, die Änderung ist nur ein Hinweis. Schon `match` nennt den
+   Grund, und der Befund trägt denselben (dritte Review-Runde): `drift_hint_outside_measured`,
+   wenn das Playbook die Ursache außerhalb gemessen hat (True), sonst
    `drift_hint_outside_signal` (etwa WAN aus **und** lokaler Resolver scheitert: A sagt None,
    F übernimmt nicht); Empfehlung `rec_review_diff`. Ist
    die Zeit unbekannt oder liegt sie nicht davor, bleibt das ursprüngliche Playbook, die
@@ -983,7 +984,8 @@ da ist; so steht `cause_outside_router` False bei **keinem** der sieben Playbook
 Hinweis. Die Hinweise sind **einmal** als gemeinsame Menge festgelegt
 (`SHARED_OUTSIDE_SIGNALS`, entschieden vom Koordinator), die **jedes** Playbook prüft; ein
 Playbook darf einen gemeinsamen Hinweis nur über einen benannten Eintrag in
-`SIGNAL_EXCEPTIONS` übergehen – heute gibt es keinen:
+`SIGNAL_EXCEPTIONS` übergehen – heute gibt es keinen. F nimmt die Ausnahmen des Playbooks,
+das es ersetzt, nicht einen eigenen Eintrag:
 
 | Hinweis | Feld |
 |---|---|
@@ -1760,7 +1762,7 @@ Hold.
   (`_Run.propose` setzt die Konstante, M30) und die Gegenprüfung in `assess` (M25) erreicht
   **kein Test**: jeder Weg dorthin übergibt schon die Konstante. Sie sind Absicherung in der
   Tiefe, keine geprüfte Eigenschaft.
-- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 313 Tests):
+- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 319 Tests):
   Regressionstests aus den Proben des Reviews, jeder scheiterte auf dem Stand b32a393 (geprüft
   in einer Kopie mit dem alten Modul und zwei wirkungslosen Feldern `started_at`/`changed_at`,
   69 Tests rot): Erlaubnisliste `INSIDE_CAUSES` festgeschrieben; jede bekannte Ursache außer
@@ -1816,6 +1818,14 @@ Hold.
   die Überlebenden des Reviews M09 (90 %), M15 (Abhängige und Management-Weg getrennt), M31
   (Anbieter-Störung nur mit Adresse) und M34 (Schwelle der Neustarts). Es überleben **M25**
   und **M30**: Absicherung in der Tiefe, die kein Test erreicht (siehe Korrektur oben).
+- **Dritte Review-Runde (drei Kleinigkeiten):** `match` nennt bei der Übergabe selbst
+  „gemessen“ oder „nur Hinweis“, der Befund trägt denselben Grund (Test mit beiden Fällen und
+  über 3000 Zufallsfälle); F zieht die Ausnahmen des ersetzten Playbooks ab (Test mit
+  gepatchter, nicht leerer Ausnahmeliste); der Generator nahe am Vorschlag zieht jetzt auch
+  `WanFact` und `InterfaceFact`, sodass das unabhängige Orakel A dort erreicht: nimmt man A
+  `sig_wan_link_down`, `sig_upstream_router_down` oder `sig_uplink_port_down` weg, scheitert
+  der Zufallstest (je ein Test; mit dem alten Generator scheitert er nicht). 319 Tests im
+  Modul.
 
 Nicht geprüft (Paket F): wer `Evidence` füllt und ob die Werte stimmen (Anbindung); dass die
 Vorfallarten und Ursachen von Network Intelligence auf der echten Flotte so auftreten, wie die
