@@ -1991,7 +1991,7 @@ Hold.
   (`_Run.propose` setzt die Konstante, M30) und die Gegenprüfung in `assess` (M25) erreicht
   **kein Test**: jeder Weg dorthin übergibt schon die Konstante. Sie sind Absicherung in der
   Tiefe, keine geprüfte Eigenschaft.
-- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 319 Tests):
+- **Review PR #79, zweite Runde** (`tests/test_heal_playbooks_v1530.py`, jetzt 320 Tests):
   Regressionstests aus den Proben des Reviews, jeder scheiterte auf dem Stand b32a393 (geprüft
   in einer Kopie mit dem alten Modul und zwei wirkungslosen Feldern `started_at`/`changed_at`,
   69 Tests rot): Erlaubnisliste `INSIDE_CAUSES` festgeschrieben; jede bekannte Ursache außer
@@ -2053,14 +2053,16 @@ Hold.
   gepatchter, nicht leerer Ausnahmeliste); der Generator nahe am Vorschlag zieht jetzt auch
   `WanFact` und `InterfaceFact`, sodass das unabhängige Orakel A dort erreicht: nimmt man A
   `sig_wan_link_down`, `sig_upstream_router_down` oder `sig_uplink_port_down` weg, scheitert
-  der Zufallstest (je ein Test; mit dem alten Generator scheitert er nicht). 319 Tests im
-  Modul.
+  der Zufallstest (je ein Test; mit dem alten Generator scheitert er nicht). Nach dem Merge
+  von Paket E vergleicht ein Test die Kennungen der Vorabprüfungen mit `heal_preflight.py`.
+  320 Tests im Modul.
 
 Nicht geprüft (Paket F): wer `Evidence` füllt und ob die Werte stimmen (Anbindung); dass die
 Vorfallarten und Ursachen von Network Intelligence auf der echten Flotte so auftreten, wie die
-Playbooks sie erwarten; die deutschen Texte in einer Oberfläche; die Kennungen der
-Vorabprüfungen gegen `heal_preflight.py` (Paket E läuft parallel, geprüft ist nur die Liste
-des Auftrags).
+Playbooks sie erwarten; die deutschen Texte in einer Oberfläche. Die Kennungen der
+Vorabprüfungen sind seit dem Merge von Paket E gegen `heal_preflight.py` geprüft: dieselben
+dreizehn in derselben Reihenfolge, und ein echter Lauf von `run_preflight` meldet genau sie
+(Test `test_preflight_ids_match_the_real_module_of_package_e`; kein Unterschied gefunden).
 
 Nicht geprüft (Paket D): wer die Fakten von `RiskContext` und `IncidentFacts` füllt (etwa
 `service_config_unapplied`, `service_dependant_routers`, `cause_outside_router`) und ob sie

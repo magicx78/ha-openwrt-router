@@ -24,6 +24,7 @@ from custom_components.openwrt_router import heal_catalog as hc
 from custom_components.openwrt_router import heal_model as hm
 from custom_components.openwrt_router import heal_playbooks as pb
 from custom_components.openwrt_router import heal_policy as hp
+from custom_components.openwrt_router import heal_preflight as hpf
 from custom_components.openwrt_router import net_events as ne
 from custom_components.openwrt_router import net_rules as nr
 
@@ -263,6 +264,21 @@ def test_preflight_ids_are_exactly_the_thirteen_of_package_e() -> None:
         "recovery_path_checked",
         "approval_valid",
     )
+
+
+def test_preflight_ids_match_the_real_module_of_package_e() -> None:
+    """Package E is on main: the ids the playbooks name are the real ones,
+    in the same order, and a real preflight run reports exactly them."""
+    assert pb.PREFLIGHT_CHECK_IDS == hpf.PREFLIGHT_CHECK_IDS
+    for p in pb.PLAYBOOKS.values():
+        assert set(p.preflight) <= set(hpf.PREFLIGHT_CHECK_IDS), p.playbook_id
+    facts = hpf.PreflightFacts(
+        router_id="rtr_" + "1" * 32, safe_at=5_000.0, wall_at=1_790_000_000.0
+    )
+    result = hpf.run_preflight(facts, "service.restart", {"service": "dnsmasq"})
+    assert tuple(c.check for c in result.checks) == pb.PREFLIGHT_CHECK_IDS
+    for check in pb.PREFLIGHT_CHECK_IDS:
+        assert result.check(check).check == check
 
 
 def test_only_service_restart_may_ever_be_proposed() -> None:

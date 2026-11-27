@@ -424,9 +424,10 @@ nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Absch
     oder das unbekannt ist oder der Funk nicht benannt ist; Texte sagen Unbekanntes als
     unbekannt. D: WAN-Schnittstellen und unbekannte Rollen gelten als kritisch. E sagt nie
     „auf dem Router“ (Leitung oben, Schnittstelle unten kann auch der Anbieter sein).
-  - Tests: 319 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
+  - Tests: 320 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
     Generator nahe am Vorschlag mit den feindlichen Werten des Reviews erweitert, auch für
-    WAN und Schnittstelle).
+    WAN und Schnittstelle; die Kennungen der Vorabprüfungen gegen `heal_preflight.py`
+    aus Paket E verglichen, kein Unterschied).
     Mutationsprüfung auf grünem Stand: 79 Änderungen, 77 lassen einen Test scheitern; zwei
     (zweite Prüfung beim Bauen des Vorschlags, Gegenprüfung in `assess`) sind Absicherung in
     der Tiefe, die kein Test erreicht.
