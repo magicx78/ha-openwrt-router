@@ -47,6 +47,21 @@ nothing is judged before :data:`VERIFY_SETTLE_S` after the start; evidence
 taken after :data:`VERIFY_MAX_WAIT_S` never counts; at the maximum wait a
 class that could still change becomes final. A wall-clock jump does not
 move the safety clock while HA runs, so it cannot shorten or stretch them.
+One exception to the settle time (:data:`EARLY_LOSS`): a fresh, measured
+loss of the management path or of WAN is a new fault at once.
+
+**Fact ages** (review PR #83). A fact counts only if its measuring time
+(``taken_at - age_s``) is known and fits: a before-fact in the
+:data:`BEFORE_MAX_AGE_S` before the start, an after-fact after the settle
+time (for an early loss: after the start). Otherwise it is unknown
+(``<fact>_stale_<side>``). One unreadable row makes a whole fact unknown.
+A clearing counts only once it has held :data:`VERIFY_CLEAR_HOLD_S`; the
+wall-time resolve age counts only if wall and safety time moved alike
+between the snapshots (else ``wall_clock_jump``).
+
+**After the verdict.** :func:`planned_end` maps a final result by its
+verdict key (never by class) onto heal_model's transition table; only
+``repaired_by_action`` resolves a record (docs §7.2, for the wiring).
 
 **Binding.** A result is bound to the action id, action type, params, the
 call result, both snapshots and both times (``binding``, sha256). Every
@@ -76,6 +91,7 @@ from .core_models import REMEDIATION_ID_PREFIX, ROUTER_ID_PREFIX, is_valid_id
 from .heal_model import (
     CLOCK_BACK_TOLERANCE_S,
     TIME_MAX,
+    ActionState,
     CallResult,
     Check,
     CheckOutcome,
@@ -104,10 +120,20 @@ VERIFY_MAX_WAIT_S: Final = 3600
 BEFORE_MAX_AGE_S: Final = 300
 # The after-snapshot must be at most this old when judged (three polls).
 AFTER_MAX_AGE_S: Final = 180
-# Clients may drop by max(CLIENT_DROP_MIN, before * CLIENT_DROP_PCT // 100)
-# before it counts as a worsening (design: radio clients back to >= 70 %).
+# A clearing counts only once it has held this long (safety clock, from the
+# clearing to the time Network Intelligence last confirmed it): a flap is
+# not a success (review PR #83, P2-3).
+VERIFY_CLEAR_HOLD_S: Final = 300
+# Client tolerance (review PR #83, P2-6): a drop to 0 from any positive
+# count is always worse; below CLIENT_SMALL_BELOW clients a loss of more
+# than CLIENT_SMALL_DROP is worse; otherwise more than
+# max(CLIENT_DROP_MIN, before * CLIENT_DROP_PCT // 100). The same rule per
+# radio (AP interface), so a loss on one radio is not hidden by a gain on
+# another.
 CLIENT_DROP_PCT: Final = 30
 CLIENT_DROP_MIN: Final = 2
+CLIENT_SMALL_BELOW: Final = 7
+CLIENT_SMALL_DROP: Final = 1
 # Severities of a new incident that count as a worsening (order §11: "no
 # new critical incidents"; info-level incidents do not count).
 NOTICED_SEVERITIES: Final = ("warning", "critical")
@@ -126,6 +152,7 @@ WAN_STATES: Final = ("up", "down", "absent")
 SNAPSHOT_FACTS: Final = (
     "management_path",
     "clients",
+    "radio_clients",
     "services",
     "service_pids",
     "interfaces",
@@ -143,6 +170,10 @@ SNAPSHOT_FACTS: Final = (
 
 _ID_RE: Final = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}")
 _CODE_RE: Final = re.compile(r"[a-z][a-z0-9_.:|/-]{0,95}")
+# Service, interface and AP interface names as the router has them (UCI
+# section names may hold capitals and start with a digit: ``IoT``, ``4g``).
+# They stay inside a snapshot and never reach a result.
+_NAME_RE: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 _REASON_RE: Final = re.compile(r"[a-z][a-z0-9_.]{0,63}")
 _IPV4_RE: Final = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
 _MAC_RE: Final = re.compile(r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
@@ -198,6 +229,7 @@ PRIMARY: Final = "incident_cleared"
 GUARDS: Final = (
     "management_path",
     "clients_within_tolerance",
+    "radio_clients_within_tolerance",
     "services_still_running",
     "interfaces_still_up",
     "wan_not_lost",
@@ -321,8 +353,20 @@ def _shape_ok(name: str, value: Any) -> bool:
             and all(
                 type(r) is tuple
                 and len(r) == 2
-                and _readable(r[0])
+                and _readable(r[0], _NAME_RE)
                 and type(r[1]) is bool
+                for r in value
+            )
+            and _names_unique(value)
+        )
+    if name == "radio_clients":
+        return (
+            type(value) is tuple
+            and all(
+                type(r) is tuple
+                and len(r) == 2
+                and _readable(r[0], _NAME_RE)
+                and _is_count(r[1])
                 for r in value
             )
             and _names_unique(value)
@@ -331,7 +375,7 @@ def _shape_ok(name: str, value: Any) -> bool:
         return type(value) is tuple and all(
             type(r) is tuple
             and len(r) == 2
-            and _readable(r[0])
+            and _readable(r[0], _NAME_RE)
             and type(r[1]) is int
             and 0 < r[1] <= _INT_MAX
             for r in value
@@ -376,9 +420,14 @@ def _nc() -> Fact:
 class VerifySnapshot:
     """The facts the verification compares, for one router and one incident.
 
-    ``taken_at``: the safety-clock time of the snapshot. Each fact is a
-    ``heal_preflight.Fact`` (known, or unknown with a reason). Shapes:
+    ``taken_at``: the safety-clock time of the snapshot; ``wall_at``: the
+    wall time it was taken (None: unknown), only to see a wall-clock jump
+    between two snapshots (the resolve age is wall time). Each fact is a
+    ``heal_preflight.Fact`` (known, or unknown with a reason) whose
+    ``age_s`` says how long before ``taken_at`` it was measured; a fact
+    without an age never counts (docs §7.2). Shapes:
     ``services``/``interfaces`` ((name, running/up), ...) with unique names;
+    ``radio_clients`` ((AP interface, clients), ...);
     ``service_pids`` ((service, pid), ...) of running instances; ``wan``
     one of :data:`WAN_STATES`; ``other_incidents`` the ids of the other
     open root incidents (warning or critical) on this router;
@@ -389,8 +438,10 @@ class VerifySnapshot:
     router_id: str
     incident_id: str
     taken_at: float
+    wall_at: float | None = None
     management_path: Fact = field(default_factory=_nc)
     clients: Fact = field(default_factory=_nc)
+    radio_clients: Fact = field(default_factory=_nc)
     services: Fact = field(default_factory=_nc)
     service_pids: Fact = field(default_factory=_nc)
     interfaces: Fact = field(default_factory=_nc)
@@ -418,6 +469,11 @@ class VerifySnapshot:
         if taken is None:
             raise _fail("snapshot.taken_at")
         object.__setattr__(self, "taken_at", taken)
+        if self.wall_at is not None:
+            wall = _time(self.wall_at)
+            if wall is None:
+                raise _fail("snapshot.wall_at")
+            object.__setattr__(self, "wall_at", wall)
         for name, fact in self.fact_items():
             if type(fact) is not Fact:
                 raise _fail(f"snapshot.{name}")
@@ -436,11 +492,12 @@ class VerifySnapshot:
             "router_id": self.router_id,
             "incident_id": self.incident_id,
             "taken_at": self.taken_at,
+            "wall_at": self.wall_at,
             "facts": {name: fact.to_dict() for name, fact in self.fact_items()},
         }
 
 
-if tuple(f.name for f in fields(VerifySnapshot))[3:] != SNAPSHOT_FACTS:
+if tuple(f.name for f in fields(VerifySnapshot))[4:] != SNAPSHOT_FACTS:
     raise VerifyError("snapshot fields do not match SNAPSHOT_FACTS")
 
 
@@ -520,15 +577,67 @@ _I, _H, _N, _W, _U = (
 )
 
 
+# Reasons the age rule gives a fact it turns unknown (``_aged``).
+AGE_UNKNOWN: Final = "age_unknown"
+MEASURED_TOO_EARLY: Final = "measured_too_early"
+MEASURED_TOO_LATE: Final = "measured_too_late"
+_AGE_REASONS: Final = frozenset({AGE_UNKNOWN, MEASURED_TOO_EARLY, MEASURED_TOO_LATE})
+
+
+def _aged(
+    snap: VerifySnapshot, earliest: float, latest: float | None
+) -> VerifySnapshot:
+    """``snap`` with every known fact whose measuring time is unknown or
+    outside [earliest, latest] turned unknown (review PR #83, P1-1).
+
+    The measuring time is ``taken_at - age_s``: a fresh snapshot of stale
+    data is stale data.
+    """
+    over: dict[str, Fact] = {}
+    for name, fact in snap.fact_items():
+        if fact.value is None:
+            continue
+        age = fact.age_s
+        if age is None or age < 0:
+            over[name] = unknown(AGE_UNKNOWN, fact.source)
+            continue
+        measured = snap.taken_at - age
+        if measured < earliest:
+            over[name] = unknown(MEASURED_TOO_EARLY, fact.source)
+        elif latest is not None and measured > latest:
+            over[name] = unknown(MEASURED_TOO_LATE, fact.source)
+    return replace(snap, **over) if over else snap
+
+
 def _missing(
     cid: str, b: VerifySnapshot, a: VerifySnapshot, names: Iterable[str]
 ) -> Criterion | None:
-    """UNKNOWN if a fact the criterion needs is unknown on either side."""
+    """UNKNOWN if a fact the criterion needs is unknown on either side
+    (``<fact>_stale_<side>`` when the age rule made it unknown)."""
     for name in names:
         for side, snap in (("before", b), ("after", a)):
-            if getattr(snap, name).value is None:
-                return _c(cid, _U, f"{name}_unknown_{side}")
+            gone = _gone(cid, name, getattr(snap, name), side)
+            if gone is not None:
+                return gone
     return None
+
+
+def _missing_after(
+    cid: str, a: VerifySnapshot, names: Iterable[str]
+) -> Criterion | None:
+    """UNKNOWN if a fact read on the after side only is unknown."""
+    for name in names:
+        gone = _gone(cid, name, getattr(a, name), "after")
+        if gone is not None:
+            return gone
+    return None
+
+
+def _gone(cid: str, name: str, fact: Fact, side: str) -> Criterion | None:
+    if fact.value is not None:
+        return None
+    word = "stale" if fact.reason in _AGE_REASONS else "unknown"
+    return _c(cid, _U, f"{name}_{word}_{side}")
 
 
 def _status_code(value: Any) -> str:
@@ -537,21 +646,38 @@ def _status_code(value: Any) -> str:
     return "other"
 
 
+def _with_codes(c: Criterion, before: Any, after: Any) -> Criterion:
+    return replace(c, before=before, after=after)
+
+
+def _wall_jump(b: VerifySnapshot, a: VerifySnapshot) -> str | None:
+    """Why wall-time ages cannot be set against safety time, or None.
+
+    The resolve age is wall time; between the two snapshots the wall clock
+    must have moved like the safety clock (review PR #83, P2-5)."""
+    if b.wall_at is None or a.wall_at is None:
+        return "wall_time_unknown"
+    drift = (a.wall_at - b.wall_at) - (a.taken_at - b.taken_at)
+    if abs(drift) > CLOCK_BACK_TOLERANCE_S:
+        return "wall_clock_jump"
+    return None
+
+
 def _incident(b: VerifySnapshot, a: VerifySnapshot, started: float) -> Criterion:
     cid = PRIMARY
+    miss = _missing(cid, b, a, ("incident_status",))
+    if miss is not None:
+        return miss
     bs, as_ = b.incident_status.value, a.incident_status.value
-    if bs is None or as_ is None:
-        side = "before" if bs is None else "after"
-        return _c(cid, _U, f"incident_status_unknown_{side}")
     bc, ac = _status_code(bs), _status_code(as_)
     if bs == "ignored":
         return _c(cid, _U, "incident_ignored", bc, ac)
     if bs not in OPEN_STATES:
         return _c(cid, _U, "incident_not_open_before", bc, ac)
+    miss = _missing(cid, b, a, ("incident_reopen_count",))
+    if miss is not None:
+        return _with_codes(miss, bc, ac)
     br, ar = b.incident_reopen_count.value, a.incident_reopen_count.value
-    if br is None or ar is None:
-        side = "before" if br is None else "after"
-        return _c(cid, _U, f"incident_reopen_count_unknown_{side}", bc, ac)
     if ar < br:
         return _c(cid, _U, "incident_history_inconsistent", bc, ac)
     if ar > br:
@@ -562,24 +688,34 @@ def _incident(b: VerifySnapshot, a: VerifySnapshot, started: float) -> Criterion
         return _c(cid, _U, "incident_ignored", bc, ac)
     if as_ != "resolved":
         return _c(cid, _U, "incident_status_unrecognised", bc, ac)
+    miss = _missing_after(
+        cid, a, ("incident_resolve_reason", "incident_resolved_age_s")
+    )
+    if miss is not None:
+        return _with_codes(miss, bc, ac)
     how = a.incident_resolve_reason.value
-    if how is None:
-        return _c(cid, _U, "incident_resolve_reason_unknown_after", bc, ac)
     age = a.incident_resolved_age_s.value
-    if age is None:
-        return _c(cid, _U, "incident_resolved_age_s_unknown_after", bc, ac)
+    jump = _wall_jump(b, a)
+    if jump is not None:
+        return _c(cid, _U, jump, bc, ac)
     if a.taken_at - age < started:
         return _c(cid, _U, "resolved_before_start", bc, ac)
     if how == RESOLVE_MEASURED:
-        return _c(cid, _I, "incident_cleared_measured", bc, ac)
-    if how == RESOLVE_QUIET:
-        logs = a.log_ok.value
-        if logs is None:
-            return _c(cid, _U, "log_ok_unknown_after", bc, ac)
-        if logs is not True:
+        good = "incident_cleared_measured"
+    elif how == RESOLVE_QUIET:
+        miss = _missing_after(cid, a, ("log_ok",))
+        if miss is not None:
+            return _with_codes(miss, bc, ac)
+        if a.log_ok.value is not True:
             return _c(cid, _U, "quiet_without_log_coverage", bc, ac)
-        return _c(cid, _I, "incident_quiet_with_logs", bc, ac)
-    return _c(cid, _U, "resolved_without_evidence", bc, ac)
+        good = "incident_quiet_with_logs"
+    else:
+        return _c(cid, _U, "resolved_without_evidence", bc, ac)
+    # held from the clearing to Network Intelligence's last look at it
+    lag = a.incident_status.age_s
+    if lag is None or age - lag < VERIFY_CLEAR_HOLD_S:
+        return _c(cid, _U, "clearing_not_held_long_enough", bc, ac)
+    return _c(cid, _I, good, bc, ac)
 
 
 def _mgmt(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
@@ -598,8 +734,18 @@ def _mgmt(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
 
 
 def client_drop_allowed(before: int) -> int:
-    """How many clients may go before it counts as a worsening."""
+    """How many clients may go before it counts as a worsening (a drop to
+    0 from a positive count is worse anyway, :func:`client_loss_worse`)."""
+    if before < CLIENT_SMALL_BELOW:
+        return CLIENT_SMALL_DROP
     return max(CLIENT_DROP_MIN, before * CLIENT_DROP_PCT // 100)
+
+
+def client_loss_worse(before: int, after: int) -> bool:
+    """A client count going from ``before`` to ``after`` is a worsening."""
+    if before > 0 and after == 0:
+        return True
+    return before - after > client_drop_allowed(before)
 
 
 def _clients(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
@@ -608,11 +754,27 @@ def _clients(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
     if miss is not None:
         return miss
     bv, av = b.clients.value, a.clients.value
-    if bv - av > client_drop_allowed(bv):
+    if client_loss_worse(bv, av):
         return _c(cid, _W, "clients_dropped", bv, av)
     if av > bv:
         return _c(cid, _I, "clients_more", bv, av)
     return _c(cid, _H, "clients_within_tolerance", bv, av)
+
+
+def _radio_clients(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
+    """The client rule per radio (AP interface); a radio gone after has 0."""
+    cid = "radio_clients_within_tolerance"
+    miss = _missing(cid, b, a, ("radio_clients",))
+    if miss is not None:
+        return miss
+    before = dict(b.radio_clients.value)
+    after = dict(a.radio_clients.value)
+    lost = [r for r, n in before.items() if client_loss_worse(n, after.get(r, 0))]
+    if lost:
+        return _c(cid, _W, "radio_clients_dropped", len(before), len(lost))
+    if any(n > before.get(r, 0) for r, n in after.items()):
+        return _c(cid, _I, "radio_clients_more", len(before), 0)
+    return _c(cid, _H, "radio_clients_within_tolerance", len(before), 0)
 
 
 def _flags_kept(
@@ -683,6 +845,8 @@ def _count_kept(
 
 
 def _incidents(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
+    """A new open incident is worse; one still open after is bad on both
+    sides (never a success, review PR #83, P3-10)."""
     cid = "no_new_incidents"
     miss = _missing(cid, b, a, ("other_incidents",))
     if miss is not None:
@@ -691,9 +855,28 @@ def _incidents(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
     new = av - bv
     if new:
         return _c(cid, _W, "new_incident", len(bv), len(new))
-    if bv - av:
+    if av:
+        return _c(cid, _N, "other_incidents_still_open", len(bv), len(av))
+    if bv:
         return _c(cid, _I, "incidents_gone", len(bv), 0)
-    return _c(cid, _H, "no_new_incidents", len(bv), 0)
+    return _c(cid, _H, "no_new_incidents", 0, 0)
+
+
+def _dependants(b: VerifySnapshot, a: VerifySnapshot) -> Criterion:
+    """More degraded dependants is worse; any still degraded after is bad
+    on both sides (never a success)."""
+    cid = "dependants_not_degraded"
+    miss = _missing(cid, b, a, ("dependants_degraded",))
+    if miss is not None:
+        return miss
+    bv, av = b.dependants_degraded.value, a.dependants_degraded.value
+    if av > bv:
+        return _c(cid, _W, "dependants_degraded", bv, av)
+    if av > 0:
+        return _c(cid, _N, "dependants_still_degraded", bv, av)
+    if bv > 0:
+        return _c(cid, _I, "dependants_recovered", bv, av)
+    return _c(cid, _H, "dependants_held", bv, av)
 
 
 def _target_flag(
@@ -843,14 +1026,9 @@ def _criterion(
             words=("ap_interfaces_lost", "ap_interfaces_more", "ap_interfaces_held"),
         )
     if cid == "dependants_not_degraded":
-        return _count_kept(
-            cid,
-            "dependants_degraded",
-            b,
-            a,
-            lower_is_worse=False,
-            words=("dependants_degraded", "dependants_recovered", "dependants_held"),
-        )
+        return _dependants(b, a)
+    if cid == "radio_clients_within_tolerance":
+        return _radio_clients(b, a)
     if cid == "no_new_incidents":
         return _incidents(b, a)
     if cid == "service_running":
@@ -912,13 +1090,26 @@ def _snap_view(snap: VerifySnapshot | None) -> dict[str, Any] | None:
     return None if snap is None else snap.to_dict()
 
 
+# The two guards whose fresh, measured loss is a new fault at once, before
+# the settle time (review PR #83, P2-7): losing the way to the router or the
+# uplink must never wait 10 minutes.
+EARLY_LOSS: Final = ("management_path", "wan_not_lost")
+
+
 def _gate(
     before: VerifySnapshot | None,
     after: VerifySnapshot | None,
     started: float,
     now: float,
+    *,
+    early_loss: bool,
 ) -> tuple[str, bool] | None:
-    """(reason, final) when the evidence cannot be judged at all."""
+    """(reason, final) when the evidence cannot be judged at all.
+
+    ``early_loss``: a fresh, measured loss of an :data:`EARLY_LOSS` guard;
+    then only a usable after-snapshot (not in the future, not beyond the
+    maximum wait, not stale) is needed, not the settle time.
+    """
     settle_until = started + VERIFY_SETTLE_S
     max_until = started + VERIFY_MAX_WAIT_S
     over = now >= max_until
@@ -930,15 +1121,16 @@ def _gate(
         return "before_snapshot_after_start", True
     if started - before.taken_at > BEFORE_MAX_AGE_S:
         return "before_snapshot_stale", True
-    if now < settle_until:
+    if not early_loss and now < settle_until:
         return "settle_time_not_reached", False
     if after is None:
         return "after_snapshot_missing", over
     if after.taken_at > now:
-        return "after_snapshot_in_future", True
+        # a later snapshot may still be usable: not final (P3-10)
+        return "after_snapshot_in_future", over
     if after.taken_at > max_until:
         return "after_snapshot_beyond_max_wait", True
-    if after.taken_at < settle_until:
+    if not early_loss and after.taken_at < settle_until:
         return "after_snapshot_too_early", over
     if now - after.taken_at > AFTER_MAX_AGE_S:
         return "after_snapshot_stale", over
@@ -946,7 +1138,7 @@ def _gate(
 
 
 def _decide(
-    criteria: tuple[Criterion, ...], over: bool
+    criteria: tuple[Criterion, ...], over: bool, *, executed: bool
 ) -> tuple[VerificationResult, tuple[str, ...], bool]:
     """(class, reasons, final) from the compared criteria."""
 
@@ -973,6 +1165,13 @@ def _decide(
                 True,
             )
         return VerificationResult.NOT_RESOLVED, why([primary, *unseen]), over
+    bad_guards = [c for c in criteria if c.role is Role.GUARD and c.comparison is _N]
+    if primary.comparison is _I and bad_guards:
+        # cleared, but the router is still unwell where the action could
+        # reach (bad on both sides): never a success (P3-10)
+        if executed:
+            return VerificationResult.NOT_RESOLVED, why([primary, *bad_guards]), over
+        return VerificationResult.UNKNOWN, why(bad_guards), over
     bad_states = [c for c in states if c.comparison not in (_I, _H)]
     if primary.comparison is _I and not bad_states:
         return VerificationResult.RESOLVED, why([primary, *states, *effects]), True
@@ -1047,13 +1246,21 @@ def _derive(
     target = ""
     if executed and va.entry.target_param in ("service", "interface"):
         target = va.params[va.entry.target_param]
+    settle_until = started + VERIFY_SETTLE_S
     criteria: tuple[Criterion, ...] = ()
     if before is not None and after is not None:
-        criteria = tuple(
-            _criterion(
+        # before-facts measured in the 300 s before the start; after-facts
+        # measured after the settle time; for EARLY_LOSS also any after-fact
+        # measured after the start, but only to see a loss (P1-1, P2-7)
+        b_eff = _aged(before, started - BEFORE_MAX_AGE_S, started)
+        a_eff = _aged(after, settle_until, None)
+        a_fresh = _aged(after, started, None)
+
+        def one(cid: str, a_snap: VerifySnapshot) -> Criterion:
+            return _criterion(
                 cid,
-                before,
-                after,
+                b_eff,
+                a_snap,
                 started=started,
                 target=target,
                 exclude_service=target or None
@@ -1063,14 +1270,23 @@ def _derive(
                 if va.action_type == "interface.cycle"
                 else None,
             )
-            for cid in ids
-        )
+
+        rows = []
+        for cid in ids:
+            row = one(cid, a_eff)
+            if cid in EARLY_LOSS:
+                early = one(cid, a_fresh)
+                if early.comparison is _W:
+                    row = early
+            rows.append(row)
+        criteria = tuple(rows)
+    early_loss = any(c.criterion in EARLY_LOSS and c.comparison is _W for c in criteria)
     over = now >= started + VERIFY_MAX_WAIT_S
-    gate = _gate(before, after, started, now)
+    gate = _gate(before, after, started, now, early_loss=early_loss)
     if gate is not None:
         result, reasons, final = VerificationResult.UNKNOWN, (gate[0],), gate[1]
     else:
-        result, reasons, final = _decide(criteria, over)
+        result, reasons, final = _decide(criteria, over, executed=executed)
     known_snap = before if before is not None else after
     view = {
         "action_id": action_id,
@@ -1083,6 +1299,9 @@ def _derive(
         "judged_at": now,
         "settle_s": VERIFY_SETTLE_S,
         "max_wait_s": VERIFY_MAX_WAIT_S,
+        "clear_hold_s": VERIFY_CLEAR_HOLD_S,
+        "before_max_age_s": BEFORE_MAX_AGE_S,
+        "after_max_age_s": AFTER_MAX_AGE_S,
     }
     return {
         "router_id": None if known_snap is None else known_snap.router_id,
@@ -1097,10 +1316,22 @@ def _derive(
         "credited_to_action": result is VerificationResult.RESOLVED
         and attribution is Attribution.ACTION,
         "verdict_key": _VERDICTS[(result, attribution)],
-        "settle_until": started + VERIFY_SETTLE_S,
+        "settle_until": settle_until,
         "max_wait_until": started + VERIFY_MAX_WAIT_S,
         "binding": canonical_sha256(view),
     }
+
+
+def _parts_exact(criteria: Any, reasons: Any) -> bool:
+    """Exact types inside the derived tuples (review PR #83, P3-9)."""
+    if not all(type(c) is Criterion for c in criteria):
+        return False
+    try:
+        for c in criteria:
+            replace(c)  # its own exact-type checks
+    except (TypeError, ValueError):
+        return False
+    return all(type(r) is str for r in reasons)
 
 
 _DERIVED: Final = (
@@ -1127,7 +1358,9 @@ class VerifyResult:
 
     Inputs: ``action_id`` (``rem_`` id), ``action_type`` and ``params``
     (checked against the catalog), ``call_result`` (None: nothing was
-    called), ``before`` / ``after`` (exactly :class:`VerifySnapshot` or
+    called; refused for a writing action, which always has a call
+    result: ``rejected`` when the router refused it), ``before`` /
+    ``after`` (exactly :class:`VerifySnapshot` or
     None, same router and incident), ``started_at`` (safety-clock time the
     call finished, or the observation started) and ``judged_at`` (safety
     time now). Everything else is derived in ``__post_init__``.
@@ -1168,6 +1401,9 @@ class VerifyResult:
             raise _fail("action")
         set_(self, "params", MappingProxyType(dict(va.params)))
         if self.call_result is not None and type(self.call_result) is not CallResult:
+            raise _fail("call_result")
+        if va.entry.writes and self.call_result is None:
+            # never silently "cleared by itself" (review PR #83, P3-10)
             raise _fail("call_result")
         for name in ("before", "after"):
             snap = getattr(self, name)
@@ -1224,7 +1460,7 @@ class VerifyResult:
             if (
                 self.call_result is not None
                 and type(self.call_result) is not CallResult
-            ):
+            ) or (va.entry.writes and self.call_result is None):
                 return False
             derived = _derive(
                 self.action_id,
@@ -1237,10 +1473,11 @@ class VerifyResult:
             )
         except Exception:  # noqa: BLE001 - anything odd is tampering
             return False
-        return (
-            all(derived[name] == getattr(self, name) for name in _DERIVED)
-            and type(self.result) is VerificationResult
-        )
+        return all(
+            type(getattr(self, name)) is type(derived[name])
+            and getattr(self, name) == derived[name]
+            for name in _DERIVED
+        ) and _parts_exact(self.criteria, self.reasons)
 
     def check_binding(
         self,
@@ -1362,6 +1599,95 @@ def verify(
 
 
 # ---------------------------------------------------------------------------
+# Where a record goes with a final result (for the later wiring, docs §7.2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PlannedEnd:
+    """What the engine does with a FINAL result (review PR #83, P2-4).
+
+    ``state``: the record's next state (None: no state change);
+    ``counts_as_failure``: an outcome for the breaker and the fleet pause
+    (``heal_policy.record_outcome``); ``credited``: the action repaired it;
+    ``hold``: hold the router (docs §5.1), set for every new fault.
+    """
+
+    state: ActionState | None
+    counts_as_failure: bool
+    credited: bool
+    hold: bool
+
+
+_S = ActionState
+# Record in VERIFYING (a write was called): by verdict key, never by class.
+_AFTER_CALL: Final[Mapping[str, tuple[ActionState, bool, bool]]] = MappingProxyType(
+    {
+        # verdict -> (state, counts_as_failure, hold)
+        "repaired_by_action": (_S.RESOLVED, False, False),
+        "repaired_execution_unconfirmed": (_S.MANUAL_RECOVERY_REQUIRED, True, False),
+        "partially_repaired": (_S.FAILED, True, False),
+        "action_did_not_help": (_S.FAILED, True, False),
+        # the router refused the call (no write ran): a failed action, and a
+        # clearing meanwhile is never the action's
+        "cleared_by_itself": (_S.FAILED, True, False),
+        "not_cleared": (_S.FAILED, True, False),
+        "worse_after_action": (_S.ESCALATED, True, True),
+        "worse_without_action": (_S.ESCALATED, True, True),
+        "cannot_tell": (_S.MANUAL_RECOVERY_REQUIRED, True, False),
+    }
+)
+
+
+def planned_end(
+    result: VerifyResult, *, from_state: ActionState, interrupted: bool
+) -> PlannedEnd | None:
+    """The record's planned end for a final ``result``; None while the
+    result is not final (the record stays where it is).
+
+    ``from_state`` VERIFYING (after a call): only ``repaired_by_action``
+    resolves; an unconfirmed call or "cannot tell" needs a person; every
+    other end counts as a failure; an interrupted record never becomes
+    FAILED (that edge needs an uninterrupted action) but needs a person.
+    ``from_state`` PROPOSED (Observe, nothing executed): "cleared by
+    itself" cancels the proposal, never credited; a new fault holds the
+    router without a state change (the engine may not escalate a
+    proposal); anything else changes nothing.
+    """
+    if type(result) is not VerifyResult or not result._untampered():
+        raise _fail("planned_end.result")
+    if type(from_state) is not ActionState or type(interrupted) is not bool:
+        raise _fail("planned_end.from_state")
+    if not result.final:
+        return None
+    key = result.verdict_key
+    if from_state is ActionState.VERIFYING:
+        state, failure, hold = _AFTER_CALL[key]
+        if interrupted and state is ActionState.FAILED:
+            state = ActionState.MANUAL_RECOVERY_REQUIRED
+        return PlannedEnd(
+            state=state,
+            counts_as_failure=failure,
+            credited=key == "repaired_by_action",
+            hold=hold,
+        )
+    if from_state is ActionState.PROPOSED and not result.executed:
+        if key == "cleared_by_itself":
+            return PlannedEnd(
+                state=ActionState.CANCELLED,
+                counts_as_failure=False,
+                credited=False,
+                hold=False,
+            )
+        if key == "worse_without_action":
+            return PlannedEnd(
+                state=None, counts_as_failure=False, credited=False, hold=True
+            )
+        return None
+    raise _fail("planned_end.from_state")
+
+
+# ---------------------------------------------------------------------------
 # The snapshot builder (memory only)
 # ---------------------------------------------------------------------------
 
@@ -1412,8 +1738,11 @@ def _poll(src: FactSources, wall: float) -> tuple[Fact, float | None]:
     interval = _interval(coord)
     ok = getattr(coord, "last_update_success", None)
     if ok is False:
-        # measured: the last poll failed
-        return known(False, f"{s}.last_update_success"), interval
+        # measured: the polls fail since the coordinator's first failure of
+        # this outage (its age is the time since then; unknown without it)
+        since = _timestamp(getattr(coord, "_failure_since", None))
+        age = None if since is None or wall - since < 0 else wall - since
+        return known(False, f"{s}.last_update_success", age), interval
     if ok is not True:
         return unknown("poll_state_unknown", s), interval
     data = getattr(coord, "data", None)
@@ -1432,6 +1761,7 @@ def _poll(src: FactSources, wall: float) -> tuple[Fact, float | None]:
 
 _STATE_FACTS: Final = (
     "clients",
+    "radio_clients",
     "services",
     "service_pids",
     "interfaces",
@@ -1461,6 +1791,97 @@ def _rows(
     return known(tuple(sorted(rows)), source, age)
 
 
+def _name(value: Any) -> bool:
+    return _readable(value, _NAME_RE)
+
+
+def _services(data: Any, s: str, age: float | None) -> Fact:
+    """Running flag per service; unknown unless THIS poll fetched them.
+
+    The coordinator copies the last poll's services forward when fetching
+    fails, while ``last_seen`` stays fresh (coordinator ``_async_poll``);
+    only ``service_instances`` (None unless ``service list`` answered in
+    this poll) proves they are this poll's. Every row must be readable,
+    else the whole fact is unknown (review PR #83, P1-1, P1-2).
+    """
+    src = f"{s}.services"
+    services = getattr(data, "services", None)
+    if not isinstance(services, list) or not services:
+        return unknown("services_not_polled", src)
+    if not isinstance(getattr(data, "service_instances", None), Mapping):
+        return unknown("services_freshness_unknown", src)
+    rows = []
+    for svc in services:
+        if (
+            not isinstance(svc, Mapping)
+            or not _name(svc.get("name"))
+            or type(svc.get("running")) is not bool
+        ):
+            return unknown("service_row_unreadable", src)
+        rows.append((svc["name"], svc["running"]))
+    return _rows(rows, src, age, "services_ambiguous")
+
+
+def _service_pids(data: Any, s: str, age: float | None) -> Fact:
+    src = f"{s}.service_instances"
+    inst = getattr(data, "service_instances", None)
+    if not isinstance(inst, Mapping):
+        return unknown("service_instances_not_fetched", src)
+    pids: list[tuple[Any, ...]] = []
+    for name, instances in inst.items():
+        if not _name(name) or not isinstance(instances, Mapping):
+            return unknown("service_instance_unreadable", src)
+        for one in instances.values():
+            running = one.get("running") if isinstance(one, Mapping) else None
+            if type(running) is not bool:
+                return unknown("service_instance_unreadable", src)
+            if not running:
+                continue
+            pid = one.get("pid")
+            if type(pid) is not int or not 0 < pid <= _INT_MAX:
+                return unknown("service_instance_unreadable", src)
+            pids.append((name, pid))
+    if len(pids) > _TUPLE_MAX:
+        return unknown("too_many_entries", src)
+    return known(tuple(sorted(pids)), src, age)
+
+
+def _interfaces(data: Any, s: str, age: float | None) -> Fact:
+    src = f"{s}.network_interfaces"
+    ifaces = getattr(data, "network_interfaces", None)
+    if getattr(data, "vlans_stale", False):
+        return unknown("interfaces_stale", src)
+    if not isinstance(ifaces, list) or not ifaces:
+        return unknown("interfaces_not_polled", src)
+    rows = []
+    for i in ifaces:
+        if not isinstance(i, Mapping) or not _name(i.get("logical_name")):
+            return unknown("interface_row_unreadable", src)
+        status = i.get("status")
+        if status not in ("up", "down"):
+            return unknown("interface_status_unreadable", src)
+        rows.append((i["logical_name"], status == "up"))
+    return _rows(rows, src, age, "interfaces_ambiguous")
+
+
+def _radio_clients_fact(data: Any, s: str, age: float | None) -> Fact:
+    """Clients per AP interface (every client of this poll comes from
+    hostapd or iwinfo and names its AP interface in ``radio``)."""
+    src = f"{s}.clients"
+    clients = getattr(data, "clients", None)
+    if not isinstance(clients, list):
+        return unknown("clients_unknown", src)
+    per: dict[str, int] = {}
+    for c in clients:
+        radio = c.get("radio") if isinstance(c, Mapping) else None
+        if not _name(radio):
+            return unknown("client_radio_unreadable", src)
+        per[radio] = per.get(radio, 0) + 1
+    if len(per) > _TUPLE_MAX:
+        return unknown("too_many_entries", src)
+    return known(tuple(sorted(per.items())), src, age)
+
+
 def _state(src: FactSources, mgmt: Fact) -> dict[str, Fact]:
     """Facts of the last poll; unknown unless the poll is ok and fresh."""
     s = "coordinator.data"
@@ -1476,61 +1897,10 @@ def _state(src: FactSources, mgmt: Fact) -> dict[str, Fact]:
         if clients is not None
         else unknown("clients_unknown", s)
     )
-    services = getattr(data, "services", None)
-    if isinstance(services, list) and services:
-        rows = [
-            (svc.get("name"), svc.get("running") is True)
-            for svc in services
-            if isinstance(svc, Mapping) and _readable(svc.get("name"))
-        ]
-        out["services"] = _rows(rows, f"{s}.services", age, "services_ambiguous")
-    else:
-        out["services"] = unknown("services_not_polled", f"{s}.services")
-    inst = getattr(data, "service_instances", None)
-    if isinstance(inst, Mapping):
-        pids: list[tuple[Any, ...]] = []
-        for name, instances in inst.items():
-            if not _readable(name) or not isinstance(instances, Mapping):
-                continue
-            for one in instances.values():
-                pid = one.get("pid") if isinstance(one, Mapping) else None
-                if (
-                    isinstance(one, Mapping)
-                    and one.get("running") is True
-                    and type(pid) is int
-                    and 0 < pid <= _INT_MAX
-                ):
-                    pids.append((name, pid))
-        out["service_pids"] = (
-            known(tuple(sorted(pids)), f"{s}.service_instances", age)
-            if len(pids) <= _TUPLE_MAX
-            else unknown("too_many_entries", f"{s}.service_instances")
-        )
-    else:
-        out["service_pids"] = unknown(
-            "service_instances_not_fetched", f"{s}.service_instances"
-        )
-    ifaces = getattr(data, "network_interfaces", None)
-    if getattr(data, "vlans_stale", False):
-        out["interfaces"] = unknown("interfaces_stale", f"{s}.network_interfaces")
-    elif isinstance(ifaces, list) and ifaces:
-        rows = []
-        unreadable = False
-        for i in ifaces:
-            if not isinstance(i, Mapping) or not _readable(i.get("logical_name")):
-                continue
-            status = i.get("status")
-            if status not in ("up", "down"):
-                unreadable = True
-                break
-            rows.append((i["logical_name"], status == "up"))
-        out["interfaces"] = (
-            unknown("interface_status_unreadable", f"{s}.network_interfaces")
-            if unreadable
-            else _rows(rows, f"{s}.network_interfaces", age, "interfaces_ambiguous")
-        )
-    else:
-        out["interfaces"] = unknown("interfaces_not_polled", f"{s}.network_interfaces")
+    out["radio_clients"] = _radio_clients_fact(data, s, age)
+    out["services"] = _services(data, s, age)
+    out["service_pids"] = _service_pids(data, s, age)
+    out["interfaces"] = _interfaces(data, s, age)
     wan = getattr(data, "wan_status", None)
     found = wan.get("wan_found") if isinstance(wan, Mapping) else None
     connected = getattr(data, "wan_connected", None)
@@ -1541,11 +1911,12 @@ def _state(src: FactSources, mgmt: Fact) -> dict[str, Fact]:
     else:
         out["wan"] = unknown("wan_unknown", f"{s}.wan_status")
     aps = getattr(data, "ap_interfaces", None)
-    out["ap_interfaces"] = (
-        known(sum(1 for x in aps if isinstance(x, Mapping)), f"{s}.ap_interfaces", age)
-        if isinstance(aps, list)
-        else unknown("ap_interfaces_unknown", f"{s}.ap_interfaces")
-    )
+    if not isinstance(aps, list):
+        out["ap_interfaces"] = unknown("ap_interfaces_unknown", f"{s}.ap_interfaces")
+    elif not all(isinstance(x, Mapping) for x in aps):
+        out["ap_interfaces"] = unknown("ap_interface_unreadable", f"{s}.ap_interfaces")
+    else:
+        out["ap_interfaces"] = known(len(aps), f"{s}.ap_interfaces", age)
     up = _count(getattr(data, "uptime", None))
     out["uptime_s"] = (
         known(up, f"{s}.uptime", age) if up else unknown("uptime_missing", s)
@@ -1618,10 +1989,12 @@ def _ni(
                     out["incident_resolved_age_s"] = unknown("wall_clock_behind_ni", si)
                 else:
                     out["incident_resolved_age_s"] = known(max(wall - at, 0.0), si, age)
+    # open roots: active or acknowledged (an acknowledged incident is still
+    # an outage, review PR #83, P3-10)
     active = [
         i
         for i in incidents
-        if _value_of(getattr(i, "status", None)) == "active"
+        if _value_of(getattr(i, "status", None)) in OPEN_STATES
         and getattr(i, "parent_id", None) is None
     ]
     others = []
@@ -1750,7 +2123,11 @@ def snapshot_from_sources(
             lambda: _ni(src, incident_id, wall, poll[1]),
         )
         return VerifySnapshot(
-            router_id=router_id, incident_id=incident_id, taken_at=safe, **_sane(facts)
+            router_id=router_id,
+            incident_id=incident_id,
+            taken_at=safe,
+            wall_at=wall,
+            **_sane(facts),
         )
     except Exception as err:  # noqa: BLE001 - the builder never raises
         _LOGGER.debug("Verify: no snapshot (%s)", type(err).__name__)
@@ -1762,9 +2139,13 @@ __all__ = [
     "BEFORE_MAX_AGE_S",
     "CLIENT_DROP_MIN",
     "CLIENT_DROP_PCT",
+    "CLIENT_SMALL_BELOW",
+    "CLIENT_SMALL_DROP",
     "CRITERIA",
+    "EARLY_LOSS",
     "GUARDS",
     "SNAPSHOT_FACTS",
+    "VERIFY_CLEAR_HOLD_S",
     "VERIFY_MAX_WAIT_S",
     "VERIFY_SETTLE_S",
     "WRITE_CRITERIA",
@@ -1772,12 +2153,15 @@ __all__ = [
     "Binding",
     "Comparison",
     "Criterion",
+    "PlannedEnd",
     "Role",
     "VerifyError",
     "VerifyResult",
     "VerifySnapshot",
     "client_drop_allowed",
+    "client_loss_worse",
     "criteria_for",
+    "planned_end",
     "snapshot_from_sources",
     "verify",
 ]

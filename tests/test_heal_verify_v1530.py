@@ -24,6 +24,7 @@ import dataclasses
 import pathlib
 import random
 import time
+from datetime import UTC, datetime
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -66,6 +67,7 @@ CRITERIA_LITERAL = (
     "config_matches_version",
     "management_path",
     "clients_within_tolerance",
+    "radio_clients_within_tolerance",
     "services_still_running",
     "interfaces_still_up",
     "wan_not_lost",
@@ -77,6 +79,7 @@ CRITERIA_LITERAL = (
 GUARDS_LITERAL = (
     "management_path",
     "clients_within_tolerance",
+    "radio_clients_within_tolerance",
     "services_still_running",
     "interfaces_still_up",
     "wan_not_lost",
@@ -88,6 +91,7 @@ GUARDS_LITERAL = (
 FACTS_LITERAL = (
     "management_path",
     "clients",
+    "radio_clients",
     "services",
     "service_pids",
     "interfaces",
@@ -143,6 +147,7 @@ READS = {
     "config_matches_version": (),
     "management_path": ("management_path",),
     "clients_within_tolerance": ("clients",),
+    "radio_clients_within_tolerance": ("radio_clients",),
     "services_still_running": ("services",),
     "interfaces_still_up": ("interfaces",),
     "wan_not_lost": ("wan",),
@@ -153,8 +158,12 @@ READS = {
 }
 
 
-def k(value: Any) -> hp.Fact:
-    return hp.known(value, "test")
+WALL0 = 1_800_000_000.0  # wall time at safety time 0 in the helpers
+
+
+def k(value: Any, age: float | None = 0.0) -> hp.Fact:
+    """A known fact measured ``age`` seconds before its snapshot."""
+    return hp.known(value, "test", age)
 
 
 def u(reason: str = "test_unknown") -> hp.Fact:
@@ -168,6 +177,7 @@ def _wrap(value: Any) -> hp.Fact:
 GREEN_BEFORE = {
     "management_path": True,
     "clients": 10,
+    "radio_clients": (("phy0-ap0", 4), ("phy1-ap0", 6)),
     "services": (("dnsmasq", True), ("dropbear", True), ("firewall", False)),
     "service_pids": (("dnsmasq", 100), ("dropbear", 1)),
     "interfaces": (("lan", True), ("wan", True)),
@@ -192,12 +202,16 @@ GREEN_AFTER = {
 }
 
 
+_DEFAULT_WALL = object()
+
+
 def snap(
     base: dict[str, Any] | None = None,
     *,
     at: float = BEFORE_AT,
     router: str = R1,
     incident: str = INC,
+    wall: Any = _DEFAULT_WALL,
     **over: Any,
 ) -> hv.VerifySnapshot:
     values = {**(GREEN_BEFORE if base is None else base), **over}
@@ -205,6 +219,7 @@ def snap(
         router_id=router,
         incident_id=incident,
         taken_at=at,
+        wall_at=WALL0 + at if wall is _DEFAULT_WALL else wall,
         **{n: _wrap(v) for n, v in values.items()},
     )
 
@@ -215,6 +230,17 @@ def before(**over: Any) -> hv.VerifySnapshot:
 
 def after(**over: Any) -> hv.VerifySnapshot:
     return snap(GREEN_AFTER, at=over.pop("at", AFTER_AT), **over)
+
+
+def aged(base: dict[str, Any], age: float, **over: Any) -> dict[str, Any]:
+    """Every known value of ``base`` measured ``age`` seconds earlier."""
+    out = {}
+    for name, value in {**base, **over}.items():
+        if isinstance(value, hp.Fact):
+            out[name] = value
+        else:
+            out[name] = k(value, age)
+    return out
 
 
 _DEFAULT = object()
@@ -240,6 +266,15 @@ def run(
         started_at=started,
         judged_at=now,
     )
+
+
+def not_run(action: str, call: CallResult | None = None) -> CallResult | None:
+    """A call result for "nothing was executed": ``None`` (no call at all)
+    is only allowed on a read-only action; a write that did not run was
+    refused (REJECTED)."""
+    if call is None and hc.CATALOG[action].writes:
+        return CallResult.REJECTED
+    return call
 
 
 def comparisons(r: hv.VerifyResult) -> dict[str, hv.Comparison]:
@@ -292,6 +327,7 @@ def test_the_closed_sets_are_pinned() -> None:
         "router_id",
         "incident_id",
         "taken_at",
+        "wall_at",
         *FACTS_LITERAL,
     )
     assert [v.value for v in VR] == [
@@ -378,10 +414,13 @@ def test_the_time_and_tolerance_constants_are_pinned() -> None:
     assert hv.AFTER_MAX_AGE_S == 180
     assert hv.CLIENT_DROP_PCT == 30
     assert hv.CLIENT_DROP_MIN == 2
+    assert hv.VERIFY_CLEAR_HOLD_S == 300
+    assert hv.CLIENT_SMALL_BELOW == 7
+    assert hv.CLIENT_SMALL_DROP == 1
     assert [hv.client_drop_allowed(n) for n in (0, 1, 6, 7, 10, 13, 100)] == [
-        2,
-        2,
-        2,
+        1,
+        1,
+        1,
         2,
         3,
         3,
@@ -671,7 +710,7 @@ def test_order_21_lost_management_connection_is_a_new_fault() -> None:
     assert r.escalate is True
     assert "management_path.worse" in r.reasons
     # the same without an action: escalated, never blamed on an action
-    r = run(call=None, a=a)
+    r = run(call=CallResult.REJECTED, a=a)
     assert r.result is VR.NEW_FAULT and r.verdict_key == "worse_without_action"
     assert r.attribution is hv.Attribution.NO_WRITE
 
@@ -698,7 +737,7 @@ def test_order_23_router_reboot_during_execution_is_a_new_fault() -> None:
 @pytest.mark.parametrize("action", ACTIONS_LITERAL)
 @pytest.mark.parametrize("call", [None, CallResult.REJECTED])
 def test_no_write_cleared_is_cleared_by_itself(action: str, call: Any) -> None:
-    r = run(action, call=call)
+    r = run(action, call=not_run(action, call))
     assert r.result is VR.RESOLVED
     assert r.attribution is hv.Attribution.NO_WRITE
     assert r.verdict_key == "cleared_by_itself"
@@ -735,9 +774,9 @@ def test_no_write_reaches_only_four_classes_and_never_partial() -> None:
     rng = random.Random(53)
     seen = set()
     for _ in range(3000):
-        b, a = _random_pair(rng)
+        b, a, _ = _random_pair(rng)
         action = rng.choice(ACTIONS_LITERAL)
-        call = rng.choice([None, CallResult.REJECTED])
+        call = not_run(action, rng.choice([None, CallResult.REJECTED]))
         r = run(action, call=call, b=b, a=a)
         seen.add(r.result)
         assert r.result is not VR.PARTIAL
@@ -758,11 +797,24 @@ def _cases() -> list[tuple[str, bool]]:
     return out
 
 
+def _spoil(name: str, side: str, how: str) -> hp.Fact:
+    """The green fact made unusable: unknown, measured too long ago (stale:
+    before the 300 s before the start, or inside the settle time), or of
+    unknown age (review PR #83, P1-1)."""
+    if how == "unknown":
+        return u()
+    value = (GREEN_BEFORE if side == "before" else GREEN_AFTER)[name]
+    if how == "age_unknown":
+        return k(value, None)
+    return k(value, 400.0 if side == "before" else 150.0)
+
+
+@pytest.mark.parametrize("how", ["unknown", "stale", "age_unknown"])
 @pytest.mark.parametrize(("action", "executed"), _cases())
 def test_unknown_on_any_fact_a_criterion_reads_never_gives_success(
-    action: str, executed: bool
+    action: str, executed: bool, how: str
 ) -> None:
-    call = CallResult.OK if executed else None
+    call = CallResult.OK if executed else not_run(action)
     green = run(action, call=call)
     reached = set()
     for cid, names in READS.items():
@@ -774,8 +826,9 @@ def test_unknown_on_any_fact_a_criterion_reads_never_gives_success(
                     continue  # the open incident has no resolved age
                 if name == "incident_resolve_reason" and side == "before":
                     continue  # not read before (open)
-                b = before(**{name: u()}) if side == "before" else before()
-                a = after(**{name: u()}) if side == "after" else after()
+                bad = {name: _spoil(name, side, how)}
+                b = before(**bad) if side == "before" else before()
+                a = after(**bad) if side == "after" else after()
                 r = run(action, call=call, b=b, a=a)
                 assert r.result is VR.UNKNOWN, (action, cid, name, side)
                 assert r.credited_to_action is False
@@ -795,19 +848,24 @@ UNREAD = {
 }
 
 
+@pytest.mark.parametrize("how", ["unknown", "stale", "age_unknown"])
 @pytest.mark.parametrize(("action", "executed"), _cases())
 def test_unknown_on_any_fact_never_turns_into_success(
-    action: str, executed: bool
+    action: str, executed: bool, how: str
 ) -> None:
-    """Every fact, each side: unknown gives success only for facts that no
-    criterion reads (pinned literally)."""
-    call = CallResult.OK if executed else None
+    """Every fact, each side: unknown or stale gives success only for facts
+    that no criterion reads (pinned literally)."""
+    call = CallResult.OK if executed else not_run(action)
     green = run(action, call=call).result
     unread = UNREAD.get((action, executed), {"log_ok", "service_pids"})
     for name in FACTS_LITERAL:
         for side in ("before", "after"):
-            b = before(**{name: u()}) if side == "before" else before()
-            a = after(**{name: u()}) if side == "after" else after()
+            spoilt = (GREEN_BEFORE if side == "before" else GREEN_AFTER)[name]
+            if how != "unknown" and isinstance(spoilt, hp.Fact):
+                continue  # already unknown in the green scenario
+            bad = {name: _spoil(name, side, how)}
+            b = before(**bad) if side == "before" else before()
+            a = after(**bad) if side == "after" else after()
             r = run(action, call=call, b=b, a=a)
             if name in unread:
                 assert r.result is green, (name, side)
@@ -915,11 +973,14 @@ WORSE_AFTER = {
     "dependants_not_degraded": {"dependants_degraded": 1},
     "no_new_incidents": {"other_incidents": ("inc-9",)},
     "no_unplanned_reboot": {"uptime_s": 100},
+    "radio_clients_within_tolerance": {
+        "radio_clients": (("phy0-ap0", 4), ("phy1-ap0", 4))
+    },
 }
 
 
 @pytest.mark.parametrize("guard", GUARDS_LITERAL)
-@pytest.mark.parametrize("call", [CallResult.OK, None])
+@pytest.mark.parametrize("call", [CallResult.OK, CallResult.REJECTED])
 def test_each_guard_worse_is_a_new_fault(guard: str, call: Any) -> None:
     r = run(call=call, a=after(**WORSE_AFTER[guard]))
     assert r.result is VR.NEW_FAULT
@@ -958,10 +1019,20 @@ def test_worse_target_state_is_a_new_fault() -> None:
     [
         (10, 7, C.HELD),
         (10, 6, C.WORSE),
-        (1, 0, C.HELD),
-        (2, 0, C.HELD),
+        # a drop to 0 from any positive count is always worse
+        (1, 0, C.WORSE),
+        (2, 0, C.WORSE),
         (3, 0, C.WORSE),
+        (50, 0, C.WORSE),
         (0, 0, C.HELD),
+        # below 7 clients a loss of more than one is worse
+        (2, 1, C.HELD),
+        (6, 5, C.HELD),
+        (6, 4, C.WORSE),
+        (3, 1, C.WORSE),
+        # from 7 on the old rule: more than max(2, 30 %)
+        (7, 5, C.HELD),
+        (7, 4, C.WORSE),
         (10, 11, C.IMPROVED),
         (100, 70, C.HELD),
         (100, 69, C.WORSE),
@@ -1017,10 +1088,21 @@ def test_guards_that_improve_or_stay_bad_are_not_worse() -> None:
     assert got["no_new_incidents"] is C.IMPROVED
     assert got["ap_interfaces_kept"] is C.IMPROVED
     # management path down before and after: not worse, but no success
-    r = run(call=None, b=before(management_path=False), a=after(management_path=False))
+    r = run(
+        call=CallResult.REJECTED,
+        b=before(management_path=False),
+        a=after(management_path=False),
+    )
     assert comparisons(r)["management_path"] is C.NOT_IMPROVED
-    assert r.result is VR.RESOLVED  # cleared by itself, nothing got worse
-    r = run(call=None, b=before(management_path=False))
+    # cleared, but the way in is still down: never a success (review P3-10,
+    # DECIDED: no write -> unknown, an executed write -> not resolved)
+    assert r.result is VR.UNKNOWN and r.final is False
+    assert r.reasons == ("management_path.not_improved",)
+    r = run(b=before(management_path=False), a=after(management_path=False))
+    assert r.result is VR.NOT_RESOLVED
+    assert r.reasons == ("incident_cleared.improved", "management_path.not_improved")
+    assert r.verdict_key == "action_did_not_help"
+    r = run(call=CallResult.REJECTED, b=before(management_path=False))
     assert comparisons(r)["management_path"] is C.IMPROVED
 
 
@@ -1105,26 +1187,58 @@ def test_settle_time_boundary() -> None:
     r = run(a=after(at=T0 + 599.0), now=T0 + 599.999)
     assert r.result is VR.UNKNOWN
     assert r.reasons == ("settle_time_not_reached",) and r.final is False
-    r = run(a=after(at=T0 + 600, incident_resolved_age_s=100.0), now=T0 + 600)
+    r = run(a=after(at=T0 + 600, incident_resolved_age_s=300.0), now=T0 + 600)
     assert r.result is VR.RESOLVED
-    r = run(a=after(at=T0 + 599.999, incident_resolved_age_s=100.0), now=T0 + 610)
+    r = run(a=after(at=T0 + 599.999, incident_resolved_age_s=300.0), now=T0 + 610)
     assert r.reasons == ("after_snapshot_too_early",) and r.final is False
-    r = run(a=after(at=T0 + 599.999, incident_resolved_age_s=100.0), now=T0 + 3600)
-    assert r.reasons[0] in ("after_snapshot_too_early",) and r.final is True
+    r = run(a=after(at=T0 + 599.999, incident_resolved_age_s=300.0), now=T0 + 3600)
+    # pinned to one outcome (review P3-10): the too-early gate, and final
+    assert r.reasons == ("after_snapshot_too_early",) and r.final is True
     assert r.settle_until == T0 + 600 and r.max_wait_until == T0 + 3600
 
 
-def test_settle_time_hides_even_a_worsening() -> None:
-    r = run(a=after(at=T0 + 300, management_path=False), now=T0 + 300)
+def test_settle_time_hides_a_worsening_other_than_an_early_loss() -> None:
+    r = run(a=after(at=T0 + 300, clients=2), now=T0 + 300)
     assert r.result is VR.UNKNOWN and r.reasons == ("settle_time_not_reached",)
     assert r.escalate is False
-    assert r.criterion("management_path").comparison is C.WORSE  # shown, not judged
+    # shown as unknown: the after-facts were measured inside the settle time
+    assert r.criterion("clients_within_tolerance").reason == "clients_stale_after"
+
+
+def test_a_fresh_loss_of_the_way_in_or_of_wan_escalates_at_once() -> None:
+    """Review P2-7: no settle time, and the gate does not override it."""
+    r = run(a=after(at=T0 + 300, management_path=False), now=T0 + 300)
+    assert r.result is VR.NEW_FAULT and r.escalate is True and r.final is True
+    assert r.reasons == ("management_path.worse",)
+    r = run(a=after(at=T0 + 1, wan="down"), now=T0 + 2)
+    assert r.result is VR.NEW_FAULT and r.reasons == ("wan_not_lost.worse",)
+    # also when the after-snapshot is too early for everything else
+    r = run(a=after(at=T0 + 599, wan="absent"), now=T0 + 700)
+    assert r.result is VR.NEW_FAULT and r.reasons == ("wan_not_lost.worse",)
+    assert run(a=after(at=T0 + 599), now=T0 + 700).reasons == (
+        "after_snapshot_too_early",
+    )
+    # a loss measured before the start is not a fresh loss after it
+    r = run(a=after(at=T0 + 300, management_path=k(False, 301.0)), now=T0 + 300)
+    assert r.result is VR.UNKNOWN and r.reasons == ("settle_time_not_reached",)
+    assert r.criterion("management_path").reason == "management_path_stale_after"
+    # a loss measured exactly at the start counts (boundary)
+    r = run(a=after(at=T0 + 300, management_path=k(False, 300.0)), now=T0 + 300)
+    assert r.result is VR.NEW_FAULT
+    # a stale after-snapshot showing the loss stays unknown
+    r = run(a=after(at=T0 + 300, management_path=False), now=T0 + 480.001)
+    assert r.result is VR.UNKNOWN and r.reasons == ("after_snapshot_stale",)
+    # nor does an unknown age count
+    r = run(a=after(at=T0 + 300, wan=k("down", None)), now=T0 + 300)
+    assert r.result is VR.UNKNOWN
+    # only these two guards: a lost client count still waits
+    assert hv.EARLY_LOSS == ("management_path", "wan_not_lost")
 
 
 def test_max_wait_boundary() -> None:
-    r = run(a=after(at=T0 + 3600, incident_resolved_age_s=10.0), now=T0 + 3600)
+    r = run(a=after(at=T0 + 3600, incident_resolved_age_s=300.0), now=T0 + 3600)
     assert r.result is VR.RESOLVED
-    r = run(a=after(at=T0 + 3600.001, incident_resolved_age_s=10.0), now=T0 + 3600.001)
+    r = run(a=after(at=T0 + 3600.001, incident_resolved_age_s=300.0), now=T0 + 3600.001)
     assert r.result is VR.UNKNOWN
     assert r.reasons == ("after_snapshot_beyond_max_wait",) and r.final is True
     open_ = {
@@ -1145,6 +1259,13 @@ def test_after_snapshot_age_boundary() -> None:
     r = run(a=after(at=T0 + 700), now=T0 + 721)
     assert r.result is VR.RESOLVED
     r = run(a=after(at=T0 + 730), now=T0 + 720)
+    # a later snapshot may still be usable: not final (review P3-10)
+    assert r.reasons == ("after_snapshot_in_future",) and r.final is False
+    # boundary (review survivor G7): taken exactly now is not in the future
+    assert run(a=after(at=T0 + 720), now=T0 + 720).result is VR.RESOLVED
+    r = run(a=after(at=T0 + 720.001), now=T0 + 720)
+    assert r.reasons == ("after_snapshot_in_future",)
+    r = run(a=after(at=T0 + 3600.5), now=T0 + 3600)
     assert r.reasons == ("after_snapshot_in_future",) and r.final is True
 
 
@@ -1460,12 +1581,20 @@ def test_snapshots_of_other_routers_or_incidents_or_types_are_refused() -> None:
         ("clients", 2**53 + 1),
         ("services", (("dnsmasq", 1),)),
         ("services", (("dnsmasq", True), ("dnsmasq", False))),
-        ("services", (("Dnsmasq", True),)),
+        ("services", (("dns masq", True),)),
+        ("services", (("-dnsmasq", True),)),
+        ("services", (("x" * 65, True),)),
         ("services", ("dnsmasq",)),
         ("service_pids", (("dnsmasq", 0),)),
         ("service_pids", (("dnsmasq", True),)),
         ("service_pids", (("dnsmasq", 1.5),)),
         ("interfaces", (("lan", "up"),)),
+        ("interfaces", (("la n", True),)),
+        ("radio_clients", (("phy0-ap0", -1),)),
+        ("radio_clients", (("phy0-ap0", True),)),
+        ("radio_clients", (("phy0-ap0", 1), ("phy0-ap0", 2))),
+        ("radio_clients", (("phy 0", 1),)),
+        ("radio_clients", ("phy0-ap0",)),
         ("wan", "sideways"),
         ("ap_interfaces", -2),
         ("incident_resolved_age_s", -0.5),
@@ -1658,7 +1787,7 @@ def test_to_dict_shape() -> None:
     ]
     assert d["result"] == "resolved" and d["call_result"] == "ok"
     assert d["before_taken_at"] == BEFORE_AT and d["after_taken_at"] == AFTER_AT
-    assert run(call=None, a=None).to_dict()["after_taken_at"] is None
+    assert run(call=CallResult.REJECTED, a=None).to_dict()["after_taken_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1670,11 +1799,19 @@ def _maybe(rng: random.Random, value: Any, p: float = 0.08) -> Any:
     return u() if rng.random() < p else value
 
 
+EARLY_AT = T0 + 300  # an after-snapshot inside the settle time
+EARLY_NOW = T0 + 320
+
+
 def _random_pair(
-    rng: random.Random, p_change: float = 0.07
-) -> tuple[hv.VerifySnapshot, hv.VerifySnapshot]:
+    rng: random.Random, p_change: float = 0.07, *, timing: bool = False
+) -> tuple[hv.VerifySnapshot, hv.VerifySnapshot, float]:
     """A before-side drawn at random, and an after-side that mostly repeats
-    it: each fact changes with ``p_change`` and is unknown with 3 %."""
+    it: each fact changes with ``p_change`` and is unknown with 3 %.
+
+    ``timing``: also draw fact ages (some too old, some unknown), an early
+    after-snapshot judged inside the settle time, a wall-clock jump, and
+    how long the clearing held. Returns (before, after, judged_at)."""
 
     def pick(*options: Any) -> Any:
         return rng.choice(options)
@@ -1689,19 +1826,20 @@ def _random_pair(
     b = {
         "management_path": rng.random() < 0.95,
         "clients": rng.randint(0, 12),
+        "radio_clients": (("phy0-ap0", rng.randint(0, 8)), ("phy1-ap0", 4)),
         "services": services(running),
         "service_pids": pids(running),
         "interfaces": (("lan", True), ("wan", rng.random() < 0.9)),
         "wan": pick("up", "up", "up", "down", "absent"),
-        "ap_interfaces": pick(1, 2, 2),
+        "ap_interfaces": pick(0, 1, 2, 2),
         "uptime_s": 5000,
         "log_ok": rng.random() < 0.8,
-        "dependants_degraded": pick(0, 0, 1),
+        "dependants_degraded": pick(0, 0, 0, 1),
         "incident_status": pick("active", "active", "acknowledged", "resolved"),
         "incident_reopen_count": 0,
         "incident_resolve_reason": "open",
         "incident_resolved_age_s": u("incident_not_resolved"),
-        "other_incidents": pick((), (), ("inc-3",)),
+        "other_incidents": pick((), (), (), ("inc-3",)),
     }
     status = pick("resolved", "resolved", "active", "acknowledged", "ignored")
     running_after = rng.random() < 0.85
@@ -1714,17 +1852,21 @@ def _random_pair(
         "incident_resolve_reason": pick("cleared", "cleared", "quiet", "no_data")
         if status == "resolved"
         else "open",
-        "incident_resolved_age_s": pick(10.0, 300.0, 699.0, 800.0)
+        "incident_resolved_age_s": pick(10.0, 299.0, 300.0, 300.0, 500.0, 699.0, 800.0)
         if status == "resolved"
         else u("incident_not_resolved"),
     }
     changes = {
         "management_path": lambda: rng.random() < 0.5,
         "clients": lambda: rng.randint(0, 12),
+        "radio_clients": lambda: pick(
+            (("phy0-ap0", rng.randint(0, 8)), ("phy1-ap0", rng.randint(0, 6))),
+            (("phy1-ap0", 4),),
+        ),
         "interfaces": lambda: (("lan", True), ("wan", rng.random() < 0.5)),
         "wan": lambda: pick("up", "down", "absent"),
-        "ap_interfaces": lambda: pick(1, 2),
-        "uptime_s": lambda: pick(100, 5000),
+        "ap_interfaces": lambda: pick(0, 1, 2, 3),
+        "uptime_s": lambda: pick(100, 4999, 5000),
         "log_ok": lambda: rng.random() < 0.5,
         "dependants_degraded": lambda: pick(0, 1, 2),
         "incident_reopen_count": lambda: 1,
@@ -1735,146 +1877,294 @@ def _random_pair(
             a[name] = draw()
     b = {n: _maybe(rng, v, 0.03) for n, v in b.items()}
     a = {n: _maybe(rng, v, 0.03) for n, v in a.items()}
-    return snap(b, at=BEFORE_AT), snap(a, at=AFTER_AT)
+    a_at, now = AFTER_AT, NOW
+    wall_b, wall_a = WALL0 + BEFORE_AT, WALL0 + AFTER_AT
+    if timing:
+        if rng.random() < 0.15:
+            a_at, now = EARLY_AT, EARLY_NOW
+        wall_a = WALL0 + a_at
+        if rng.random() < 0.04:
+            wall_a = pick(None, wall_a + 1.5, wall_a - 1.5, wall_a + 1.0)
+        if rng.random() < 0.02:
+            wall_b = None
+
+        def age_b() -> float | None:
+            # 0..300 s before the start is fine; older or unknown is not
+            return pick(0.0, 0.0, 0.0, 0.0, 290.0, 291.0, 400.0, None)
+
+        def age_a() -> float | None:
+            # measured after the settle time / after the start / before it
+            return pick(0.0, 0.0, 0.0, 0.0, 50.0, 200.0, 701.0, None)
+
+        b = {
+            n: v if isinstance(v, hp.Fact) or rng.random() > 0.08 else k(v, age_b())
+            for n, v in b.items()
+        }
+        a = {
+            n: v if isinstance(v, hp.Fact) or rng.random() > 0.08 else k(v, age_a())
+            for n, v in a.items()
+        }
+    return (
+        snap(b, at=BEFORE_AT, wall=wall_b),
+        snap(a, at=a_at, wall=wall_a),
+        now,
+    )
 
 
-def _val(s: hv.VerifySnapshot, name: str) -> Any:
-    return getattr(s, name).value
+# What each writing action targets in PARAMS (literal, not from the module).
+_TARGET = {"service.restart": "dnsmasq", "interface.cycle": "wan"}
+
+
+def _val(s: hv.VerifySnapshot, name: str, earliest: float, latest: Any) -> Any:
+    """The value of a fact if it is known and measured in [earliest,
+    latest] (``latest`` None: no upper limit), else None."""
+    fact = getattr(s, name)
+    if fact.value is None or fact.age_s is None or fact.age_s < 0:
+        return None
+    measured = s.taken_at - fact.age_s
+    if measured < earliest or (latest is not None and measured > latest):
+        return None
+    return fact.value
+
+
+def _bv(b: hv.VerifySnapshot, name: str) -> Any:
+    return _val(b, name, T0 - 300, T0)
+
+
+def _av(a: hv.VerifySnapshot, name: str) -> Any:
+    return _val(a, name, T0 + 600, None)
 
 
 def _oracle_incident(b: hv.VerifySnapshot, a: hv.VerifySnapshot) -> str:
     """ "cleared", "open" or "unknown" for the target incident."""
-    status_b, status_a = _val(b, "incident_status"), _val(a, "incident_status")
-    reopen_b, reopen_a = (
-        _val(b, "incident_reopen_count"),
-        _val(a, "incident_reopen_count"),
-    )
+    status_b, status_a = _bv(b, "incident_status"), _av(a, "incident_status")
     if status_b not in ("active", "acknowledged") or status_a is None:
         return "unknown"
+    reopen_b = _bv(b, "incident_reopen_count")
+    reopen_a = _av(a, "incident_reopen_count")
     if reopen_b is None or reopen_a is None:
         return "unknown"
     if reopen_a > reopen_b or status_a in ("active", "acknowledged"):
         return "open"  # recurred, or still open
     if status_a != "resolved":
         return "unknown"
-    how = _val(a, "incident_resolve_reason")
-    age = _val(a, "incident_resolved_age_s")
-    if how is None or age is None or AFTER_AT - age < T0:
+    how = _av(a, "incident_resolve_reason")
+    age = _av(a, "incident_resolved_age_s")
+    if how is None or age is None:
         return "unknown"
-    if how == "cleared":
-        return "cleared"
-    if how == "quiet" and _val(a, "log_ok") is True:
-        return "cleared"
-    return "unknown"
+    if b.wall_at is None or a.wall_at is None:
+        return "unknown"
+    if abs((a.wall_at - b.wall_at) - (a.taken_at - b.taken_at)) > 1.0:
+        return "unknown"  # the wall clock jumped
+    if a.taken_at - age < T0:
+        return "unknown"  # cleared before the action
+    if how == "quiet" and _av(a, "log_ok") is not True:
+        return "unknown"
+    if how not in ("cleared", "quiet"):
+        return "unknown"
+    if age - a.incident_status.age_s < 300:
+        return "unknown"  # the clearing has not held 300 s yet
+    return "cleared"
 
 
-def _oracle(b: hv.VerifySnapshot, a: hv.VerifySnapshot, call: Any) -> VR:
-    """The expected class for ``service.restart`` of dnsmasq, from the
-    inputs and the rules of the package order (not from the module)."""
-    wrote = call in (CallResult.OK, CallResult.INCONCLUSIVE)
-    worse = unknown_ = False
-
-    def need(*names: str) -> bool:
-        nonlocal unknown_
-        if any(_val(b, n) is None or _val(a, n) is None for n in names):
-            unknown_ = True
-            return False
+def _client_worse(before: int, after: int) -> bool:
+    if before > 0 and after == 0:
         return True
+    allowed = 1 if before < 7 else max(2, before * 30 // 100)
+    return before - after > allowed
 
-    # guards
-    if (
-        need("management_path")
-        and _val(b, "management_path")
-        and not _val(a, "management_path")
-    ):
-        worse = True
-    if need("clients") and _val(a, "clients") < _val(b, "clients") - max(
-        2, _val(b, "clients") * 3 // 10
-    ):
-        worse = True
-    if need("services"):
-        bs, as_ = dict(_val(b, "services")), dict(_val(a, "services"))
-        for name, on in bs.items():
-            if wrote and name == "dnsmasq":
-                continue
-            if on and not as_.get(name, False):
-                worse = True
-    if need("interfaces"):
-        bi, ai = dict(_val(b, "interfaces")), dict(_val(a, "interfaces"))
-        if any(on and not ai.get(n, False) for n, on in bi.items()):
-            worse = True
-    if need("wan"):
-        wb, wa = _val(b, "wan"), _val(a, "wan")
-        if wb == "up" and wa != "up":
-            worse = True
-        elif {wb, wa} == {"down", "absent"}:
-            unknown_ = True
-    if need("ap_interfaces") and _val(a, "ap_interfaces") < _val(b, "ap_interfaces"):
-        worse = True
-    if need("dependants_degraded") and _val(a, "dependants_degraded") > _val(
-        b, "dependants_degraded"
-    ):
-        worse = True
-    if need("other_incidents") and set(_val(a, "other_incidents")) - set(
-        _val(b, "other_incidents")
-    ):
-        worse = True
-    if need("uptime_s") and _val(a, "uptime_s") < _val(b, "uptime_s"):
-        worse = True
-    # the incident
-    cleared = False
-    incident = _oracle_incident(b, a)
-    cleared = incident == "cleared"
-    unknown_ = unknown_ or incident == "unknown"
-    # the targets of an executed restart
-    state_improved = state_bad = False
-    effect_seen = True
-    if wrote:
-        if need("services"):
-            bs, as_ = dict(_val(b, "services")), dict(_val(a, "services"))
-            if "dnsmasq" not in bs:
-                unknown_ = True
-            elif bs["dnsmasq"] and not as_.get("dnsmasq", False):
-                worse = True
-            elif not bs["dnsmasq"] and as_.get("dnsmasq", False):
-                state_improved = True
-            elif not bs["dnsmasq"]:
-                state_bad = True
-        if need("service_pids"):
-            pb = {p for n, p in _val(b, "service_pids") if n == "dnsmasq"}
-            pa = {p for n, p in _val(a, "service_pids") if n == "dnsmasq"}
-            effect_seen = bool(pa) and not (pa & pb)
-    if worse:
-        return VR.NEW_FAULT
-    if unknown_:
+
+def _oracle_guard(
+    guard: str, action: str, wrote: bool, b: hv.VerifySnapshot, a: Any
+) -> str:
+    """ "worse", "bad" (bad on both sides), "unknown" or "ok"; ``a`` maps a
+    fact name to its after-value (None if unusable)."""
+    fact = {
+        "management_path": "management_path",
+        "clients_within_tolerance": "clients",
+        "radio_clients_within_tolerance": "radio_clients",
+        "services_still_running": "services",
+        "interfaces_still_up": "interfaces",
+        "wan_not_lost": "wan",
+        "ap_interfaces_kept": "ap_interfaces",
+        "dependants_not_degraded": "dependants_degraded",
+        "no_new_incidents": "other_incidents",
+        "no_unplanned_reboot": "uptime_s",
+    }[guard]
+    bv, av = _bv(b, fact), a(fact)
+    if bv is None or av is None:
+        return "unknown"
+    if guard == "management_path":
+        return "worse" if bv and not av else "bad" if not av else "ok"
+    if guard == "clients_within_tolerance":
+        return "worse" if _client_worse(bv, av) else "ok"
+    if guard == "radio_clients_within_tolerance":
+        after = dict(av)
+        lost = any(_client_worse(n, after.get(r, 0)) for r, n in bv)
+        return "worse" if lost else "ok"
+    if guard in ("services_still_running", "interfaces_still_up"):
+        skip = _TARGET.get(action) if wrote else None
+        after = dict(av)
+        lost = any(on and after.get(n) is not True for n, on in bv if n != skip)
+        return "worse" if lost else "ok"
+    if guard == "wan_not_lost":
+        if bv == "up":
+            return "ok" if av == "up" else "worse"
+        if av == "up" or bv == av == "absent":
+            return "ok"
+        return "bad" if bv == av == "down" else "unknown"
+    if guard == "ap_interfaces_kept":
+        return "worse" if av < bv else "ok"
+    if guard == "dependants_not_degraded":
+        return "worse" if av > bv else "bad" if av > 0 else "ok"
+    if guard == "no_new_incidents":
+        return "worse" if set(av) - set(bv) else "bad" if av else "ok"
+    return "worse" if av < bv else "ok"  # no_unplanned_reboot
+
+
+def _oracle_target(
+    action: str, b: hv.VerifySnapshot, a: hv.VerifySnapshot
+) -> tuple[str, str]:
+    """(state, effect) of an executed write: state "worse", "improved",
+    "held", "bad", "unknown" or "none"; effect "seen", "not_seen" or
+    "unknown"."""
+
+    def av(name: str) -> Any:
+        return _av(a, name)
+
+    if action == "service.restart":
+        bs, as_ = _bv(b, "services"), av("services")
+        if bs is None or as_ is None or "dnsmasq" not in dict(bs):
+            state = "unknown"
+        else:
+            on_b, on_a = dict(bs)["dnsmasq"], dict(as_).get("dnsmasq") is True
+            state = (
+                "worse"
+                if on_b and not on_a
+                else "improved"
+                if on_a and not on_b
+                else "held"
+                if on_b
+                else "bad"
+            )
+        pb, pa = _bv(b, "service_pids"), av("service_pids")
+        if pb is None or pa is None:
+            return state, "unknown"
+        before = {p for n, p in pb if n == "dnsmasq"}
+        after = {p for n, p in pa if n == "dnsmasq"}
+        return state, "seen" if after and not after & before else "not_seen"
+    if action == "interface.cycle":
+        bi, ai = _bv(b, "interfaces"), av("interfaces")
+        if bi is None or ai is None or "wan" not in dict(bi):
+            return "unknown", "unknown"
+        on_b, on_a = dict(bi)["wan"], dict(ai).get("wan") is True
+        state = (
+            "worse"
+            if on_b and not on_a
+            else "improved"
+            if on_a and not on_b
+            else "held"
+            if on_b
+            else "bad"
+        )
+        return state, "unknown"  # a cycle is not measurable from memory
+    if action == "wifi.radio_restart":
+        bc, ac = _bv(b, "ap_interfaces"), av("ap_interfaces")
+        if bc is None or ac is None:
+            return "unknown", "unknown"
+        state = (
+            "worse"
+            if ac < bc
+            else "improved"
+            if ac > bc
+            else "held"
+            if ac > 0
+            else "bad"
+        )
+        return state, "unknown"
+    if action == "router.reboot":
+        ub, ua = _bv(b, "uptime_s"), av("uptime_s")
+        if ub is None or ua is None:
+            return "none", "unknown"
+        return "none", "seen" if ua < ub else "not_seen"
+    return "none", "unknown"  # config.restore: the version is not tracked
+
+
+def _oracle(
+    action: str,
+    b: hv.VerifySnapshot,
+    a: hv.VerifySnapshot,
+    call: Any,
+    now: float = NOW,
+) -> VR:
+    """The expected class from the inputs and the rules of the package
+    order and the PR #83 review (not from the module)."""
+    writes = action in WRITES_LITERAL
+    wrote = writes and call in (CallResult.OK, CallResult.INCONCLUSIVE)
+    replaced = {
+        "wifi.radio_restart": ("ap_interfaces_kept",),
+        "router.reboot": ("no_unplanned_reboot",),
+    }.get(action, ())
+    guards = [g for g in GUARDS_LITERAL if not (wrote and g in replaced)]
+    # a fresh, measured loss of the way in or of WAN: at once (P2-7)
+    early = any(
+        _oracle_guard(g, action, wrote, b, lambda n: _val(a, n, T0, None)) == "worse"
+        for g in ("management_path", "wan_not_lost")
+    )
+    if not early and (now < T0 + 600 or a.taken_at < T0 + 600):
+        return VR.UNKNOWN  # inside the settle time
+    if a.taken_at > now or now - a.taken_at > 180:
         return VR.UNKNOWN
-    if wrote and not effect_seen:
+    if early:
+        return VR.NEW_FAULT
+    seen = {g: _oracle_guard(g, action, wrote, b, lambda n: _av(a, n)) for g in guards}
+    incident = _oracle_incident(b, a)
+    state, effect = _oracle_target(action, b, a) if wrote else ("none", "seen")
+    if "worse" in seen.values() or state == "worse":
+        return VR.NEW_FAULT
+    if "unknown" in seen.values() or incident == "unknown":
+        return VR.UNKNOWN
+    if state == "unknown" or effect == "unknown":
+        return VR.UNKNOWN
+    cleared = incident == "cleared"
+    if effect == "not_seen":
         return VR.UNKNOWN if cleared else VR.NOT_RESOLVED
-    if cleared and not state_bad:
+    if cleared and "bad" in seen.values():
+        return VR.NOT_RESOLVED if wrote else VR.UNKNOWN
+    if cleared and state != "bad":
         return VR.RESOLVED
-    if cleared or state_improved:
+    if cleared or state == "improved":
         return VR.PARTIAL
     return VR.NOT_RESOLVED
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
-def test_random_scenarios_against_the_oracle(seed: int) -> None:
-    rng = random.Random(seed)
+@pytest.mark.parametrize("action", ACTIONS_LITERAL)
+def test_random_scenarios_against_the_oracle(action: str, seed: int) -> None:
+    """Every action type, with ages, early losses, wall jumps and the
+    clearing hold drawn at random (review PR #83, P3-10)."""
+    rng = random.Random(f"{action}/{seed}")
     seen: dict[VR, int] = {}
-    for _ in range(2000):
-        b, a = _random_pair(rng)
-        call = rng.choice(
-            [None, CallResult.OK, CallResult.INCONCLUSIVE, CallResult.REJECTED]
+    for _ in range(800):
+        b, a, now = _random_pair(rng, timing=True)
+        call = not_run(
+            action,
+            rng.choice(
+                [None, CallResult.OK, CallResult.INCONCLUSIVE, CallResult.REJECTED]
+            ),
         )
-        r = run(call=call, b=b, a=a)
-        expected = _oracle(b, a, call)
-        assert r.result is expected, (b, a, call, r.reasons)
+        r = run(action, call=call, b=b, a=a, now=now)
+        expected = _oracle(action, b, a, call, now)
+        assert r.result is expected, (b, a, call, now, r.reasons)
         seen[r.result] = seen.get(r.result, 0) + 1
         # the hard rules, again on every case
         if r.result is VR.RESOLVED:
             got = comparisons(r)
             assert got["incident_cleared"] is C.IMPROVED
             assert C.UNKNOWN not in got.values() and C.WORSE not in got.values()
+            assert C.NOT_IMPROVED not in (
+                got[g] for g in got if hv.ROLE_OF[g] is hv.Role.GUARD
+            )
             for cid, comparison in got.items():
                 if hv.ROLE_OF[cid] is hv.Role.STATE:
                     assert comparison in (C.IMPROVED, C.HELD), cid
@@ -1885,9 +2175,43 @@ def test_random_scenarios_against_the_oracle(seed: int) -> None:
         if r.criteria:
             assert r.criterion("incident_cleared").comparison is not C.HELD
         assert r.credited_to_action is (
-            r.result is VR.RESOLVED and call is CallResult.OK
+            r.result is VR.RESOLVED
+            and call is CallResult.OK
+            and action in WRITES_LITERAL
         )
-    assert set(seen) == set(VR), seen
+
+
+# What the random runs of each action type can reach (literal): a write
+# whose effect memory cannot measure never resolves or is partial.
+_REACHABLE = {
+    "observe.evaluate": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+    "diag.refresh": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+    "diag.ha_probes": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+    "service.restart": set(VR),
+    "wifi.radio_restart": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+    "router.reboot": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+    "config.restore": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+    "interface.cycle": {VR.RESOLVED, VR.NOT_RESOLVED, VR.UNKNOWN, VR.NEW_FAULT},
+}
+
+
+@pytest.mark.parametrize("action", ACTIONS_LITERAL)
+def test_the_random_runs_reach_every_class_they_can(action: str) -> None:
+    """The oracle runs above are not vacuous: across the seeds every class
+    the action can reach was drawn."""
+    seen: set[VR] = set()
+    for seed in (1, 2, 3, 4, 5):
+        rng = random.Random(f"{action}/{seed}")
+        for _ in range(800):
+            b, a, now = _random_pair(rng, timing=True)
+            call = not_run(
+                action,
+                rng.choice(
+                    [None, CallResult.OK, CallResult.INCONCLUSIVE, CallResult.REJECTED]
+                ),
+            )
+            seen.add(run(action, call=call, b=b, a=a, now=now).result)
+    assert seen == _REACHABLE[action]
 
 
 # ---------------------------------------------------------------------------
@@ -1955,7 +2279,13 @@ def fake_coordinator(**data: Any) -> Any:
         "uptime": 9000,
         "log_status": "ok",
         "router_info": {"hostname": "kitchen-router"},
-        "clients": [{"mac": "02:00:00:00:0a:0a", "hostname": "phone-of-anna"}],
+        "clients": [
+            {
+                "mac": "02:00:00:00:0a:0a",
+                "hostname": "phone-of-anna",
+                "radio": "phy0-ap0",
+            }
+        ],
         **data,
     }
     return SimpleNamespace(
@@ -1997,6 +2327,7 @@ def test_builder_reads_what_is_in_memory() -> None:
     assert v == {
         "management_path": True,
         "clients": 3,
+        "radio_clients": (("phy0-ap0", 1),),
         "services": (("dnsmasq", True), ("firewall", False)),
         "service_pids": (("dnsmasq", 42),),
         "interfaces": (("lan", True), ("wan", False)),
@@ -2209,30 +2540,90 @@ def test_builder_odd_poll_data_is_unknown_not_guessed() -> None:
     assert s.wan.reason == "wan_unknown"
     s = build(fake_coordinator(log_status="pending"))
     assert s.log_ok.value is False
-    # unreadable names are left out, never copied
+    # names like IoT or 4g are names (kept in the snapshot only)
     s = build(
         fake_coordinator(
-            services=[
-                {"name": "192.168.1.1", "running": True},
-                {"name": "dnsmasq", "running": True},
+            network_interfaces=[
+                {"logical_name": "IoT", "status": "up"},
+                {"logical_name": "4g", "status": "down"},
             ]
         )
     )
-    assert s.services.value == (("dnsmasq", True),)
+    assert s.interfaces.value == (("4g", False), ("IoT", True))
+    # a stopped instance needs no pid
     s = build(
         fake_coordinator(
             service_instances={
                 "dnsmasq": {
-                    "a": {"pid": 0, "running": True},
-                    "b": {"pid": True, "running": True},
                     "c": {"pid": 7, "running": False},
                     "d": {"pid": 8, "running": True},
-                },
-                "Bad": {"x": {"pid": 9, "running": True}},
+                }
             }
         )
     )
     assert s.service_pids.value == (("dnsmasq", 8),)
+
+
+_GOOD_SERVICE = {"name": "dnsmasq", "running": True}
+_GOOD_IFACE = {"logical_name": "lan", "status": "up"}
+_GOOD_CLIENT = {"mac": "02:00:00:00:0a:0b", "radio": "phy0-ap0"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("services", [_GOOD_SERVICE, {"name": "192.168 1", "running": True}]),
+        ("services", [_GOOD_SERVICE, {"name": "odhcpd"}]),
+        ("services", [_GOOD_SERVICE, {"name": "odhcpd", "running": "yes"}]),
+        ("services", [_GOOD_SERVICE, {"name": None, "running": True}]),
+        ("services", [_GOOD_SERVICE, "odhcpd"]),
+        (
+            "service_instances",
+            {
+                "dnsmasq": {
+                    "a": {"pid": 0, "running": True},
+                    "d": {"pid": 8, "running": True},
+                }
+            },
+        ),
+        ("service_instances", {"dnsmasq": {"b": {"pid": True, "running": True}}}),
+        ("service_instances", {"dnsmasq": {"b": {"pid": 8}}}),
+        ("service_instances", {"dnsmasq": {"b": "x"}}),
+        ("service_instances", {"dnsmasq": ["x"]}),
+        (
+            "service_instances",
+            {
+                "dnsmasq": {"d": {"pid": 8, "running": True}},
+                "bad name": {"x": {"pid": 9, "running": True}},
+            },
+        ),
+        ("network_interfaces", [_GOOD_IFACE, {"status": "up"}]),
+        ("network_interfaces", [_GOOD_IFACE, "wan"]),
+        ("network_interfaces", [_GOOD_IFACE, {"logical_name": "w an", "status": "up"}]),
+        ("network_interfaces", [_GOOD_IFACE, {"logical_name": "wan"}]),
+        ("ap_interfaces", [{"ifname": "phy0-ap0"}, "phy1-ap0"]),
+        ("clients", [_GOOD_CLIENT, {"mac": "02:00:00:00:0a:0c"}]),
+        ("clients", [_GOOD_CLIENT, {"mac": "02:00:00:00:0a:0c", "radio": ""}]),
+        ("clients", [_GOOD_CLIENT, "02:00:00:00:0a:0c"]),
+    ],
+)
+def test_one_unreadable_row_makes_the_whole_fact_unknown(
+    field: str, value: Any
+) -> None:
+    """Review PR #83, P1-2: never skip a row, never keep the readable part."""
+    fact, reason = {
+        "services": ("services", "service_row_unreadable"),
+        "service_instances": ("service_pids", "service_instance_unreadable"),
+        "network_interfaces": ("interfaces", None),
+        "ap_interfaces": ("ap_interfaces", "ap_interface_unreadable"),
+        "clients": ("radio_clients", "client_radio_unreadable"),
+    }[field]
+    got = getattr(build(fake_coordinator(**{field: value})), fact)
+    assert got.value is None
+    if reason is None:
+        assert got.reason in ("interface_row_unreadable", "interface_status_unreadable")
+    else:
+        assert got.reason == reason
 
 
 class _Raises:
@@ -2295,7 +2686,7 @@ def test_a_wall_clock_jump_ahead_makes_the_builder_unknown_not_good() -> None:
     s = build(fake_coordinator(), FakeNI([inc()]), wall=W0 + 86_400)
     assert s.management_path.reason == "poll_stale"
     assert s.incident_status.reason == "ni_stale"
-    r = run(call=None, a=dataclasses.replace(s, taken_at=AFTER_AT))
+    r = run(call=CallResult.REJECTED, a=dataclasses.replace(s, taken_at=AFTER_AT))
     assert r.result is VR.UNKNOWN
 
 
@@ -2332,13 +2723,21 @@ async def test_the_builder_makes_zero_router_calls() -> None:
     assert "192.0.2.1" not in blob and kit.CLIENT_MAC not in blob
     hostname = coordinator.data.router_info.get("hostname")
     assert not hostname or hostname not in blob
-    # the incident clears by itself (Network Intelligence measured it)
-    ni.incidents = [inc(status="resolved", resolve_reason="cleared", resolved_at=wall)]
-    a = hv.snapshot_from_sources(src, R1, INC, safe_now=T0 + 700, wall_now=wall + 60)
-    assert a is not None
-    ni.machine.last_now = wall + 60
-    a = hv.snapshot_from_sources(src, R1, INC, safe_now=T0 + 700, wall_now=wall + 60)
+    assert b.radio_clients.known and b.wall_at == wall
+    # the incident clears by itself (Network Intelligence measured it), and
+    # has held 300 s; wall and safety time move alike (705 s each), the
+    # last poll 5 s before the after-snapshot
+    wall_a = wall + 705
+    ni.incidents = [
+        inc(status="resolved", resolve_reason="cleared", resolved_at=wall_a - 300)
+    ]
+    a = hv.snapshot_from_sources(src, R1, INC, safe_now=T0 + 700, wall_now=wall_a)
+    assert a is not None and a.management_path.reason == "poll_stale"
+    coordinator.data.last_seen = datetime.fromtimestamp(wall_a - 5, UTC)
+    ni.machine.last_now = wall_a
+    a = hv.snapshot_from_sources(src, R1, INC, safe_now=T0 + 700, wall_now=wall_a)
     assert a is not None and a.incident_status.value == "resolved"
+    assert a.management_path.age_s == pytest.approx(5.0)
     r = hv.verify(
         action_id=ACT,
         action_type="observe.evaluate",
@@ -2354,3 +2753,481 @@ async def test_the_builder_makes_zero_router_calls() -> None:
     assert calls == recorded
     coordinator.async_request_refresh.assert_not_awaited()
     coordinator.async_refresh.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Review of PR #83: one test per item (each fails on 6d6e277)
+# ---------------------------------------------------------------------------
+
+_GREEN_CLIENTS = GREEN_AFTER["clients"]
+
+
+def test_p1_1_after_facts_measured_before_the_settle_time_are_unknown() -> None:
+    """A fresh after-snapshot of old data is old data (probe A)."""
+    old = snap(aged(GREEN_AFTER, 900.0), at=AFTER_AT)
+    r = run("observe.evaluate", call=None, a=old)
+    assert r.result is VR.UNKNOWN and r.credited_to_action is False
+    assert r.criterion("management_path").reason == "management_path_stale_after"
+    # boundary: measured exactly at the end of the settle time counts
+    r = run(a=after(clients=k(_GREEN_CLIENTS, 100.0)))
+    assert r.result is VR.RESOLVED
+    r = run(a=after(clients=k(_GREEN_CLIENTS, 100.001)))
+    assert r.result is VR.UNKNOWN
+    assert r.reasons == ("clients_within_tolerance.unknown",)
+    assert r.criterion("clients_within_tolerance").reason == "clients_stale_after"
+    # an unknown or negative age is never a measuring time
+    for age in (None, -1.0):
+        r = run(a=after(clients=k(_GREEN_CLIENTS, age)))
+        assert r.result is VR.UNKNOWN, age
+
+
+def test_p1_1_before_facts_must_be_measured_in_the_300_s_before_the_start() -> None:
+    # before at T0 - 10: an age of 290 s is measured at T0 - 300
+    assert run(b=before(clients=k(10, 290.0))).result is VR.RESOLVED
+    r = run(b=before(clients=k(10, 290.001)))
+    assert r.result is VR.UNKNOWN
+    assert r.criterion("clients_within_tolerance").reason == "clients_stale_before"
+    r = run(b=before(clients=k(10, None)))
+    assert r.criterion("clients_within_tolerance").reason == "clients_stale_before"
+    # a before-snapshot taken after the start is refused by the gate; the
+    # rows it shows are not measured before the start either
+    r = run(b=before(at=T0 + 5))
+    assert r.reasons == ("before_snapshot_after_start",)
+    assert r.criterion("clients_within_tolerance").reason == "clients_stale_before"
+    r = run(b=before(at=T0 + 5, clients=k(10, 5.0)))
+    assert r.criterion("clients_within_tolerance").comparison is C.HELD
+    # the age rule reaches the incident too
+    r = run(b=before(incident_status=k("active", 400.0)))
+    assert r.criterion("incident_cleared").reason == "incident_status_stale_before"
+    assert r.result is VR.UNKNOWN
+
+
+def test_p1_1_services_carried_forward_by_the_coordinator_are_unknown() -> None:
+    """When ``service list`` fails, the coordinator copies the last poll's
+    services forward (``service_instances`` stays None): never measured."""
+    s = build(fake_coordinator(service_instances=None))
+    assert s.services.value is None
+    assert s.services.reason == "services_freshness_unknown"
+    assert s.service_pids.reason == "service_instances_not_fetched"
+    # the same services with this poll's instances are measured
+    assert build(fake_coordinator()).services.known
+
+
+def test_p1_1_a_failed_poll_is_measured_only_with_its_start() -> None:
+    coord = fake_coordinator()
+    coord.last_update_success = False
+    s = build(coord)
+    assert s.management_path.value is False and s.management_path.age_s is None
+    coord._failure_since = datetime.fromtimestamp(W0 - 120, UTC)
+    s = build(coord)
+    assert s.management_path.value is False
+    assert s.management_path.age_s == pytest.approx(120.0)
+    # a failed poll of unknown start is not a fresh, measured loss
+    r = run(a=after(at=T0 + 300, management_path=k(False, None)), now=T0 + 300)
+    assert r.result is VR.UNKNOWN and r.escalate is False
+    # SSH fallback (300 s interval), poll 590 s old: known, but too old
+    coord = fake_coordinator(last_seen=W0 - 590)
+    coord.update_interval = SimpleNamespace(total_seconds=lambda: 300.0)
+    s = build(coord, FakeNI([inc()]), safe=BEFORE_AT)
+    assert s.management_path.value is True and s.management_path.age_s == 590.0
+    r = run(b=dataclasses.replace(before(), management_path=s.management_path))
+    assert r.criterion("management_path").reason == "management_path_stale_before"
+
+
+def test_p2_3_the_clearing_must_hold_300_s() -> None:
+    r = run(a=after(incident_resolved_age_s=299.999))
+    assert r.result is VR.UNKNOWN and r.final is False
+    assert r.criterion("incident_cleared").reason == "clearing_not_held_long_enough"
+    assert run(a=after(incident_resolved_age_s=300.0)).result is VR.RESOLVED
+    # held until Network Intelligence's last look, not until the snapshot
+    r = run(a=after(incident_status=k("resolved", 50.0), incident_resolved_age_s=349.0))
+    assert r.criterion("incident_cleared").reason == "clearing_not_held_long_enough"
+    r = run(a=after(incident_status=k("resolved", 50.0), incident_resolved_age_s=350.0))
+    assert r.result is VR.RESOLVED
+    # a reopen inside the hold is no success: the next look sees it open
+    r = run(
+        a=after(
+            incident_status="active",
+            incident_reopen_count=1,
+            incident_resolve_reason="open",
+            incident_resolved_age_s=u(),
+        )
+    )
+    assert (
+        r.result is VR.NOT_RESOLVED and r.reasons[0] == "incident_cleared.not_improved"
+    )
+    assert r.criterion("incident_cleared").reason == "incident_recurred"
+    # at the maximum wait a clearing that has not held is final, never good
+    r = run(
+        a=after(at=T0 + 3500, incident_resolved_age_s=200.0),
+        now=T0 + 3600,
+    )
+    assert r.result is VR.UNKNOWN and r.final is True
+    assert r.verdict_key == "cannot_tell"
+
+
+def test_p2_5_a_wall_clock_jump_between_the_snapshots_is_unknown() -> None:
+    for wall, result, reason in (
+        (WALL0 + AFTER_AT + 1.0, VR.RESOLVED, "incident_cleared_measured"),
+        (WALL0 + AFTER_AT - 1.0, VR.RESOLVED, "incident_cleared_measured"),
+        (WALL0 + AFTER_AT + 1.001, VR.UNKNOWN, "wall_clock_jump"),
+        (WALL0 + AFTER_AT - 1.001, VR.UNKNOWN, "wall_clock_jump"),
+        (WALL0 + AFTER_AT + 86_400, VR.UNKNOWN, "wall_clock_jump"),
+        (None, VR.UNKNOWN, "wall_time_unknown"),
+    ):
+        r = run(a=after(wall=wall))
+        assert (r.result, r.criterion("incident_cleared").reason) == (
+            result,
+            reason,
+        ), wall
+    r = run(b=before(wall=None))
+    assert r.criterion("incident_cleared").reason == "wall_time_unknown"
+    # the builder keeps the wall time it was given
+    assert build(fake_coordinator(), FakeNI([inc()]), wall=W0 + 7).wall_at == W0 + 7
+    assert after(wall=WALL0).to_dict()["wall_at"] == WALL0
+
+
+def test_p2_6_clients_are_judged_per_radio() -> None:
+    # 10 -> 8 in total is within tolerance, but phy0 lost 3 of 4
+    r = run(a=after(clients=8, radio_clients=(("phy0-ap0", 1), ("phy1-ap0", 7))))
+    assert r.criterion("clients_within_tolerance").comparison is C.HELD
+    assert r.result is VR.NEW_FAULT
+    assert r.reasons == ("radio_clients_within_tolerance.worse",)
+    c = r.criterion("radio_clients_within_tolerance")
+    assert (c.reason, c.before, c.after) == ("radio_clients_dropped", 2, 1)
+    # a radio gone after has 0 clients
+    r = run(a=after(radio_clients=(("phy1-ap0", 10),)))
+    assert r.criterion("radio_clients_within_tolerance").comparison is C.WORSE
+    # one client less on a small radio is held, a new radio is more
+    r = run(a=after(radio_clients=(("phy0-ap0", 3), ("phy1-ap0", 6))))
+    assert r.criterion("radio_clients_within_tolerance").comparison is C.HELD
+    r = run(a=after(radio_clients=(("phy0-ap0", 4), ("phy1-ap0", 6), ("phy2-ap0", 1))))
+    assert r.criterion("radio_clients_within_tolerance").comparison is C.IMPROVED
+    # counts only, never radio names in the result
+    assert "phy0" not in repr(r.to_dict())
+    # the builder counts the clients per AP interface
+    s = build(
+        fake_coordinator(
+            clients=[
+                {"mac": "02:00:00:00:0a:01", "radio": "phy0-ap0"},
+                {"mac": "02:00:00:00:0a:02", "radio": "phy0-ap0"},
+                {"mac": "02:00:00:00:0a:03", "radio": "phy1-ap0"},
+            ]
+        )
+    )
+    assert s.radio_clients.value == (("phy0-ap0", 2), ("phy1-ap0", 1))
+    assert build(fake_coordinator(clients=[])).radio_clients.value == ()
+    assert build(fake_coordinator(clients=None)).radio_clients.reason == (
+        "clients_unknown"
+    )
+
+
+_END = {
+    # verdict -> (state, counts_as_failure, credited, hold) after a call
+    "repaired_by_action": (hm.ActionState.RESOLVED, False, True, False),
+    "repaired_execution_unconfirmed": (
+        hm.ActionState.MANUAL_RECOVERY_REQUIRED,
+        True,
+        False,
+        False,
+    ),
+    "partially_repaired": (hm.ActionState.FAILED, True, False, False),
+    "action_did_not_help": (hm.ActionState.FAILED, True, False, False),
+    "cleared_by_itself": (hm.ActionState.FAILED, True, False, False),
+    "not_cleared": (hm.ActionState.FAILED, True, False, False),
+    "worse_after_action": (hm.ActionState.ESCALATED, True, False, True),
+    "worse_without_action": (hm.ActionState.ESCALATED, True, False, True),
+    "cannot_tell": (hm.ActionState.MANUAL_RECOVERY_REQUIRED, True, False, False),
+}
+
+
+def _final_results() -> dict[tuple[str, bool], hv.VerifyResult]:
+    """One final result per (verdict key, executed) the inputs can give."""
+    rng = random.Random(84)
+    out: dict[tuple[str, bool], hv.VerifyResult] = {}
+    for _ in range(4000):
+        action = rng.choice(ACTIONS_LITERAL)
+        call = not_run(
+            action,
+            rng.choice(
+                [None, CallResult.OK, CallResult.INCONCLUSIVE, CallResult.REJECTED]
+            ),
+        )
+        b, a, _ = _random_pair(rng, 0.15)
+        a = dataclasses.replace(a, taken_at=T0 + 3500, wall_at=WALL0 + T0 + 3500)
+        r = run(action, call=call, b=b, a=a, now=T0 + 3600)
+        assert r.final is True
+        out.setdefault((r.verdict_key, r.executed), r)
+    late = {"a": after(at=T0 + 3500, wall=WALL0 + T0 + 3500), "now": T0 + 3600}
+    for call in (CallResult.OK, CallResult.INCONCLUSIVE):
+        r = run(call=call, **late)
+        out.setdefault((r.verdict_key, r.executed), r)
+    return out
+
+
+def test_p2_4_the_end_state_goes_by_verdict_key_and_the_real_table() -> None:
+    assert set(hv._AFTER_CALL) == hv.VERDICT_KEYS == set(_END)
+    results = _final_results()
+    assert {key for key, _ in results} == hv.VERDICT_KEYS
+    for (key, executed), r in results.items():
+        for interrupted in (False, True):
+            end = hv.planned_end(
+                r, from_state=hm.ActionState.VERIFYING, interrupted=interrupted
+            )
+            state, failure, credited, hold = _END[key]
+            if interrupted and state is hm.ActionState.FAILED:
+                state = hm.ActionState.MANUAL_RECOVERY_REQUIRED
+            assert (end.state, end.counts_as_failure, end.credited, end.hold) == (
+                state,
+                failure,
+                credited,
+                hold,
+            ), key
+            # the move exists in heal_model's table, for the engine
+            rule = hm.TRANSITIONS[(hm.ActionState.VERIFYING, end.state)]
+            assert hm.Actor.ENGINE in rule.actors
+            if hm.Precondition.NOT_INTERRUPTED in rule.requires:
+                assert interrupted is False
+            assert end.credited is (key == "repaired_by_action")
+            # from a proposal (Observe): only when nothing was executed
+            if executed:
+                with pytest.raises(hv.VerifyError):
+                    hv.planned_end(
+                        r, from_state=hm.ActionState.PROPOSED, interrupted=interrupted
+                    )
+                continue
+            end = hv.planned_end(
+                r, from_state=hm.ActionState.PROPOSED, interrupted=interrupted
+            )
+            if key == "cleared_by_itself":
+                assert end == hv.PlannedEnd(
+                    state=hm.ActionState.CANCELLED,
+                    counts_as_failure=False,
+                    credited=False,
+                    hold=False,
+                )
+                assert hm.can_transition(
+                    hm.ActionState.PROPOSED, end.state, hm.Actor.ENGINE
+                )
+            elif key == "worse_without_action":
+                # the engine may not escalate a proposal: hold, no move
+                assert not hm.can_transition(
+                    hm.ActionState.PROPOSED, hm.ActionState.ESCALATED, hm.Actor.ENGINE
+                )
+                assert end == hv.PlannedEnd(
+                    state=None, counts_as_failure=False, credited=False, hold=True
+                )
+            else:
+                assert end is None, key
+
+
+def test_p2_4_planned_end_refuses_what_it_cannot_judge() -> None:
+    r = run(a=after(at=T0 + 300), now=T0 + 300)
+    assert r.final is False
+    assert (
+        hv.planned_end(r, from_state=hm.ActionState.VERIFYING, interrupted=False)
+        is None
+    )
+    good = run()
+    for state in hm.ActionState:
+        if state in (hm.ActionState.VERIFYING, hm.ActionState.PROPOSED):
+            continue
+        with pytest.raises(hv.VerifyError):
+            hv.planned_end(good, from_state=state, interrupted=False)
+    for bad in ({"from_state": "verifying"}, {"interrupted": 0}):
+        args = {"from_state": hm.ActionState.VERIFYING, "interrupted": False, **bad}
+        with pytest.raises(hv.VerifyError):
+            hv.planned_end(good, **args)
+    forged = run()
+    object.__setattr__(forged, "verdict_key", "repaired_by_action")
+    object.__setattr__(forged, "result", VR.RESOLVED)
+    object.__setattr__(forged, "reasons", ("x",))
+    with pytest.raises(hv.VerifyError):
+        hv.planned_end(forged, from_state=hm.ActionState.VERIFYING, interrupted=False)
+    with pytest.raises(hv.VerifyError):
+        hv.planned_end(
+            good.to_dict(), from_state=hm.ActionState.VERIFYING, interrupted=False
+        )
+
+
+# P3-8: one boundary test for each survivor of the reviewer's mutation run
+
+
+def test_p3_8_t2_a_target_missing_after_has_stopped() -> None:
+    r = run(a=after(services=(("dropbear", True), ("firewall", False))))
+    assert r.criterion("service_running").comparison is C.WORSE
+    assert r.criterion("service_running").reason == "service_stopped"
+    r = run("interface.cycle", a=after(interfaces=(("lan", True),)))
+    assert r.criterion("interface_up").comparison is C.WORSE
+
+
+def test_p3_8_r1_an_overlapping_pid_is_not_a_restart() -> None:
+    a = after(service_pids=(("dnsmasq", 100), ("dnsmasq", 300), ("dropbear", 1)))
+    r = run(a=a)
+    c = r.criterion("service_restarted")
+    assert (c.comparison, c.reason) == (C.NOT_IMPROVED, "restart_not_seen")
+    assert r.result is VR.UNKNOWN and r.credited_to_action is False
+
+
+def test_p3_8_r3_r4_uptime_boundaries() -> None:
+    # equal uptime: no reboot seen, for a planned reboot either
+    r = run("router.reboot", a=after(uptime_s=5000))
+    c = r.criterion("router_rebooted")
+    assert (c.comparison, c.reason) == (C.NOT_IMPROVED, "uptime_not_reset")
+    assert run("router.reboot", a=after(uptime_s=4999)).result is VR.RESOLVED
+    # one second less uptime: an unplanned reboot
+    r = run(a=after(uptime_s=4999))
+    assert r.result is VR.NEW_FAULT
+    assert r.reasons == ("no_unplanned_reboot.worse",)
+    assert run(a=after(uptime_s=5000)).result is VR.RESOLVED
+
+
+def test_p3_8_x3_an_interface_cycle_not_executed_excludes_nothing() -> None:
+    down = after(interfaces=(("lan", False), ("wan", True)))
+    for call in (CallResult.REJECTED, CallResult.OK):
+        r = run("interface.cycle", call=call, a=down)
+        assert r.criterion("interfaces_still_up").comparison is C.WORSE, call
+        assert r.result is VR.NEW_FAULT
+    # executed: only its own target is left to the target criterion
+    r = run("interface.cycle", a=after(interfaces=(("lan", True), ("wan", False))))
+    assert r.criterion("interfaces_still_up").comparison is C.HELD
+    assert r.criterion("interface_up").comparison is C.WORSE
+    # not executed: the target counts like any other interface
+    r = run(
+        "interface.cycle",
+        call=CallResult.REJECTED,
+        a=after(interfaces=(("lan", True), ("wan", False))),
+    )
+    assert r.criterion("interfaces_still_up").comparison is C.WORSE
+
+
+def test_p3_8_u1_s8_result_type_and_log_error() -> None:
+    r = run()
+    object.__setattr__(r, "result", "resolved")
+    assert _binding_of(r) is hv.Binding.TAMPERED
+    s = build(fake_coordinator(log_status="error"))
+    assert s.log_ok.value is False
+    r = run(a=after(incident_resolve_reason="quiet", log_ok=False))
+    assert r.criterion("incident_cleared").reason == "quiet_without_log_coverage"
+    assert r.result is VR.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("name", "forge"),
+    [
+        ("final", int),
+        ("escalate", int),
+        ("executed", int),
+        ("credited_to_action", int),
+        ("attribution", str),
+        ("result", str),
+        ("settle_until", int),
+        ("max_wait_until", int),
+        ("verdict_key", _StrSub),
+        ("binding", _StrSub),
+        ("router_id", _StrSub),
+        ("incident_id", _StrSub),
+        ("reasons", list),
+    ],
+)
+def test_p3_9_derived_fields_must_have_their_exact_type(name: str, forge: Any) -> None:
+    r = run()
+    forged = forge(getattr(r, name))
+    assert type(forged) is not type(getattr(r, name))
+    assert getattr(r, name) == forged or name == "reasons"  # equal: only the type
+    object.__setattr__(r, name, forged)
+    assert _binding_of(r) is hv.Binding.TAMPERED
+
+
+def test_p3_9_parts_of_the_derived_tuples_have_their_exact_type() -> None:
+    r = run()
+    c = r.criteria[0]
+    odd = dataclasses.replace(c)
+    object.__setattr__(odd, "comparison", "improved")
+    assert odd == c
+    object.__setattr__(r, "criteria", (odd, *r.criteria[1:]))
+    assert _binding_of(r) is hv.Binding.TAMPERED
+    r = run()
+    object.__setattr__(r, "reasons", tuple(_StrSub(x) for x in r.reasons))
+    assert _binding_of(r) is hv.Binding.TAMPERED
+
+    # a criterion subclass that claims to equal anything
+    class _Agreeable(hv.Criterion):
+        __slots__ = ()
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        __hash__ = hv.Criterion.__hash__
+
+    r = run()
+    c = r.criteria[0]
+    sneaky = _Agreeable(**{f.name: getattr(c, f.name) for f in dataclasses.fields(c)})
+    assert (sneaky,) == (c,)
+    object.__setattr__(r, "criteria", (sneaky, *r.criteria[1:]))
+    assert _binding_of(r) is hv.Binding.TAMPERED
+    r = run()
+    object.__setattr__(r, "criteria", list(r.criteria))
+    assert _binding_of(r) is hv.Binding.TAMPERED
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"management_path": False},
+        {"wan": "down"},
+        {"dependants_degraded": 1},
+        {"other_incidents": ("inc-3",)},
+    ],
+)
+def test_p3_10_a_guard_bad_on_both_sides_never_resolves(bad: dict) -> None:
+    """DECIDED: an executed write -> not resolved; nothing written ->
+    unknown (it cannot be told whether the router is well)."""
+    b, a = before(**bad), after(**bad)
+    r = run(b=b, a=a)
+    assert r.result is VR.NOT_RESOLVED and r.verdict_key == "action_did_not_help"
+    assert r.reasons[0] == "incident_cleared.improved"
+    for action, call in (
+        ("service.restart", CallResult.REJECTED),
+        ("observe.evaluate", None),
+    ):
+        r = run(action, call=call, b=b, a=a)
+        assert r.result is VR.UNKNOWN and r.credited_to_action is False
+        assert r.verdict_key == "cannot_tell"
+    # bad before, well after: the guard improved, that is fine
+    assert run(b=b).result is VR.RESOLVED
+
+
+def test_p3_10_acknowledged_incidents_are_still_open() -> None:
+    ni = FakeNI(
+        [
+            inc(),
+            inc("inc-9", status="acknowledged", routers=("e1",), severity="critical"),
+            inc("inc-11", status="acknowledged", routers=("e2",)),
+        ]
+    )
+    s = build(fake_coordinator(), ni)
+    assert s.other_incidents.value == ("inc-9",)
+    assert s.dependants_degraded.value == 1
+
+
+@pytest.mark.parametrize("action", WRITES_LITERAL)
+def test_p3_10_no_call_result_on_a_write_is_refused(action: str) -> None:
+    with pytest.raises(hv.VerifyError):
+        run(action, call=None)
+    r = run(action, call=CallResult.REJECTED)
+    object.__setattr__(r, "call_result", None)
+    assert r._untampered() is False
+    # a read-only action may have no call at all
+    assert run("diag.refresh", call=None).verdict_key == "cleared_by_itself"
+
+
+def test_p3_10_the_stored_form_is_to_dict_and_plain_json() -> None:
+    import json
+
+    r = run()
+    d = r.to_dict()
+    assert json.loads(json.dumps(d)) == d
+    assert all(
+        type(v) in (str, int, float, bool, list, dict, type(None)) for v in d.values()
+    )
