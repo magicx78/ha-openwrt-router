@@ -310,10 +310,30 @@ keine Datei, keine ACL-Änderung. Entwicklerdoku: `docs/self-healing.md`, Abschn
 - Heute besteht keine schreibende Aktion die Prüfungen: die Rechte für `rc/init` sind nicht
   geprüft (ohne Root-Anmeldung fehlen sie), `odhcpd` wird nicht gepollt, alles außer
   `service.restart` ist im Katalog gesperrt, eine Sicherung ist ohne Ausführer nicht
-  wiederherstellbar.
-- Tests: `tests/test_heal_preflight_v1530.py` (188), darunter die Auftragstests 8, 9, 26 und 27
+  wiederherstellbar, und ob die gespeicherte Konfiguration eines Dienstes schon läuft, ist
+  noch nicht bekannt.
+- Tests: `tests/test_heal_preflight_v1530.py` (238), darunter die Auftragstests 8, 9, 26 und 27
   und ein Test, dass der Sammler keinen Router-Aufruf macht (aufgezeichnete Aufrufliste von
   `full_router_kit`). Mutationsprüfung: siehe Entwicklerdoku, Abschnitt 17.
+
+#### Nach dem Review von PR #80
+
+- Eine Freigabe zählt nur noch auf einem Datensatz, der freigegeben ist und auf die Ausführung
+  wartet; auf einem Vorschlag, einem abgebrochenen oder einem beendeten Datensatz nicht.
+- Eine zurückgestellte Uhr (die Uhr steht hinter der höchsten je gesehenen Zeit) lässt keine
+  abgelaufene Freigabe wieder gelten und keinen alten Poll frisch aussehen.
+- Grenzen, die nachträglich verändert wurden (auch die gemeinsamen Standardwerte), und
+  erzwungene Felder „jetzt ausführbar“ / „in diesem Release“ werden als Fälschung erkannt.
+  Die Entwicklerdoku sagt jetzt offen, was diese Erkennung nicht kann (sie hat kein Geheimnis)
+  und was das anbindende Paket deshalb selbst tun muss.
+- Der Sammler bricht nie mehr wegen ungewöhnlicher Daten ab (Wartungsfenster mit Großbuchstaben
+  oder Adressform, fehlende Methoden, ein fehlerhafter Topologie-Lauf, Prüfstatus mit
+  Leerzeichen); was er nicht lesen kann, ist „unbekannt“ mit Grund.
+- Ein Dienst-Neustart besteht Management-Weg und Wiederherstellung nicht mehr ohne Fakten; er
+  braucht die Angabe, dass die gespeicherte Konfiguration schon läuft (heute unbekannt, sperrt).
+- Nicht zutreffende Prüfungen werden nicht mehr als „bestanden“ gespeichert.
+- Flottenweite Security-Vorfälle zählen für jeden Router; neue Router mit DHCP-Lease und ein
+  geänderter Vorfall ändern den Fingerabdruck.
 
 ## [1.52.3] - 2026-11-27
 

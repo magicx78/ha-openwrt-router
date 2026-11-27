@@ -33,7 +33,9 @@ which runs the checks again. The action is validated against the closed
 catalog again (``heal_catalog.try_validate``). :meth:`PreflightResult.validity`
 recomputes everything from the stored facts before it says ``valid``, so a
 derived field changed behind the frozen dataclass's back is caught
-(``tampered``).
+(``tampered``). There is no secret: only INCONSISTENT edits are caught; an
+edit of inputs and derived fields alike is not (docs §7.1, with the
+obligations of the package that wires this in, C2).
 
 **Binding.** A result is bound to (router id, action type, params) and to
 the safety-clock time of its facts (``heal_model.SafetyClock``); it is valid
@@ -70,6 +72,7 @@ from .core_models import (
     primary_identity_status,
 )
 from .heal_model import (
+    CLOCK_BACK_TOLERANCE_S,
     FLEET_CONCURRENCY_DEFAULT,
     LOCKING_STATES,
     PLANNING_STATES,
@@ -132,10 +135,22 @@ APPROVAL_TTL_MAX_S: Final = int(APPROVAL_TTL.total_seconds())
 
 # Actions that change the router's configuration: they need a captured
 # configuration and a validated backup, and their recovery is a restore.
-# DECIDED (E): only ``config.restore`` in catalog v1; a service restart
-# changes no configuration (it loads the saved one; package G blocks it
-# when the saved one differs: ``service_config_unapplied``).
+# DECIDED (E): only ``config.restore`` in catalog v1.
 CONFIG_CHANGING: Final = frozenset({"config.restore"})
+# Actions that APPLY the saved configuration of their component: a service
+# restart loads what is saved, so a saved change that is not running yet
+# would go live with it. ``config_captured`` asks for the fact
+# ``service_config_unapplied`` there (unknown until package G tracks the
+# drift: unknown blocks). DECIDED (E, review of PR #80): only
+# ``service.restart``; ``router.reboot`` applies all saved configuration too,
+# but it is blocked by ``no_recovery_mechanism`` in catalog v1.
+CONFIG_APPLYING: Final = frozenset({"service.restart"})
+
+# The one state a record is in when its execution starts (APPROVED ->
+# EXECUTING): an approval counts only on a record in that state.
+EXECUTION_START_STATE: Final = ActionState.APPROVED
+# incident families beyond this are clamped (``IncidentFacts`` bound)
+_FAMILIES_MAX: Final = 64
 
 # Core capabilities an action needs (``core_models.Capability`` values).
 # Writes go over ubus only (never SSH); a restore needs the provider.
@@ -222,6 +237,18 @@ def _check_text(value: str, what: str) -> str:
     if _IPV4_RE.search(value) or _MAC_RE.search(value) or "::" in value:
         raise _fail(what)
     return value
+
+
+def _readable_code(value: Any) -> bool:
+    """``value`` can be a code fact value (the collector's own check, so it
+    reports unknown instead of raising in ``Fact``)."""
+    return (
+        isinstance(value, str)
+        and _CODE_RE.fullmatch(value) is not None
+        and _IPV4_RE.search(value) is None
+        and _MAC_RE.search(value) is None
+        and "::" not in value
+    )
 
 
 def _plain_value(value: Any, what: str, depth: int = 0) -> Any:
@@ -336,6 +363,9 @@ class PreflightFacts:
     poll_ok: Fact = field(default_factory=_nc)
     poll_age_s: Fact = field(default_factory=_nc)
     poll_interval_s: Fact = field(default_factory=_nc)
+    # the wall clock is behind the highest wall time the store has seen
+    # (set back): wall-clock ages and the approval expiry cannot be trusted
+    wall_clock_behind: Fact = field(default_factory=_nc)
     # Unified Router Identity (core registry)
     record_active: Fact = field(default_factory=_nc)
     identity_status: Fact = field(default_factory=_nc)
@@ -374,6 +404,9 @@ class PreflightFacts:
     wireless_uplink: Fact = field(default_factory=_nc)
     # components in the last poll: ((name, running, enabled), ...)
     services: Fact = field(default_factory=_nc)
+    # the saved configuration of the action's service differs from the
+    # running one (package G tracks the drift; unknown until then)
+    service_config_unapplied: Fact = field(default_factory=_nc)
     radios: Fact = field(default_factory=_nc)
     interfaces: Fact = field(default_factory=_nc)
     # impact counts (lower bounds where noted)
@@ -384,8 +417,10 @@ class PreflightFacts:
     # has_checksum), ...), newest first
     backups: Fact = field(default_factory=_nc)
     diag_enabled: Fact = field(default_factory=_nc)
-    # the root incident (only for the policy facts, no check reads them)
+    # the root incident (only for the policy facts, no check reads them;
+    # its type, status, severity and cause enter the fingerprint)
     incident_type: Fact = field(default_factory=_nc)
+    incident_status: Fact = field(default_factory=_nc)
     incident_severity: Fact = field(default_factory=_nc)
     incident_confidence: Fact = field(default_factory=_nc)
     incident_is_root: Fact = field(default_factory=_nc)
@@ -436,6 +471,7 @@ _SHAPES: Final[Mapping[str, str]] = MappingProxyType(
         "poll_ok": _BOOL,
         "poll_age_s": _NUM,
         "poll_interval_s": _NUM,
+        "wall_clock_behind": _BOOL,
         "record_active": _BOOL,
         "identity_status": _CODE,
         "identity_bindings": _COUNT,
@@ -465,6 +501,7 @@ _SHAPES: Final[Mapping[str, str]] = MappingProxyType(
         "upstream_hops": _COUNT,
         "wireless_uplink": _BOOL,
         "services": _SERVICES,
+        "service_config_unapplied": _BOOL,
         "radios": _CODES,
         "interfaces": _CODES,
         "clients_on_router": _COUNT,
@@ -473,6 +510,7 @@ _SHAPES: Final[Mapping[str, str]] = MappingProxyType(
         "backups": _BACKUPS,
         "diag_enabled": _BOOL,
         "incident_type": _CODE,
+        "incident_status": _CODE,
         "incident_severity": _CODE,
         "incident_confidence": _NUM,
         "incident_is_root": _BOOL,
@@ -484,24 +522,23 @@ _SHAPES: Final[Mapping[str, str]] = MappingProxyType(
 )
 
 # Facts that change all the time; the fingerprint takes the derived
-# threshold flags instead (``_fingerprint_view``).
+# threshold flags instead (``_fingerprint_view``: poll freshness, which also
+# reads ``wall_clock_behind``, memory, CPU, recent reboot). The routers
+# holding a lease (``lease_routers``) and the incident's type, status,
+# severity and cause DO enter it (review of PR #80): a new dependant router
+# or a resolved incident is another state than the one approved.
 VOLATILE_FACTS: Final = frozenset(
     {
         "poll_age_s",
         "poll_interval_s",
+        "wall_clock_behind",
         "memory_pressure_pct",
         "memory_available_bytes",
         "cpu_load_pct",
         "uptime_s",
         "clients_on_router",
-        "lease_routers",
         "lease_clients",
-        "incident_type",
-        "incident_severity",
         "incident_confidence",
-        "incident_is_root",
-        "incident_cause_status",
-        "incident_cause_level",
         "incident_families",
         "incident_fresh",
     }
@@ -576,17 +613,39 @@ class PreflightLimits:
 
     def __post_init__(self) -> None:
         """Validate against the bounds."""
-        for name, (lo, hi) in (
-            ("valid_for_s", VALID_FOR_BOUNDS_S),
-            ("recent_reboot_s", RECENT_REBOOT_BOUNDS_S),
+        problem = _limits_problem(self, shared=False)
+        if problem is not None:
+            raise _fail(f"limits.{problem}")
+
+
+def _limits_problem(limits: Any, *, shared: bool = True) -> str | None:
+    """The first field of ``limits`` outside its bounds (None: all sound).
+
+    Run again by every :class:`PreflightResult` and by its tamper check,
+    because a frozen dataclass can still be changed behind its back.
+    ``shared``: also hold the module's default instance to the defaults."""
+    for name, (lo, hi) in (
+        ("valid_for_s", VALID_FOR_BOUNDS_S),
+        ("recent_reboot_s", RECENT_REBOOT_BOUNDS_S),
+    ):
+        value = getattr(limits, name, None)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not lo <= value <= hi
         ):
-            value = getattr(self, name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not lo <= value <= hi
-            ):
-                raise _fail(f"limits.{name}")
+            return name
+    if (
+        shared
+        and limits is DEFAULT_PREFLIGHT_LIMITS
+        and (
+            limits.valid_for_s != VALID_FOR_DEFAULT_S
+            or limits.recent_reboot_s != RECENT_REBOOT_DEFAULT_S
+        )
+    ):
+        # the shared default instance changed in place
+        return "default"
+    return None
 
 
 DEFAULT_PREFLIGHT_LIMITS: Final = PreflightLimits()
@@ -628,14 +687,15 @@ class CheckResult:
     def to_model(self) -> Check:
         """The model's ``Check`` (pass/fail/unknown).
 
-        DECIDED (E): ``heal_model.CheckOutcome`` has no ``not_applicable``;
-        such a check is stored as ``pass`` with reason ``not_applicable``
-        (it cannot block). The adapter package may add the member.
+        DECIDED (E, review of PR #80): ``heal_model.CheckOutcome`` has no
+        ``not_applicable`` and this package does not change the model, so a
+        not-applicable check has NO model form: it is never stored as a
+        pass. :meth:`PreflightResult.to_model_checks` leaves it out and
+        :attr:`PreflightResult.not_applicable` names it. Raises
+        :class:`PreflightError` for such a check.
         """
         if self.status is CheckStatus.NOT_APPLICABLE:
-            return Check(
-                check=self.check, outcome=CheckOutcome.PASS, reason="not_applicable"
-            )
+            raise PreflightError(f"{self.check} is not_applicable: no model outcome")
         return Check(
             check=self.check,
             outcome=CheckOutcome(self.status.value),
@@ -735,6 +795,13 @@ def _poll_fresh(f: PreflightFacts) -> tuple[bool | None, str]:
         return False, "last_poll_failed"
     if ok is None:
         return None, f.poll_ok.reason or "poll_unknown"
+    behind = f.wall_clock_behind.value
+    if behind is True:
+        # the age is wall time minus a wall stamp: with the wall clock set
+        # back, stale data would look fresh
+        return None, "wall_clock_set_back"
+    if behind is None:
+        return None, f.wall_clock_behind.reason or "wall_clock_unknown"
     age, interval = f.poll_age_s.value, f.poll_interval_s.value
     if age is None:
         return None, f.poll_age_s.reason or "poll_age_unknown"
@@ -747,7 +814,7 @@ def _poll_fresh(f: PreflightFacts) -> tuple[bool | None, str]:
     return True, "last_poll_ok"
 
 
-_POLL_FACTS: Final = ("poll_ok", "poll_age_s", "poll_interval_s")
+_POLL_FACTS: Final = ("poll_ok", "poll_age_s", "poll_interval_s", "wall_clock_behind")
 
 
 def _risk(ctx: _Ctx) -> RiskClass:
@@ -1037,12 +1104,23 @@ def _c_management_path(ctx: _Ctx) -> CheckResult:
         return _na(cid, "no_disruption")
     critical = e.writes
     t = _Tally()
-    if d is hc.Disruption.SERVICE:
-        # dnsmasq/odhcpd restart: no link, route or address goes away; the
-        # paths of HA and of the routers behind stay up (leases are kept)
-        return _res(cid, CheckStatus.PASS, critical, "service_restart_keeps_paths")
     t.use("dependants")
     deps = f.dependants.value
+    if d is hc.Disruption.SERVICE:
+        # dnsmasq/odhcpd restart: no link, route or address goes away; the
+        # paths of HA and of the routers behind stay up (leases are kept).
+        # That holds only for a path that is up now (a fresh poll) and a
+        # known tree behind the router (review of PR #80: never a pass on
+        # nothing).
+        fresh, reason = _poll_fresh(f)
+        t.use(*_POLL_FACTS)
+        if fresh is False:
+            t.fail("router_unreachable")
+        elif fresh is None:
+            t.unk(reason)
+        if deps is None:
+            t.unk(f.dependants.reason or "topology_unknown")
+        return t.result(cid, critical, "service_restart_keeps_paths")
     if d is hc.Disruption.ROUTER:
         t.fail("cuts_own_management_path")
         if deps is None:
@@ -1155,6 +1233,18 @@ def _backup_rows(f: PreflightFacts) -> list[tuple[Any, ...]] | None:
 def _c_config_captured(ctx: _Ctx) -> CheckResult:
     cid = "config_captured"
     e, f = ctx.entry, ctx.f
+    if e is not None and e.action_type in CONFIG_APPLYING:
+        # the restart puts the saved configuration live: it must be the
+        # running one (review of PR #80; the preflight does not lean on
+        # the policy for this)
+        t = _Tally()
+        t.use("service_config_unapplied")
+        drift = f.service_config_unapplied.value
+        if drift is True:
+            t.fail("saved_config_not_running")
+        elif drift is None:
+            t.unk(f.service_config_unapplied.reason or "config_drift_unknown")
+        return t.result(cid, True, "saved_config_is_running")
     if e is not None and e.action_type not in CONFIG_CHANGING:
         return _na(cid, "action_changes_no_config")
     t = _Tally()
@@ -1252,10 +1342,20 @@ def _c_recovery_path_checked(ctx: _Ctx, mgmt: CheckResult) -> CheckResult:
         return _res(cid, status, True, "second_call_needs_path", used, (statement,))
     # a service restart: no rollback; the honest statement is manual
     # recovery if the service does not come back (accepted for Risk 2 with
-    # an approval, catalog v1)
-    return _res(
-        cid, CheckStatus.PASS, True, "manual_recovery_statement", (), (statement,)
+    # an approval, catalog v1). DECIDED (review of PR #80): that is a pass
+    # only while the management path itself passed (someone can still get
+    # in) AND a person approves; otherwise unknown.
+    used = mgmt.facts_used
+    if mgmt.status is CheckStatus.PASS and _needs_approval(ctx):
+        return _res(
+            cid, CheckStatus.PASS, True, "manual_recovery_statement", used, (statement,)
+        )
+    reason = (
+        "manual_recovery_needs_approval"
+        if mgmt.status is CheckStatus.PASS
+        else "manual_recovery_needs_path"
     )
+    return _res(cid, CheckStatus.UNKNOWN, True, reason, used, (statement,))
 
 
 def _needs_approval(ctx: _Ctx) -> bool:
@@ -1281,20 +1381,27 @@ def _c_approval_valid(ctx: _Ctx) -> CheckResult:
     if not _needs_approval(ctx):
         return _na(cid, "no_approval_needed", ("run_path",))
 
-    def fail(code: str) -> CheckResult:
-        return _res(cid, CheckStatus.FAIL, True, code)
+    used = ("wall_clock_behind",)
 
+    def fail(code: str) -> CheckResult:
+        return _res(cid, CheckStatus.FAIL, True, code, used)
+
+    f = ctx.f
     rec = ctx.approval
     if rec is None:
         return fail("no_approval")
     va = ctx.va
     if (
         va is None
-        or rec.router_id != ctx.f.router_id
+        or rec.router_id != f.router_id
         or rec.action_type != va.action_type
         or dict(rec.params) != dict(va.params)
     ):
         return fail("approval_for_other_action")
+    if rec.state is not EXECUTION_START_STATE:
+        # proposed, waiting, cancelled, failed, resolved ...: an approval on
+        # such a record does not allow the execution to start
+        return fail("approval_record_state")
     ap = rec.approval
     if ap.status is not ApprovalStatus.APPROVED:
         if ap.status is ApprovalStatus.EXPIRED:
@@ -1308,12 +1415,38 @@ def _c_approval_valid(ctx: _Ctx) -> CheckResult:
         return fail("approval_bound_to_other_state")
     if ap.expires_at is None:
         return fail("approval_without_expiry")
-    left = ap.expires_at - ctx.f.wall_at
+    # The expiry is a wall time and the record carries no safety time of
+    # the decision (heal_model unchanged in E). So: no pass while the wall
+    # clock is behind the highest wall time seen (set back), nor before the
+    # decision itself; the remaining obligation is C2's (docs §7.1).
+    behind = f.wall_clock_behind.value
+    if behind is True:
+        return fail("wall_clock_set_back")
+    if behind is None:
+        return _res(
+            cid,
+            CheckStatus.UNKNOWN,
+            True,
+            f.wall_clock_behind.reason or "wall_clock_unknown",
+            used,
+        )
+    decided = _approved_at(rec)
+    if decided is None or f.wall_at < decided - CLOCK_BACK_TOLERANCE_S:
+        return fail("wall_clock_before_decision")
+    left = ap.expires_at - f.wall_at
     if left <= 0:
         return fail("approval_expired")
-    if left > APPROVAL_TTL_MAX_S:
+    if left > APPROVAL_TTL_MAX_S or ap.expires_at - decided > APPROVAL_TTL_MAX_S:
         return fail("approval_expiry_implausible")
-    return _res(cid, CheckStatus.PASS, True, "approval_bound_and_current")
+    return _res(cid, CheckStatus.PASS, True, "approval_bound_and_current", used)
+
+
+def _approved_at(rec: RemediationAction) -> float | None:
+    """Wall time of the record's last step into APPROVED (the decision)."""
+    for entry in reversed(rec.history):
+        if entry.to_state is ActionState.APPROVED:
+            return entry.ts
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1425,6 +1558,9 @@ class PreflightResult:
     catalog_refusal: str | None = field(init=False)
     in_release: bool = field(init=False)
     executable_now: bool = field(init=False)
+    # the validity span as validated at creation (the tamper check compares
+    # the stored limits and ``valid_until`` with it)
+    _valid_for_s: int = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate the inputs and derive everything (raises PreflightError)."""
@@ -1432,18 +1568,25 @@ class PreflightResult:
             raise _fail("facts")
         if type(self.limits) is not PreflightLimits:
             raise _fail("limits")
+        problem = _limits_problem(self.limits)
+        if problem is not None:
+            raise _fail(f"limits.{problem}")
         if self.approval is not None and type(self.approval) is not RemediationAction:
             raise _fail("approval")
+        set_ = object.__setattr__
+        # an own, re-validated copy: a later change of the caller's object
+        # does not reach this result
+        set_(self, "facts", replace(self.facts))
         params = _frozen_params(self.params)
-        object.__setattr__(self, "params", params)
+        set_(self, "params", params)
         checks, fingerprint, va, refusal = _derive(
             self.facts, self.action_type, params, self.approval, self.limits
         )
         blocking = tuple(c.check for c in checks if c.blocks)
-        set_ = object.__setattr__
+        set_(self, "_valid_for_s", self.limits.valid_for_s)
         set_(self, "router_id", self.facts.router_id)
         set_(self, "safe_at", self.facts.safe_at)
-        set_(self, "valid_until", self.facts.safe_at + self.limits.valid_for_s)
+        set_(self, "valid_until", self.facts.safe_at + self._valid_for_s)
         set_(self, "checks", checks)
         set_(self, "blocking", blocking)
         set_(self, "verdict", Verdict.BLOCKED if blocking else Verdict.CLEAR)
@@ -1465,24 +1608,52 @@ class PreflightResult:
                 return c
         raise KeyError(check_id)
 
+    @property
+    def not_applicable(self) -> tuple[str, ...]:
+        """Ids of the checks that do not apply to this action (they have no
+        model form and are not in :meth:`to_model_checks`)."""
+        return tuple(
+            c.check for c in self.checks if c.status is CheckStatus.NOT_APPLICABLE
+        )
+
     def _untampered(self) -> bool:
-        """The derived fields are what the stored inputs give again."""
+        """The derived fields are what the stored inputs give again.
+
+        What this can and cannot catch (docs §7.1): there is no secret, so
+        it catches INCONSISTENT edits only - a derived field that no longer
+        follows from the stored inputs, limits outside their bounds, the
+        shared default limits changed. An edit of the inputs together with
+        every derived field (e.g. ``facts.safe_at``, ``safe_at`` and
+        ``valid_until`` moved forward alike) is consistent and is not seen;
+        the caller (package C2) collects and runs again right before the
+        router call instead of trusting a stored result.
+        """
         try:
-            checks, fingerprint, _va, refusal = _derive(
+            if type(self.facts) is not PreflightFacts:
+                return False
+            if type(self.limits) is not PreflightLimits:
+                return False
+            if _limits_problem(self.limits) is not None:
+                return False
+            checks, fingerprint, va, refusal = _derive(
                 self.facts, self.action_type, self.params, self.approval, self.limits
             )
         except Exception:  # noqa: BLE001 - anything odd is tampering
             return False
         blocking = tuple(c.check for c in checks if c.blocks)
+        in_release = va is not None and va.action_type in hc.EXECUTABLE_IN_RELEASE
         return (
             checks == self.checks
             and fingerprint == self.fingerprint
             and refusal == self.catalog_refusal
             and blocking == self.blocking
             and self.verdict is (Verdict.BLOCKED if blocking else Verdict.CLEAR)
+            and self.in_release is in_release
+            and self.executable_now is (in_release and not blocking)
             and self.router_id == self.facts.router_id
             and self.safe_at == self.facts.safe_at
-            and self.valid_until == self.facts.safe_at + self.limits.valid_for_s
+            and self._valid_for_s == self.limits.valid_for_s
+            and self.valid_until == self.facts.safe_at + self._valid_for_s
         )
 
     def validity(
@@ -1517,8 +1688,15 @@ class PreflightResult:
         return Validity.VALID
 
     def to_model_checks(self) -> tuple[Check, ...]:
-        """The record's ``preflight`` list."""
-        return tuple(c.to_model() for c in self.checks)
+        """The record's ``preflight`` list: the checks that apply, in order.
+
+        A not-applicable check is left out (never stored as a pass; see
+        :meth:`CheckResult.to_model` and :attr:`not_applicable`)."""
+        return tuple(
+            c.to_model()
+            for c in self.checks
+            if c.status is not CheckStatus.NOT_APPLICABLE
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON form for a view: codes, counts and ids only."""
@@ -1531,6 +1709,7 @@ class PreflightResult:
             "verdict": self.verdict.value,
             "blocking": list(self.blocking),
             "checks": [c.to_dict() for c in self.checks],
+            "not_applicable": list(self.not_applicable),
             "fingerprint": self.fingerprint,
             "safe_at": self.safe_at,
             "valid_until": self.valid_until,
@@ -1662,7 +1841,10 @@ def risk_context_for(
         service_enabled=service_enabled,
         service_dependant_routers=lease_routers,
         service_dependant_clients=lease_clients,
-        service_config_unapplied=None,  # package G (drift of the service)
+        # package G tracks the drift; the collector reports it unknown
+        service_config_unapplied=f.service_config_unapplied.value
+        if e.disruption is hc.Disruption.SERVICE
+        else None,
         clients_on_router=polled(f.clients_on_router),
         clients_on_target=None,  # clients per radio are not mapped yet
         open_security_findings=f.security_findings.value,
@@ -1716,7 +1898,8 @@ def incident_facts_for(
         if status in CauseStatus._value2member_map_
         else CauseStatus.HYPOTHESIS,
         confidence=conf,
-        source_families=f.incident_families.value or 0,
+        # clamped to the model's bound instead of raising (review of PR #80)
+        source_families=min(f.incident_families.value or 0, _FAMILIES_MAX),
         is_root=f.incident_is_root.value,
         temporal_only=None,
         evidence_fresh=f.incident_fresh.value,
@@ -1807,7 +1990,7 @@ def _poll_facts(src: FactSources, wall: float) -> dict[str, Fact]:
     out: dict[str, Fact] = {}
     s = "coordinator"
     if coord is None:
-        for name in _POLL_FACTS:
+        for name in ("poll_ok", "poll_age_s", "poll_interval_s"):
             out[name] = unknown("router_not_loaded", s)
         return out
     ok = getattr(coord, "last_update_success", None)
@@ -1833,21 +2016,26 @@ def _poll_facts(src: FactSources, wall: float) -> dict[str, Fact]:
     return out
 
 
+def _clock_fact(store: Any, wall: float) -> Fact:
+    """Is the wall clock behind the highest wall time the store observed?
+
+    The store's safety clock keeps that mark (``SafetyClock.high``, never
+    lowered). A wall time below it means the clock was set back: every age
+    computed from wall stamps (the poll's ``last_seen``) and every wall
+    expiry (an approval's ``expires_at``) cannot be trusted then."""
+    s = "heal_store.loop.clock"
+    clock = getattr(getattr(store, "loop", None), "clock", None)
+    high = _num(getattr(clock, "high", None))
+    if high is None:
+        return unknown("safety_clock_unknown", s)
+    return known(wall < high - CLOCK_BACK_TOLERANCE_S, s, 0.0)
+
+
 def _router_state_facts(
     src: FactSources, fresh: bool | None, age: float | None, why: str
 ) -> dict[str, Fact]:
     """Facts from the last poll's data; unknown unless the poll is fresh."""
-    names = (
-        "memory_pressure_pct",
-        "memory_available_bytes",
-        "cpu_load_pct",
-        "uptime_s",
-        "services",
-        "radios",
-        "interfaces",
-        "clients_on_router",
-        "wireless_uplink",
-    )
+    names = _STATE_NAMES
     data = (
         getattr(src.coordinator, "data", None) if src.coordinator is not None else None
     )
@@ -1889,7 +2077,7 @@ def _router_state_facts(
             if not isinstance(svc, Mapping):
                 continue
             name = svc.get("name")
-            if not isinstance(name, str) or _CODE_RE.fullmatch(name) is None:
+            if not _readable_code(name):
                 continue
             enabled = svc.get("enabled")
             rows.append(
@@ -1908,9 +2096,7 @@ def _router_state_facts(
             {
                 r.get("phy")
                 for r in radios
-                if isinstance(r, Mapping)
-                and isinstance(r.get("phy"), str)
-                and _CODE_RE.fullmatch(r.get("phy"))
+                if isinstance(r, Mapping) and _readable_code(r.get("phy"))
             }
         )
         out["radios"] = known(tuple(names), f"{s}.wifi_radios.phy", age)
@@ -1922,9 +2108,7 @@ def _router_state_facts(
             {
                 i.get("logical_name")
                 for i in ifaces
-                if isinstance(i, Mapping)
-                and isinstance(i.get("logical_name"), str)
-                and _CODE_RE.fullmatch(i.get("logical_name"))
+                if isinstance(i, Mapping) and _readable_code(i.get("logical_name"))
             }
         )
         out["interfaces"] = known(tuple(names), f"{s}.network_interfaces", age)
@@ -1991,7 +2175,7 @@ def _registry_facts(src: FactSources, router_id: str) -> tuple[dict[str, Fact], 
         )
     out["identity_status"] = (
         known(status, f"{s}.identity")
-        if isinstance(status, str) and _CODE_RE.fullmatch(status)
+        if _readable_code(status)
         else unknown("identity_unknown", s)
     )
     role = _value_of(getattr(identity, "role", None))
@@ -2038,20 +2222,41 @@ def _rights_facts(src: FactSources) -> dict[str, Fact]:
             "acl_blocked": unknown("router_not_loaded", "api"),
         }
     out: dict[str, Fact] = {}
-    is_root, err = _safe_call(api.config_ssh_user_is_root, "api.login")
+    # the attribute lookup is inside the guarded call too (review of PR #80)
+    is_root, err = _safe_call(lambda: api.config_ssh_user_is_root(), "api.login")
     out["login_is_root"] = (
         known(is_root, "api.config_ssh_user_is_root")
         if isinstance(is_root, bool)
         else unknown(err or "login_unknown", "api")
     )
-    # the api's cache of methods rpcd denied in this session (memory)
-    blocked = getattr(api, "_acl_blocked", None)
-    if isinstance(blocked, set | frozenset):
-        hits = sorted(m for m in ACL_METHODS if tuple(m.split("/", 1)) in blocked)
-        out["acl_blocked"] = known(tuple(hits), "api.acl_blocked_cache")
-    else:
-        out["acl_blocked"] = unknown("acl_cache_unknown", "api")
+    # The api's cache of methods rpcd denied in this session (memory). api.py
+    # has no public accessor (only ``reset_acl_blocked``); the private set is
+    # read behind ``_safe_call`` and its shape is checked: a changed shape is
+    # unknown, never "nothing blocked". A later package adds the accessor.
+    hits, err = _safe_call(lambda: _acl_hits(api), "api.acl_blocked")
+    out["acl_blocked"] = (
+        known(hits, "api.acl_blocked_cache")
+        if isinstance(hits, tuple)
+        else unknown(err or hits or "acl_cache_unknown", "api")
+    )
     return out
+
+
+def _acl_hits(api: Any) -> tuple[str, ...] | str:
+    """The catalog's methods in the api's ACL-blocked cache, or the reason
+    code why it cannot be read (missing, or no longer the set of
+    (object, method) string tuples)."""
+    blocked = getattr(api, "_acl_blocked", None)
+    if not isinstance(blocked, set | frozenset):
+        return "acl_cache_unknown"
+    entries = tuple(blocked)
+    if not all(
+        isinstance(x, tuple) and x and all(isinstance(p, str) for p in x)
+        for x in entries
+    ):
+        return "acl_cache_shape_changed"
+    keys = set(entries)
+    return tuple(sorted(m for m in ACL_METHODS if tuple(m.split("/", 1)) in keys))
 
 
 def _store_facts(
@@ -2117,15 +2322,29 @@ def _store_facts(
         if not verdict.allowed and verdict.reason:
             blocks.append(f"{key[1]}|{key[2]}|{verdict.reason}")
     out["loop_blocks"] = known(tuple(blocks), f"{s}.loop", 0.0)
-    windows = sorted(
-        {
-            f"{w.scope.value}:{w.target}"
-            for w in store.maintenance
-            if w.router_id == router_id and w.active(wall, safe)
-        }
-    )
-    out["component_windows"] = known(tuple(windows), f"{s}.maintenance", 0.0)
+    out["component_windows"] = _window_fact(store, router_id, safe, wall)
     return out
+
+
+def _window_fact(store: Any, router_id: str, safe: float, wall: float) -> Fact:
+    """Active maintenance windows of the router as ``scope:target`` codes.
+
+    The model accepts targets a code cannot hold (upper case, ``@``, an
+    address shape). Such a row is skipped and the whole fact is unknown
+    (``window_target_unreadable``): the window might cover the action's
+    target, so "no window" would be a guess."""
+    s = "heal_store.maintenance"
+    rows: set[str] = set()
+    for w in store.maintenance:
+        if w.router_id != router_id or not w.active(wall, safe):
+            continue
+        text = f"{_value_of(w.scope)}:{w.target}"
+        if not _readable_code(text):
+            return unknown("window_target_unreadable", s)
+        rows.add(text)
+    if len(rows) > _TUPLE_MAX:
+        return unknown("too_many_windows", s)
+    return known(tuple(sorted(rows)), s, 0.0)
 
 
 def _run_path(store: Any, router_id: str) -> Fact:
@@ -2192,8 +2411,20 @@ def _ni_facts(
         ):
             out[n] = unknown(reason, f"{s}.topology")
         return out, None
-    behind = list(topo.behind(entry_id))
-    chain = list(topo.chain(entry_id))
+    # the tree walks are guarded too (review of PR #80): a walk that raises
+    # or yields something else than entry ids leaves the topology unknown
+    behind, err_b = _safe_call(lambda: _entry_ids(topo.behind(entry_id)), "ni.behind")
+    chain, err_c = _safe_call(lambda: _entry_ids(topo.chain(entry_id)), "ni.chain")
+    if behind is None or chain is None:
+        reason = err_b or err_c or "topology_unreadable"
+        for n in (
+            "dependants",
+            "upstream_hops",
+            "uplink_incidents",
+            "degraded_dependants",
+        ):
+            out[n] = unknown(reason, f"{s}.topology")
+        return out, None
     out["dependants"] = known(len(behind), f"{s}.topology", age)
     out["upstream_hops"] = known(len(chain), f"{s}.topology", age)
     incidents, err = _safe_call(lambda: list(ni.machine.peek()), "ni.incidents")
@@ -2227,6 +2458,12 @@ def _ni_facts(
     return out, related
 
 
+def _entry_ids(values: Any) -> list[str] | None:
+    """A topology walk as a list of entry ids (None: something else)."""
+    out = list(values)
+    return out if all(isinstance(v, str) for v in out) else None
+
+
 def _security_fact(src: FactSources, router_id: str) -> Fact:
     sc = src.security
     s = "security_center"
@@ -2240,11 +2477,13 @@ def _security_fact(src: FactSources, router_id: str) -> Fact:
     incidents = getattr(sc, "incidents", None)
     if not isinstance(incidents, Mapping):
         return unknown("findings_unknown", s)
+    # a fleet-wide incident (no router id) counts for every router (review
+    # of PR #80)
     n = sum(
         1
         for inc in incidents.values()
         if isinstance(inc, Mapping)
-        and inc.get("router_id") == router_id
+        and inc.get("router_id") in (router_id, None)
         and inc.get("status") in ("open", "confirmed")
     )
     return known(n, f"{s}.incidents")
@@ -2317,12 +2556,14 @@ def _backup_facts(src: FactSources, router_id: str) -> Fact:
         status = _value_of(getattr(r, "status", None))
         validation = _value_of(getattr(getattr(r, "validation", None), "status", None))
         sha = getattr(r, "sha256", None)
+        # a status that is no code (e.g. with a space) is "unknown", never
+        # a crash of the collector (review of PR #80)
         rows.append(
             (
                 bid,
                 int(created),
-                status if isinstance(status, str) else "unknown",
-                validation if isinstance(validation, str) else "unknown",
+                status if _readable_code(status) else "unknown",
+                validation if _readable_code(validation) else "unknown",
                 isinstance(sha, str) and len(sha) == 64,
             )
         )
@@ -2330,19 +2571,23 @@ def _backup_facts(src: FactSources, router_id: str) -> Fact:
     return known(tuple(rows[:_TUPLE_MAX]), f"{s}.records")
 
 
+_INCIDENT_NAMES: Final = (
+    "incident_type",
+    "incident_status",
+    "incident_severity",
+    "incident_confidence",
+    "incident_is_root",
+    "incident_cause_status",
+    "incident_cause_level",
+    "incident_families",
+    "incident_fresh",
+)
+
+
 def _incident_facts(
     src: FactSources, incident_id: str | None, interval: float | None
 ) -> dict[str, Fact]:
-    names = (
-        "incident_type",
-        "incident_severity",
-        "incident_confidence",
-        "incident_is_root",
-        "incident_cause_status",
-        "incident_cause_level",
-        "incident_families",
-        "incident_fresh",
-    )
+    names = _INCIDENT_NAMES
     s = "network_intelligence.incidents"
     if incident_id is None:
         return {n: unknown("no_incident", s) for n in names}
@@ -2358,9 +2603,11 @@ def _incident_facts(
     out: dict[str, Fact] = {}
     itype = getattr(inc, "type", None)
     out["incident_type"] = (
-        known(itype, s)
-        if isinstance(itype, str) and _CODE_RE.fullmatch(itype)
-        else unknown("type_unknown", s)
+        known(itype, s) if _readable_code(itype) else unknown("type_unknown", s)
+    )
+    istatus = _value_of(getattr(inc, "status", None))
+    out["incident_status"] = (
+        known(istatus, s) if _readable_code(istatus) else unknown("status_unknown", s)
     )
     sev = _value_of(getattr(inc, "severity", None))
     out["incident_severity"] = (
@@ -2407,6 +2654,62 @@ def _incident_facts(
     return out
 
 
+_STATE_NAMES: Final = (
+    "memory_pressure_pct",
+    "memory_available_bytes",
+    "cpu_load_pct",
+    "uptime_s",
+    "services",
+    "radios",
+    "interfaces",
+    "clients_on_router",
+    "wireless_uplink",
+)
+_STORE_NAMES: Final = (
+    "lock_holder",
+    "router_repairs",
+    "fleet_repairs",
+    "related_repairs",
+    "held",
+    "fleet_paused",
+    "loop_blocks",
+    "component_windows",
+)
+
+
+def _guard(
+    names: Iterable[str], source: str, func: Callable[[], tuple[Any, Any]]
+) -> tuple[dict[str, Fact], Any]:
+    """Run one part of the collector; if it raises, its facts are unknown
+    (``collector_error``) - the collector itself never raises on data."""
+    try:
+        out, extra = func()
+    except Exception as err:  # noqa: BLE001 - a broken source is "unknown"
+        _LOGGER.debug("Preflight: %s not collected (%s)", source, type(err).__name__)
+        return {n: unknown("collector_error", source) for n in names}, None
+    return out, extra
+
+
+def _sane(facts: dict[str, Fact]) -> dict[str, Fact]:
+    """Every collected fact of a known name with a valid shape; anything
+    else becomes unknown (``value_unreadable``) instead of an exception."""
+    out: dict[str, Fact] = {}
+    for name in _SHAPES:
+        fact = facts.get(name)
+        if fact is None:
+            continue
+        if type(fact) is not Fact:
+            out[name] = unknown("value_unreadable", "collector")
+            continue
+        try:
+            _check_shape(name, fact.value)
+        except PreflightError:
+            out[name] = unknown("value_unreadable", fact.source)
+        else:
+            out[name] = fact
+    return out
+
+
 def facts_from_sources(
     src: FactSources,
     router_id: str,
@@ -2421,26 +2724,66 @@ def facts_from_sources(
     router, the api's request methods, the coordinator's refresh or the
     Configuration Manager's provider. The safety-clock time is read from the
     store (``store.now()``, which observes the clocks in memory).
+
+    Never raises on what it reads (review of PR #80): every part is guarded
+    and reports unknown with a reason. It raises :class:`PreflightError`
+    only for its own inputs - no store, a bad router id, a wall time out of
+    range, a safety clock that cannot be read.
     """
     if src.store is None:
         raise PreflightError("no self-healing store")
     if not is_valid_id(router_id, ROUTER_ID_PREFIX):
         raise _fail("router_id")
-    safe = float(src.store.now())
-    wall = float(wall_now)
+    try:
+        safe = float(src.store.now())
+        wall = float(wall_now)
+    except Exception as err:  # without the clocks: no snapshot
+        raise PreflightError("safety clock not readable") from err
     facts: dict[str, Fact] = {}
-    facts.update(_poll_facts(src, wall))
-    poll_f = PreflightFacts(router_id=router_id, safe_at=safe, wall_at=wall, **facts)
+
+    def part(
+        names: Iterable[str], source: str, func: Callable[[], tuple[Any, Any]]
+    ) -> Any:
+        out, extra = _guard(names, source, func)
+        facts.update(out)
+        return extra
+
+    part(_POLL_FACTS[:3], "coordinator", lambda: (_poll_facts(src, wall), None))
+    part(
+        ("wall_clock_behind",),
+        "heal_store.loop.clock",
+        lambda: ({"wall_clock_behind": _clock_fact(src.store, wall)}, None),
+    )
+    poll_f = PreflightFacts(
+        router_id=router_id, safe_at=safe, wall_at=wall, **_sane(facts)
+    )
     fresh, why = _poll_fresh(poll_f)
-    age = facts["poll_age_s"].value
-    facts.update(_router_state_facts(src, fresh, age, why))
-    reg_facts, _record = _registry_facts(src, router_id)
-    facts.update(reg_facts)
+    age = poll_f.poll_age_s.value
+    part(
+        _STATE_NAMES,
+        "coordinator.data",
+        lambda: (_router_state_facts(src, fresh, age, why), None),
+    )
+    part(
+        (
+            "record_active",
+            "identity_status",
+            "identity_bindings",
+            "role",
+            "capabilities",
+        ),
+        "core.registry",
+        lambda: _registry_facts(src, router_id),
+    )
     records = None
     if src.registry is not None:
         records, _err = _safe_call(lambda: tuple(src.registry.list()), "registry.list")
-    facts.update(_lease_facts(src, fresh, age, records, router_id))
-    facts.update(_rights_facts(src))
+    part(
+        ("lease_routers", "lease_clients"),
+        "coordinator.data.dhcp_leases",
+        lambda: (_lease_facts(src, fresh, age, records, router_id), None),
+    )
+    part(("login_is_root", "acl_blocked"), "api", lambda: (_rights_facts(src), None))
 
     def rid_of(entry_id: str) -> str | None:
         for r in records or ():
@@ -2449,10 +2792,30 @@ def facts_from_sources(
                 return rid if is_valid_id(rid, ROUTER_ID_PREFIX) else None
         return None
 
-    ni_facts, related = _ni_facts(src, router_id, wall, rid_of)
-    facts.update(ni_facts)
-    facts.update(_store_facts(src, router_id, safe, wall, exclude_action_id, related))
-    facts["run_path"] = _run_path(src.store, router_id)
+    related = part(
+        (
+            "ni_maintenance",
+            "dependants",
+            "upstream_hops",
+            "uplink_incidents",
+            "degraded_dependants",
+        ),
+        "network_intelligence",
+        lambda: _ni_facts(src, router_id, wall, rid_of),
+    )
+    part(
+        _STORE_NAMES,
+        "heal_store",
+        lambda: (
+            _store_facts(src, router_id, safe, wall, exclude_action_id, related),
+            None,
+        ),
+    )
+    part(
+        ("run_path",),
+        "heal_store.settings",
+        lambda: ({"run_path": _run_path(src.store, router_id)}, None),
+    )
     if src.config_locked is None:
         facts["config_manager_busy"] = unknown(
             "core_not_running", "core.config_manager"
@@ -2464,20 +2827,39 @@ def facts_from_sources(
             if isinstance(busy, bool)
             else unknown(err or "lock_unknown", "core.config_manager")
         )
-    facts["security_findings"] = _security_fact(src, router_id)
-    facts["backups"] = _backup_facts(src, router_id)
+    part(
+        ("security_findings",),
+        "security_center",
+        lambda: ({"security_findings": _security_fact(src, router_id)}, None),
+    )
+    part(
+        ("backups",),
+        "core.versions",
+        lambda: ({"backups": _backup_facts(src, router_id)}, None),
+    )
     if src.diag is None:
         facts["diag_enabled"] = unknown("diagnostics_not_running", "net_diagnostics")
     else:
-        enabled = getattr(src.diag, "enabled", None)
+        enabled, _err = _safe_call(lambda: src.diag.enabled, "diag.enabled")
         facts["diag_enabled"] = (
             known(enabled, "net_diagnostics.enabled")
             if isinstance(enabled, bool)
             else unknown("diagnostics_unknown", "net_diagnostics")
         )
-    interval = facts["poll_interval_s"].value
-    facts.update(_incident_facts(src, incident_id, interval))
-    return PreflightFacts(router_id=router_id, safe_at=safe, wall_at=wall, **facts)
+    # the drift of the saved against the running configuration is not
+    # tracked yet (package G): unknown, which blocks a service restart
+    facts["service_config_unapplied"] = unknown(
+        "config_drift_not_tracked", "config_drift"
+    )
+    interval = facts["poll_interval_s"].value if "poll_interval_s" in facts else None
+    part(
+        _INCIDENT_NAMES,
+        "network_intelligence.incidents",
+        lambda: (_incident_facts(src, incident_id, interval), None),
+    )
+    return PreflightFacts(
+        router_id=router_id, safe_at=safe, wall_at=wall, **_sane(facts)
+    )
 
 
 def collect_preflight_facts(
