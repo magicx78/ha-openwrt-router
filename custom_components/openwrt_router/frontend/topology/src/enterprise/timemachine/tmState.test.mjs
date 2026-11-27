@@ -815,3 +815,152 @@ test('1.52.2: an emptied field clears the result; a late answer after it is drop
   assert.equal(stateReducer(s, { type: 'moreDone', seq: 2, answer: S('state_clients_page2') }), s);
   assert.equal(moreClientsQuery(s, true), null);
 });
+
+// ── 1.52.2 review: hidden routers in the summary, "deaktiviert" only for not_observed,
+//    the reachability row, radio reasons, the load step ──
+
+import * as TT from './tmTexts.ts';
+
+const clone = v => JSON.parse(JSON.stringify(v));
+const OTHER_OK = { state: 'ok', reason: null, count: 0, truncated: false, unreadable: [] };
+/** compare_disabled_both with the other modules read and empty: only the two disabled routers differ. */
+function quietDisabledBoth() {
+  const a = clone(FX.compare_disabled_both);
+  a.changes.other_sources = { ...OTHER_OK };
+  return a;
+}
+const rawRouter = (side, id) => side.routers.find(r => r.router_id === id);
+
+test('1.52.2 review: hidden disabled routers: the summary never says "nothing changed" about them', () => {
+  const a = parseCompare(quietDisabledBoth());
+  assert.deepEqual(TS.compareRouters(a), { shown: [], disabled: 2 });
+  const s = compareSummary(a, true);
+  assert.notEqual(s, NOTHING_CHANGED);
+  assert.equal(s, 'Über 2 deaktivierte Router ist nichts bekannt; sonst hat sich zwischen diesen Zeitpunkten nichts geändert.');
+  // with events in between: never "Die Zustände zu beiden Zeitpunkten sind gleich" alone
+  const ev = quietDisabledBoth();
+  ev.changes.marks = { count: 1, by_group: { infrastructure: 1 } };
+  const e = compareSummary(parseCompare(ev), true);
+  assert.notEqual(e, SAME_BUT_EVENTS);
+  assert.equal(e, 'Über 2 deaktivierte Router ist nichts bekannt; sonst sind die Zustände zu beiden Zeitpunkten gleich, und dazwischen gab es Ereignisse.');
+  assert.equal(TS.disabledSummaryText(1, false),
+    'Über 1 deaktivierten Router ist nichts bekannt; sonst hat sich zwischen diesen Zeitpunkten nichts geändert.');
+  assert.equal(TS.disabledSummaryText(0, false), null);
+  // the routers stay unlisted and uncounted; a summary with something unknown or changed is unchanged
+  assert.doesNotMatch(s, /Merkmal/);
+  assert.equal(compareSummary(parseCompare(FX.compare_after_update), true), 'Keine bekannte Änderung; 8 Merkmale sind zu einem der Zeitpunkte unbekannt.');
+  // without hidden routers the sentences of 1.52.1 stay
+  const known = knownQuiet();
+  assert.equal(compareSummary({ ...known, otherSources: { state: 'ok', reason: null, count: 0, truncated: false, unreadable: [] } }, true), NOTHING_CHANGED);
+});
+
+test('1.52.2 review: "deaktiviert" only when every unknown reason is not_observed; else the real reasons', () => {
+  for (const [part, reason, words] of [['reachable', 'evicted', 'Aufzeichnung verdrängt'], ['uplink', 'observation_gap', 'nicht beobachtet'], ['radios', 'clock_shift', null]]) {
+    const raw = clone(FX.state_disabled);
+    rawRouter(raw, R2)[part].reason = reason;
+    const st = parseState(raw);
+    assert.equal(TS.disabledView(routerOf(st, R2)), 'now', `${part} ${reason}`);
+    assert.equal(TS.disabledView(routerOf(st, R3)), 'only');
+    if (words) assert.equal((part === 'reachable' ? reachableView : uplinkView)(routerOf(st, R2)[part]).reason, words);
+  }
+  // a radio of the list with another reason
+  const raw = clone(FX.state_disabled);
+  Object.assign(rawRouter(raw, R2).radios, { state: 'partial', reason: 'not_observed', items: [{ key: '5g0', band: '5g', channel: null, width: null, state: 'unknown', reason: 'evicted' }] });
+  assert.equal(TS.disabledView(routerOf(parseState(raw), R2)), 'now');
+  // "Vergleich": another reason at either moment: listed as usual, with its reasons
+  for (const side of ['before', 'after']) {
+    const a = quietDisabledBoth();
+    rawRouter(a[side], R2).reachable.reason = 'observation_gap';
+    const p = parseCompare(a);
+    const c = TS.compareRouters(p);
+    assert.deepEqual([c.shown.map(r => r.routerId), c.disabled], [[R2], 1], side);
+    assert.ok(TS.disabledNow(c.shown[0], p));
+    const x = rowsBy(p, R2);
+    assert.equal(x.reachable[side === 'before' ? 'beforeReason' : 'afterReason'], 'nicht beobachtet', side);
+    assert.equal(compareSummary(p, true), 'Keine bekannte Änderung; 4 Merkmale sind zu einem der Zeitpunkte unbekannt.');
+  }
+});
+
+test('1.52.2 review: a reachability row whose cells say different things is a change', () => {
+  const k = knownQuiet();
+  const id = k.routers[0].routerId;
+  const reach = (side, cause) => ({ ...side, routers: side.routers.map(r => (r.routerId === id
+    ? { ...r, reachable: { value: false, derived: false, reason: null, cause } } : r)) });
+  const a = { ...k, before: reach(k.before, 'lan_down'), after: reach(k.after, null),
+    routers: k.routers.map(r => ({ ...r, reachable: { from: false, to: false, state: 'same', fromReason: null, toReason: null } })) };
+  const x = Object.fromEntries(compareRows(a.routers[0], a, true).map(r => [r.key, r]));
+  assert.deepEqual([x.reachable.before, x.reachable.after, x.reachable.state], ['nicht erreichbar (LAN)', 'nicht erreichbar', 'changed']);
+  assert.equal(compareSummary({ ...a, otherSources: { ...OTHER_OK } }, true), '1 Merkmal hat sich geändert.');
+  // the same words on both sides: the server's "same" stays
+  const b = { ...a, after: reach(k.after, 'lan_down') };
+  const y = Object.fromEntries(compareRows(b.routers[0], b, true).map(r => [r.key, r]));
+  assert.deepEqual([y.reachable.before, y.reachable.after, y.reachable.state], ['nicht erreichbar (LAN)', 'nicht erreichbar (LAN)', 'same']);
+});
+
+test('1.52.2 review: every unknown radio cell has its reason (a partial list without items, a radio not seen)', () => {
+  const k = knownQuiet();
+  const radios = (side, value) => ({ ...side, routers: side.routers.map(r => ({ ...r, radios: value })) });
+  const NOT_OBS = { state: 'partial', reason: 'not_observed', derived: false, items: [] };
+  // one side partial / not_observed without items: "unbekannt" with the sentence, never without a reason
+  const a = { ...k, after: radios(k.after, NOT_OBS) };
+  const x = Object.fromEntries(compareRows(a.routers[0], a, true).map(r => [r.key, r]));
+  assert.deepEqual([x['radio-5g0'].after, x['radio-5g0'].afterReason], [UNKNOWN, RADIOS_NOT_OBSERVED_TEXT]);
+  const both = { ...k, before: radios(k.before, NOT_OBS), after: radios(k.after, NOT_OBS) };
+  const y = Object.fromEntries(compareRows(both.routers[0], both, true).map(r => [r.key, r]));
+  assert.deepEqual([y.radios.beforeReason, y.radios.afterReason], [RADIOS_NOT_OBSERVED_TEXT, RADIOS_NOT_OBSERVED_TEXT]);
+  // a radio the other side's complete list does not have: "zu diesem Zeitpunkt nicht gesehen"
+  const two = { state: 'ok', reason: null, derived: true, items: [{ key: '2g0', band: '2g', channel: 1, width: 20, state: 'up', reason: null }] };
+  const c = { ...k, after: radios(k.after, two) };
+  const z = Object.fromEntries(compareRows(c.routers[0], c, true).map(r => [r.key, r]));
+  assert.equal(TT.RADIO_NOT_SEEN, 'zu diesem Zeitpunkt nicht gesehen');
+  assert.deepEqual([z['radio-5g0'].before, z['radio-5g0'].after, z['radio-5g0'].afterReason], ['Kanal 44 · 80 MHz · an', UNKNOWN, TT.RADIO_NOT_SEEN]);
+  assert.deepEqual([z['radio-2g0'].before, z['radio-2g0'].beforeReason, z['radio-2g0'].after], [UNKNOWN, TT.RADIO_NOT_SEEN, 'Kanal 1 · 20 MHz · an']);
+  // an incomplete list says its own reason instead
+  const cut = { ...two, state: 'partial', reason: 'evicted' };
+  const d = { ...k, after: radios(k.after, cut) };
+  const w = Object.fromEntries(compareRows(d.routers[0], d, true).map(r => [r.key, r]));
+  assert.equal(w['radio-5g0'].afterReason, 'Aufzeichnung verdrängt');
+});
+
+test('1.52.2 review: the load step: a field without a moment clears; else it starts with the query', () => {
+  const t = '2027-01-14T08:00';
+  const u = '2027-01-14T09:00';
+  for (const [from, until] of [['', u], [t, ''], ['2027-03-28T02:30', u], [t, '2027-03-28T02:30']]) {
+    assert.deepEqual(TS.compareLoadStep(from, until, R1, 4), { action: { type: 'clear', seq: 4 }, query: null }, `${from} ${until}`);
+  }
+  assert.deepEqual(TS.compareLoadStep(t, u, R1, 5),
+    { action: { type: 'start', seq: 5 }, query: { t1: fromLocalInput(t), t2: fromLocalInput(u), routerId: R1 } });
+  const now = 1800000000.7;
+  for (const input of ['', '2027-03-28T02:30']) {
+    assert.deepEqual(TS.stateLoadStep(false, input, R1, now, 7), { action: { type: 'clear', seq: 7 }, query: null, input });
+  }
+  assert.deepEqual(TS.stateLoadStep(false, t, R1, now, 8),
+    { action: { type: 'start', seq: 8 }, query: { at: fromLocalInput(t), routerId: R1, clientsCursor: null }, input: t });
+  const live = TS.stateLoadStep(true, '', null, now, 9);
+  assert.deepEqual(live, { action: { type: 'start', seq: 9 }, query: { at: 1799999999, routerId: null, clientsCursor: null }, input: toLocalInput(1799999999) });
+  // each container dispatches the step's action, the clear one included (no DOM here: pinned in the source)
+  // right after the step, unconditionally, before anything returns
+  const src = readFileSync(join(here, 'TimeMachineState.tsx'), 'utf8');
+  assert.equal(src.split('dispatch(step.action)').length - 1, 2);
+  for (const fn of ['stateLoadStep', 'compareLoadStep']) {
+    assert.match(src, new RegExp(`\\n( +)const step = ${fn}\\([^\\n]*\\);\\n\\1dispatch\\(step\\.action\\);\\n`), fn);
+  }
+  // and the cleared state is the reducer's clear
+  assert.deepEqual(compareReducer({ ...COMPARE_INIT, answer: C('compare'), seq: 3 }, TS.compareLoadStep('', u, null, 4).action), { ...COMPARE_INIT, seq: 4 });
+});
+
+test('1.52.2 review: an answer without a router\'s block: the fallback cell says the server\'s reason of its side', () => {
+  const raw = clone(FX.compare_after_update);
+  raw.before.routers = [];
+  const a = parseCompare(raw);
+  assert.equal(a.routers[0].reachable.fromReason, 'not_observed');
+  const x = rowsBy(a, R2);
+  assert.deepEqual([x.reachable.before, x.reachable.beforeReason], [UNKNOWN, NOT_OBSERVED]);
+  assert.deepEqual([x.uplink.before, x.uplink.beforeReason, x.uplink.after], [UNKNOWN, NOT_OBSERVED, 'über Router 1']);
+  // an answer without the fields (1.52.1): the side's reason as before
+  const old = clone(raw);
+  for (const r of old.changes.routers) for (const k of ['reachable', 'role', 'uplink']) { delete r[k].from_reason; delete r[k].to_reason; }
+  const o = parseCompare(old);
+  assert.equal(o.routers[0].reachable.fromReason, null);
+  assert.equal(rowsBy(o, R2).reachable.beforeReason, null);
+});

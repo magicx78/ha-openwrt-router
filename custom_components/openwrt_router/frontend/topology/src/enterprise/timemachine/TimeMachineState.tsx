@@ -26,10 +26,10 @@ import {
   COMPARE_INIT, COMPARE_LOADING_TEXT, COMPARE_PICKS, COMPARE_PICK_TEXT, SECTION_CLIENTS, SECTION_COMPARE_CONFIG,
   SECTION_COMPARE_INCIDENTS, SECTION_CONFIG, SECTION_EVENTS, SECTION_INCIDENTS, SECTION_INTERVALS, SECTION_TRAFFIC,
   STATE_INIT, STATE_LOADING_TEXT, STATE_PICK_TEXT, STATE_STEPS, STATE_UNAVAILABLE_TEXT, UNKNOWN, UNKNOWN_TITLE,
-  clientRowText, compareReducer, compareRouters, compareRows, compareSummary, configTitle, deltaText, disabledNow, disabledText,
+  clientRowText, compareLoadStep, compareReducer, compareRouters, compareRows, compareSummary, configTitle, deltaText, disabledNow, disabledText,
   disabledView, fromLocalInput, globalReasonText,
   hourText, incidentTitle, moreClientsQuery, otherSourcesText, parseLocalInput, partStateText, radioBandText, radioView,
-  radiosView, reachableView, roleView, routerName, sinceText, stateLoadAt, stateReasonText, stateReducer, toLocalInput, uplinkView,
+  radiosView, reachableView, roleView, routerName, sinceText, stateLoadStep, stateReasonText, stateReducer, toLocalInput, uplinkView,
   loadDelay, utilizationText, waitingBody, wanText,
   type CompareView, type StateView, type ValueView,
 } from './tmState.ts';
@@ -674,21 +674,18 @@ export function StateContainer({ api, active, viewSwitch, isAdmin = false, onSho
     const r = ref.current;
     // "Jetzt" asks for the server's now (no future moment by a clock difference),
     // and the field follows it (browser review: back in the view, the field kept the old time)
-    const { at, input: shown } = stateLoadAt(r.live, r.input, Date.now() / 1000);
-    if (at === null) {
-      // 1.52.2: an empty field (or a skipped hour) holds no moment: the old result goes,
-      // an answer still on its way is dropped
-      dispatch({ type: 'clear', seq: ++seq.current });
-      return;
-    }
-    if (shown !== r.input) {
-      ref.current = { ...r, input: shown };
-      setInput(shown);
-    }
-    const q = { at, routerId: r.routerId, clientsCursor: null };
+    // 1.52.2: an empty field (or a skipped hour) holds no moment: the step clears,
+    // the old result goes and an answer still on its way is dropped (stateLoadStep)
     const n = ++seq.current;
+    const step = stateLoadStep(r.live, r.input, r.routerId, Date.now() / 1000, n);
+    dispatch(step.action);
+    const q = step.query;
+    if (q === null) return;
+    if (step.input !== r.input) {
+      ref.current = { ...r, input: step.input };
+      setInput(step.input);
+    }
     lastMs.current = Date.now();
-    dispatch({ type: 'start', seq: n });
     api.state(q).then(
       answer => dispatch({ type: 'done', seq: n, answer, query: q }),
       error => dispatch({ type: 'fail', seq: n, error }),
@@ -768,16 +765,13 @@ export function CompareContainer({ api, active, viewSwitch, isAdmin = false, onS
   const load = useCallback(() => {
     due.current = false;
     if (!api.compare) return;
-    const t1 = fromLocalInput(ref.current.from);
-    const t2 = fromLocalInput(ref.current.until);
-    if (t1 === null || t2 === null) {
-      // 1.52.2: "Von" or "Bis" holds no moment: the old table goes, a late answer is dropped
-      dispatch({ type: 'clear', seq: ++seq.current });
-      return;
-    }
+    // 1.52.2: "Von" or "Bis" holds no moment: the step clears, the old table goes,
+    // a late answer is dropped (compareLoadStep)
     const n = ++seq.current;
-    dispatch({ type: 'start', seq: n });
-    api.compare({ t1, t2, routerId: ref.current.routerId }).then(
+    const step = compareLoadStep(ref.current.from, ref.current.until, ref.current.routerId, n);
+    dispatch(step.action);
+    if (step.query === null) return;
+    api.compare(step.query).then(
       answer => dispatch({ type: 'done', seq: n, answer }),
       error => dispatch({ type: 'fail', seq: n, error }),
     );

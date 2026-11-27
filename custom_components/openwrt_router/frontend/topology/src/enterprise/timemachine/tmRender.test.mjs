@@ -1641,3 +1641,42 @@ test('1.52.2: a disabled router is "deaktiviert" in "Zustand" and no difference 
   assert.ok(!stateHtml(stView('state')).includes('deaktiviert'));
   assert.ok(!compareHtml(cmpView('compare_quiet')).includes('deaktiviert'));
 });
+
+// ── 1.52.2 review: hidden routers in the summary, "deaktiviert" only for not_observed ──
+
+const cloneJ = v => JSON.parse(JSON.stringify(v));
+const rawR = (side, name) => side.routers.find(r => r.router_name === name);
+
+test('1.52.2 review: with hidden disabled routers the summary qualifies "nothing changed"', () => {
+  const a = cloneJ(FX.compare_disabled_both);
+  a.changes.other_sources = { state: 'ok', reason: null, count: 0, truncated: false, unreadable: [] };
+  const t = text(compareHtml(cmpView(a), { routers: RNAMES3 }));
+  assert.ok(t.includes('Über 2 deaktivierte Router ist nichts bekannt; sonst hat sich zwischen diesen Zeitpunkten nichts geändert.'), t);
+  assert.ok(!t.includes(M.TS.NOTHING_CHANGED), t);
+  assert.ok(t.includes('2 Router sind deaktiviert und nicht aufgeführt'), t);
+  assert.equal(count(compareHtml(cmpView(a), { routers: RNAMES3 }), 'role="table"'), 0);
+});
+
+test('1.52.2 review: a disabled router with another reason keeps its card and its table, with the real reasons', () => {
+  const st = cloneJ(FX.state_disabled);
+  rawR(st, 'Router 2').reachable.reason = 'evicted';
+  const html = stateHtml(stView(st), { routers: RNAMES3 });
+  const card = html.split('<section class="tm-card" aria-label="Router 2">')[1]?.split('</section>')[0] ?? '';
+  assert.equal(count(card, '<dt>'), 4);
+  assert.ok(text(card).includes('derzeit deaktiviert'), text(card));
+  assert.ok(text(card).includes('Aufzeichnung verdrängt'), text(card));
+  assert.ok(!text(card).includes('in Home Assistant ausgeschaltet'), text(card));
+  // Router 3 (not_observed only) stays one line
+  const r3 = html.split('<section class="tm-card" aria-label="Router 3">')[1]?.split('</section>')[0] ?? '';
+  assert.equal(count(r3, '<dt>'), 0);
+  // "Vergleich": listed with its reasons and the badge; the summary counts its rows
+  const a = cloneJ(FX.compare_disabled_both);
+  rawR(a.after, 'Router 2').uplink.reason = 'observation_gap';
+  const c = compareHtml(cmpView(a), { routers: RNAMES3 });
+  const rows = Object.fromEntries(tableRows(c, 'Router 2').map(r => [r.label, r]));
+  assert.equal(tx(rows.Uplink.after), 'Nachher: unbekannt · nicht beobachtet');
+  assert.equal(tx(rows.Uplink.before), 'Vorher: unbekannt · noch kein Wert beobachtet');
+  const head = c.split('aria-label="Router 2">')[1].split('role="table"')[0];
+  assert.ok(text(head).includes('derzeit deaktiviert'), head);
+  assert.ok(text(c).includes('1 Router ist deaktiviert und nicht aufgeführt'), text(c));
+});

@@ -311,6 +311,9 @@ export interface Change<T> {
   to: T | null;
   /** changed | same | unknown */
   state: string;
+  /** 1.52.2: why `from` / `to` is unknown (a state reason token); null when known or in an older answer. */
+  fromReason: string | null;
+  toReason: string | null;
 }
 
 export interface RadioChange {
