@@ -780,7 +780,13 @@ test('1.52.2: a disabled router says so; unknown on both sides it is no differen
   assert.deepEqual([x.uplink.before, x.uplink.after, x.uplink.afterReason], ['über Router 1', UNKNOWN, NOT_OBSERVED]);
   assert.equal(compareSummary(earlier, true), 'Keine bekannte Änderung; 4 Merkmale sind zu einem der Zeitpunkte unbekannt.');
   // an answer without the field (1.52.1 and older): nobody is disabled, nothing hidden
-  assert.ok(S('state').routers.every(r => r.entry === null && TS.disabledView(r) === null));
+  const older = JSON.parse(JSON.stringify(F.state.body));
+  for (const r of older.routers) delete r.entry;
+  const olderState = parseState(older);
+  assert.ok(olderState.routers.length > 0);
+  assert.ok(olderState.routers.every(r => r.entry === null && TS.disabledView(r) === null));
+  // the regenerated fixture of 1.52.2 names the entry of every router
+  assert.ok(S('state').routers.every(r => r.entry === 'enabled' && TS.disabledView(r) === null));
   assert.equal(TS.compareRouters(C('compare_quiet')).shown.length, C('compare_quiet').routers.length);
   assert.equal(TS.compareRouters(C('compare_quiet')).disabled, 0);
   // and an older panel's fields of the new answer are the old ones (the field is additive)
