@@ -352,6 +352,86 @@ keine Datei, keine ACL-Änderung. Entwicklerdoku: `docs/self-healing.md`, Abschn
   Neustart von Home Assistant; der Fingerabdruck beim Freigeben entsteht mit denselben Eingaben
   wie die letzte Prüfung; die nicht zutreffenden Prüfungen werden mit dem Datensatz gespeichert.
 
+### Self-Healing, Paket F (Playbooks A–G als Daten, noch nicht verdrahtet)
+
+Dritter Baustein der Logik von Phase 7: die sieben Reparatur-Playbooks als versionierte
+Daten mit Matcher und Analyse (`heal_playbooks.py`). Reine Logik ohne HA-Import, ohne Uhr
+und **ohne Router-Aufruf**; die Engine ruft sie noch nicht auf. Für Benutzer ändert sich
+nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 8.
+
+- **Register A–G:** je Playbook Version, Rollen, Fähigkeiten, Rechte (aus dem Katalog),
+  die echten Vorfallarten von Network Intelligence und ob die Erkennung heute da ist (A, B,
+  C, D teilweise, E und G vorhanden, F nicht – mit der jeweils fehlenden Erkennung),
+  Risikoklasse aus dem Katalog, Vorabprüfungen (nur die Kennungen aus Paket E), typisierte
+  Leseschritte, Prüfproben, Abbruch, Rollback-Aussage des Katalogs, Eskalation, Nie-Regeln.
+  Ein fehlerhaftes Register lädt nicht.
+- **Matcher:** ein Wurzelvorfall ergibt höchstens ein Playbook, immer gleich; Folgevorfälle,
+  unbekannte Wurzel, nur zeitliche Nähe und Flotten-Vorfälle ergeben keins. Eine durch einen
+  Vergleich belegte Konfigurationsänderung im betroffenen Bereich führt zu Playbook F.
+  Fehlt einem Router eine Fähigkeit (etwa einem Repeater eines anderen Herstellers), ist das
+  Playbook „nicht unterstützt“ mit Grund.
+- **Analyse:** eingeordnete Ursache, Schritte mit Ergebnis, Empfehlungen, was das System
+  nicht tut, und `IncidentFacts` für die Richtlinie samt **„Ursache außerhalb des Routers“**
+  (ja, nein oder unbekannt). Vorschlagen kann nur A (`service.restart dnsmasq`) und B
+  (`dnsmasq`/`odhcpd`, nur der Dienst, der DHCP vergibt), und nur bei eingeschaltetem, aber
+  ausgefallenem oder instabilem Dienst mit Ursache sicher am Router. Alles andere ist eine
+  Empfehlung; durch die Richtlinie wird ein Vorschlag höchstens „Freigabe nötig“, ausführbar
+  ist in 1.53.0 nichts.
+- **Nie-Regeln:** kein Neustart bei Ursache außerhalb; keine Leases löschen, kein Neustart bei
+  vollem Adressbereich oder unbekanntem Dienst; kein Funk-Neustart auf einem WLAN-Uplink;
+  kein Ab- und Anschalten von Uplink- oder Management-Schnittstellen; kein pauschaler
+  Router-Neustart; keine automatische Wiederherstellung und keine automatische Rücksetzung
+  kritischer Konfiguration (F liefert nur einen Plan, der nie ausführt); keine
+  Client-Aktion. Absichtlich abgeschaltete Dienste (`rc list`) sind keine Störung.
+- Deutsche Texte als feste Tabelle im Modul; Texte vom Router landen nie in einem Vorschlag
+  oder Text.
+- Tests: 130 neue (Auftragstests 10–14 und 34, jede Nie-Regel, Flotte, feindliche Texte,
+  3000 Zufallsfälle durch die Richtlinie). Mutationsprüfung: 38 Änderungen, jede lässt
+  mindestens einen Test scheitern.
+- **Review PR #79 (vor dem Merge, strengere Regeln):**
+  - „Ursache auf dem Router“ (False) nur noch ohne genannte Ursache oder mit einer aus einer
+    festen Liste je Playbook (`INSIDE_CAUSES`); jede andere von Network Intelligence genannte
+    Ursache (von der Wurzel geerbt, am Client, in der Konfiguration) ergibt „außerhalb“ oder
+    „unbekannt“. Ein verlorener Upstream (`uplink_down`, `lan_unreachable`,
+    `router_unreachable`) zählt bei A und B als außerhalb.
+  - A: „außen gesund“ verlangt einen gemessenen Upstream (vorgelagerter Resolver oder
+    Internet-Stufe); ein WAN, das nur oben ist, genügt nicht; eine Stufe „degraded“ ist nicht
+    gesund.
+  - B: kein Neustart, wenn Network Intelligence den Adressbereich als voll nennt
+    (`pool_exhausted`), gleich welche Belegung gemessen ist; bei „keine Adresse“ mit
+    unbekannter Belegung nur Empfehlung. Der kleinste AP mit absichtlich abgeschalteten
+    Diensten ergibt genau „nichts zu reparieren“, auch bei leerer oder unbekannter
+    Dienstliste.
+  - Ein Vorfall, bei dem außer der Verbindung zur Wurzel nichts beobachtet ist, gilt als
+    reine Zeitnähe, gleich welcher Wert übergeben wird: kein Vorschlag.
+  - Neustart-Zähler allein sind kein Fehler mehr (nur mit beobachteter Schleife oder
+    stehendem Dienst); ein Vorschlag braucht die Fähigkeit `data.services` ausdrücklich.
+  - Drift (F) ersetzt ein Playbook nur, wenn die Zeit der Änderung bekannt ist und vor dem
+    Vorfall liegt und das ursprüngliche Playbook keinen Hinweis auf eine Ursache außerhalb
+    gesehen hat (nicht nur kein gemessenes „außerhalb“); sonst bleibt es beim ursprünglichen
+    Playbook, die Änderung ist ein Hinweis. „Ursache auf dem Router“ steht bei keinem
+    Playbook neben einem solchen Hinweis. Die Hinweise sind einmal als gemeinsame Menge
+    festgelegt (WAN-Leitung, -Schnittstelle, -Adresse, vorgelagerter Router, Uplink-Port,
+    Diagnosestufen, vorgelagerter Resolver), die jedes Playbook prüft; dazu die
+    dnsmasq-Zeilen „no servers“/„query limit“ bei A (unklar, kein Vorschlag).
+  - Kein Neustart-Vorschlag, wenn ein Vergleich eine gespeicherte Änderung im Bereich des
+    Dienstes belegt (der Neustart würde sie übernehmen). F sagt „auf dem Router“ nur, wenn
+    die genannte Ursache auf einen geänderten Bereich zeigt, und nie bei WAN- oder
+    Port-Vorfällen. `match` und `assess` geben bei Drift dasselbe Ergebnis, auch denselben
+    Grund („außerhalb gemessen“ oder „nur Hinweis“). F übernimmt die Ausnahmen des
+    Playbooks, das es ersetzt.
+  - C: keine Empfehlung „Funk von Hand neu starten“, wenn der Management-Weg darüber läuft
+    oder das unbekannt ist oder der Funk nicht benannt ist; Texte sagen Unbekanntes als
+    unbekannt. D: WAN-Schnittstellen und unbekannte Rollen gelten als kritisch. E sagt nie
+    „auf dem Router“ (Leitung oben, Schnittstelle unten kann auch der Anbieter sein).
+  - Tests: 320 im Modul (Regressionstests aus den Proben des Reviews; Zufallstest um einen
+    Generator nahe am Vorschlag mit den feindlichen Werten des Reviews erweitert, auch für
+    WAN und Schnittstelle; die Kennungen der Vorabprüfungen gegen `heal_preflight.py`
+    aus Paket E verglichen, kein Unterschied).
+    Mutationsprüfung auf grünem Stand: 79 Änderungen, 77 lassen einen Test scheitern; zwei
+    (zweite Prüfung beim Bauen des Vorschlags, Gegenprüfung in `assess`) sind Absicherung in
+    der Tiefe, die kein Test erreicht.
+
 ### Self-Healing, Paket X (Policy an Engine)
 
 Die Engine aus Paket C1 entscheidet jetzt mit der Richtlinie aus Paket D. Weiterhin nur
