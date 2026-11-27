@@ -66,6 +66,7 @@ from .const import (
     OPTION_CONFIG_BACKUP_SCHEDULE,
     OPTION_CONFIG_BACKUP_TIME,
     OPTION_CONFIG_DRIFT_CHECK,
+    OPTION_SELF_HEALING_ENABLED,
     OPTION_TIME_MACHINE_CLIENTS,
     OPTION_TIME_MACHINE_ENABLED,
     PROTOCOL_HTTP,
@@ -212,6 +213,17 @@ class OpenWrtOptionsFlow(OptionsFlow):
                     clients=new_opts.get(OPTION_TIME_MACHINE_CLIENTS) is True,
                 )
             # --- end Network Time Machine
+            # --- Self-Healing (Phase 7, C1): ONE switch for the fleet, on by
+            # default; written through to every other router entry and
+            # applied to the running engine directly (no reload, never raises).
+            if OPTION_SELF_HEALING_ENABLED in user_input:
+                heal_on = new_opts.get(OPTION_SELF_HEALING_ENABLED) is True
+                new_opts[OPTION_SELF_HEALING_ENABLED] = heal_on
+                _write_self_healing_through(self.hass, self.config_entry, heal_on)
+                from .heal_engine import async_apply_self_healing_option
+
+                await async_apply_self_healing_option(self.hass, on=heal_on)
+            # --- end Self-Healing
             return self.async_create_entry(title="", data=new_opts)
 
         schema = vol.Schema(
@@ -264,6 +276,10 @@ class OpenWrtOptionsFlow(OptionsFlow):
         # the form shows the fleet state (on while any router has it on).
         schema = schema.extend(_time_machine_option_fields(self.hass, opts))
         # --- end Network Time Machine
+        # --- Self-Healing (Phase 7, C1): always offered, on by default; the
+        # form shows the fleet state (off while any router has it off).
+        schema = schema.extend(_self_healing_option_fields(self.hass, opts))
+        # --- end Self-Healing
         return self.async_show_form(step_id="init", data_schema=schema)
 
 
@@ -322,6 +338,51 @@ def _write_time_machine_through(
 
 
 # --- end Network Time Machine
+
+
+# --- Self-Healing (Phase 7, package C1) ---
+def _self_healing_option_fields(hass: Any, opts: Any) -> dict[Any, Any]:
+    """The fleet-wide switch; its default is the fleet state (on)."""
+    try:
+        from .heal_engine import self_healing_enabled
+
+        on = self_healing_enabled(hass)
+    except Exception:  # noqa: BLE001 - the form never fails because of it
+        on = True
+    on = on and opts.get(OPTION_SELF_HEALING_ENABLED) is not False
+    return {vol.Optional(OPTION_SELF_HEALING_ENABLED, default=on): bool}
+
+
+def _write_self_healing_through(hass: Any, entry: Any, on: bool) -> None:
+    """Give every other router entry the same Self-Healing switch value.
+
+    Only entries whose value differs are updated, with all their other
+    options kept. Errors are logged by type only and never stop the form.
+    """
+    try:
+        entries = hass.config_entries.async_entries(DOMAIN)
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(entries, list):
+        return
+    for other in entries:
+        if other.entry_id == entry.entry_id:
+            continue
+        options = dict(getattr(other, "options", None) or {})
+        # an entry without the option is on (the default)
+        if (options.get(OPTION_SELF_HEALING_ENABLED) is not False) == on:
+            continue
+        options[OPTION_SELF_HEALING_ENABLED] = on
+        try:
+            hass.config_entries.async_update_entry(other, options=options)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Self-Healing switch not written to another router (%s)",
+                type(err).__name__,
+            )
+
+
+# --- end Self-Healing
 
 
 # --- Configuration manager options (plan 2026-11-18, section 2)

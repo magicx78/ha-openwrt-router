@@ -233,8 +233,12 @@ async def test_a_failure_never_fails_the_download_and_logs_the_type_only(
 
 
 def test_the_block_is_the_last_wrapper_of_the_download() -> None:
+    # 1.53.0: the Self-Healing block wraps the Time Machine block once more
     wrapped = diagnostics.async_get_config_entry_diagnostics
+    time_machine = diagnostics._async_get_config_entry_diagnostics_tm
+    assert wrapped.__wrapped__ is time_machine
     assert (
-        wrapped.__wrapped__ is diagnostics._async_get_config_entry_diagnostics_traffic
+        time_machine.__wrapped__
+        is diagnostics._async_get_config_entry_diagnostics_traffic
     )
     assert wrapped.__name__ == "async_get_config_entry_diagnostics"

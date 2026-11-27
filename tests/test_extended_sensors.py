@@ -143,6 +143,8 @@ class TestOptionsFlow:
             # Network Time Machine (Phase A): one fleet switch, off by default.
             "time_machine_enabled",
             "time_machine_clients",  # 1.51.0, off by default
+            # Self-Healing (Phase 7, C1): one fleet switch, on by default.
+            "self_healing_enabled",
         }
 
     @pytest.mark.asyncio

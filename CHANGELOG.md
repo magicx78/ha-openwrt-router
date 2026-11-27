@@ -132,6 +132,59 @@ Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/
   - `release_hold()` ändert nur etwas, wenn wirklich ein Hold aufgehoben wurde.
 - `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
 
+### Self-Healing, Paket C1
+
+Die Engine von Self-Healing läuft, **nur im Modus Observe**: Sie erklärt Vorfälle und hält sie
+als Datensatz fest, ändert aber nichts. Kein Router-Aufruf, kein Schreibweg, kein Dienst,
+keine Entität, kein Bus-Ereignis, keine neue oder geänderte unique_id, kein zusätzlicher Poll
+oder Refresh. Entwicklerdoku: `docs/self-healing.md` (Abschnitte 2.1 und 11).
+
+- **Schalter „Self-Healing für alle Router“** in den Optionen (`self_healing_enabled`). Nach
+  dem Update **an**, jeder Router im Modus Observe, Auto-Heal aus, Allowlist leer. Der
+  Schalter gilt für die ganze Flotte und wird auf alle Router-Einträge geschrieben; aus heißt:
+  keine Engine, kein Speicher, kein Listener, kein Zeitgeber, keine Route.
+- `heal_engine.py`: eine Engine je HA-Instanz, gestartet mit dem ersten Router-Eintrag und
+  gestoppt mit dem letzten. Sie lädt den Speicher (die Neustartregel zuerst), hört auf die
+  Vorfall-Meldungen von Network Intelligence (nur Wurzeln, nach der Beruhigungszeit) und liest
+  alle 5 Minuten die Sicherheitsuhr. Ein gemeldeter Wurzelvorfall auf genau einem geladenen,
+  aktiven Router mit Router-Kennung des Core wird ein Datensatz, der mit der Ursache von
+  Network Intelligence (nichts erfunden) bis „vorgeschlagen“ läuft und dort stehen bleibt.
+  Ein gelöster, ignorierter oder verschwundener Vorfall schließt ihn mit der Zeit der Engine.
+  Holds und Flotten-Pause werden beachtet und angezeigt. Ablehnungen werden gezählt, nie
+  geworfen.
+- **Schnittstelle für Paket D** (Entscheidung und Risiko): `HealDecider` mit
+  `DecisionContext` und `Proposal`. Bis dahin schlägt der Standard nichts Ausführbares vor
+  („zu wenig Hinweise“, Risiko unbewertet). Zeitliche Nähe oder ein einzelner Hinweis führt
+  nie zu einer handelnden Empfehlung; ausführbar ist in dieser Version nichts.
+- `heal_views.py`: fünf **lesende** Routen unter
+  `/api/openwrt_router/enterprise/selfhealing/v1/`: `overview` (Administratoren; andere
+  Benutzer nur bei für alle geöffnetem Panel und nur Zähler), `actions` mit Filtern und
+  Seiten, `actions/{id}` mit Verlauf, `settings`, `plans` (Vorschau, ändert nichts) – diese
+  vier nur für Administratoren. Keine schreibende Route.
+- Diagnose: neuer Block `self_healing` mit Zählern, Modi, Holds, Flotten-Pause,
+  Sicherheitsuhr und Grenzen, ohne Kennungen, Namen oder Adressen.
+
+#### Tests
+
+- Neu: `tests/test_heal_engine_v1530.py` (34 Tests) und `tests/test_heal_views_v1530.py`
+  (29 Tests): Auftragstests 1 (Observe, nie ein Schreiben), 31 (Rechte der Routen, keine
+  schreibende Route) und 34 (Vorfallkorrelation, mit dem echten Network-Intelligence-Motor),
+  null zusätzliche Router-Aufrufe (Aufrufliste zweier Polls gleich), Start und Stopp,
+  Neustart mit Datensätzen auf der Platte, Hold und Flotten-Pause, Modul aus, Takt und
+  Sicherheitsuhr.
+- Angepasst: erwartete Optionsschlüssel (`test_config_flow.py`,
+  `test_extended_sensors.py`) und die Reihenfolge der Diagnose-Hüllen
+  (`test_tm_diagnostics.py`).
+- Unverändert grün: der unique_id-Snapshot (`test_unique_ids_snapshot_v1494.py`).
+
+#### Bekannte Grenzen
+
+- Je Router höchstens ein offener Observe-Datensatz; weitere Vorfälle warten in der Engine
+  und gehen bei einem Neustart verloren.
+- Vorfälle der ganzen Flotte oder mehrerer Router, Vorfälle unter `notify_min_severity` und
+  Vorfälle in der Wartung erzeugen keinen Datensatz.
+- Nicht in einer laufenden HA-Instanz und nicht auf Routern geprüft.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
