@@ -937,7 +937,9 @@ DATA_WIFI_RF_CENTER = f"{DOMAIN}_wifi_rf_center"
 DATA_WIFI_RF_VIEWS_BOUND = f"{DOMAIN}_wifi_rf_views_bound"
 WIFI_RF_STORE_KEY = f"{DOMAIN}.wifi_rf"
 WIFI_RF_STORE_VERSION = 1
-WIFI_RF_SAVE_DELAY_SECONDS = 300
+# 1.52.3: 900 s (was 300 s). The whole file is rewritten each time (13 radios
+# about 2.9 MB); a crash loses at most this much of the history.
+WIFI_RF_SAVE_DELAY_SECONDS = 900
 # Hard store limits: each series has its own quota; only the file limit
 # below evicts (the oldest buckets, 1.52.3).
 WIFI_RF_MAX_RADIOS = 32  # the fleet of 2026-11 has 13 radios

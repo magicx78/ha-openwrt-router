@@ -38,8 +38,10 @@ unique_id, Panel unverändert (`_PANEL_VERSION` bleibt). Speicherdatei
   Jetzt:
   - **Schreiben während des Betriebs:** Ein verzögertes Schreiben wird nur geschärft, wenn
     keines aussteht (wie in Network Intelligence, Client-Stabilität, Time Machine, Traffic und
-    Audit). Solange sich etwas ändert, wird höchstens alle 5 Minuten geschrieben, beim
-    Herunterfahren und beim Entladen des letzten Eintrags wie bisher sofort.
+    Audit). Solange sich etwas ändert, wird höchstens alle 15 Minuten geschrieben (vorher
+    eingestellt: 5 Minuten; jetzt länger, weil jedes Schreiben die ganze Datei neu schreibt);
+    ein Absturz verliert höchstens so viel. Beim Herunterfahren und beim Entladen des letzten
+    Eintrags wird wie bisher sofort geschrieben.
   - **Kürzen statt Verweigern:** Liegt der Verlauf über der Grenze, fallen die ältesten
     Stundenbuckets aller Radios nach der Zeit (nicht Radio für Radio), danach erst die ältesten
     Tagesbuckets, bis die Datei 5 % unter der Grenze liegt. Der neueste Bucket jeder Reihe
@@ -61,7 +63,8 @@ unique_id, Panel unverändert (`_PANEL_VERSION` bleibt). Speicherdatei
 
 ### Geändert
 
-- `WIFI_RF_MAX_STORE_BYTES` 2 000 000 → 8 000 000; neu `WIFI_RF_TRIM_HEADROOM` (0,05).
+- `WIFI_RF_MAX_STORE_BYTES` 2 000 000 → 8 000 000; neu `WIFI_RF_TRIM_HEADROOM` (0,05);
+  `WIFI_RF_SAVE_DELAY_SECONDS` 300 → 900.
 - Diagnose, Block `wifi_rf` → `store`: `max_bytes` (die Grenze), `last_save_bytes` (wird
   jetzt auch während des Betriebs gefüllt) und der neue Zähler `drops.trimmed` (gekürzte
   Buckets). `drops.save_over_size` zählt nur noch Schreibvorgänge, die trotz Kürzen über der
@@ -95,7 +98,7 @@ unique_id, Panel unverändert (`_PANEL_VERSION` bleibt). Speicherdatei
   ältere Version liest sie, schreibt sie aber beim nächsten Herunterfahren leer (der Fehler
   oben). Wer zurückgeht, verliert den Funkverlauf.
 - Geschrieben wird jedes Mal die ganze Datei: bei 13 Radios etwa 2,9 MB je Schreiben, höchstens
-  alle 5 Minuten (bis zu etwa 0,8 GB am Tag), bei 32 Radios bis zu etwa 2 GB am Tag.
+  alle 15 Minuten (bis zu etwa 0,28 GB am Tag), bei 32 Radios bis zu etwa 0,7 GB am Tag.
 - Der letzte gute Stand bleibt im Speicher (13 Radios etwa 3 MB, 32 Radios etwa 8 MB), wie
   schon nach jedem guten Schreiben seit 1.48.0.
 - Die Größen stammen aus einer Simulation mit allen sieben Reihen und Abfragen alle 60 s;

@@ -154,7 +154,7 @@ async def test_repeated_schedule_save_arms_one_delayed_write(disk):
         store.schedule_save()
     assert len(disk.delayed) == 1
     func, delay = disk.delayed[0]
-    assert delay == WIFI_RF_SAVE_DELAY_SECONDS
+    assert delay == WIFI_RF_SAVE_DELAY_SECONDS == 900  # documented: 15 minutes
     assert ref_key(R1) in func()["radios"]
     # the write ran: the next change arms the next one
     store.record(R1, ALL, T0 + 3600)
