@@ -4,6 +4,62 @@ All notable changes to the OpenWrt Router integration will be documented in this
 
 ## [Unreleased]
 
+Nacharbeiten aus dem Review von 1.52.3 am Speicher des WiFi-RF-Verlaufs (`rf_store.py`).
+Kein Datenverlust im normalen Betrieb, kein zusätzlicher Router-Aufruf, keine neue Entität,
+keine geänderte unique_id, Dateiformat unverändert.
+
+### Behoben
+
+- **Vergessener Router sofort aus der Datei:** Vergisst WiFi RF einen Router (etwa nach dem
+  Entfernen seines Eintrags), wird jetzt sofort geschrieben, nicht erst nach 15 Minuten. Lief
+  gerade ein Schreiben, dessen Momentaufnahme den Router noch enthielt, wird danach sofort
+  noch einmal geschrieben.
+- **`drops.trimmed` doppelt gezählt:** Überschnitten sich das Schreiben beim Entladen und ein
+  verzögertes Schreiben, zählten beide dieselben gekürzten Buckets. Gezählt wird jetzt nur,
+  was tatsächlich aus dem Speicher entfernt wurde.
+- **Atomares Schreiben:** Die Datei wird über eine temporäre Datei und Umbenennen geschrieben
+  (wie Time Machine, Traffic und Configuration Manager). Ein Absturz während eines der bis zu
+  96 Schreibvorgänge am Tag hinterlässt keine abgeschnittene Datei mehr. Kosten im Executor:
+  3 MB etwa 26 ms, 7,6 MB etwa 69 ms (gemessen auf der Entwicklungs-VM).
+- **Speicher:** Die beim Start gelesene Datei (13 Radios etwa 3 bis 4 MB im Speicher) wird
+  nach dem ersten guten Schreiben freigegeben. Ließe sich ein späterer Verlauf nicht unter die
+  Grenze kürzen (bei 8 MB und höchstens 32 Radios nicht erreichbar), wird er über der Grenze
+  geschrieben, nie leer.
+
+### Korrigiert (Angaben von 1.52.3)
+
+- **Größe je Radio:** 1.52.3 rechnete mit gerundeten Werten (etwa 224 KB je Radio, 32 Radios
+  7,2 MB). Mit Werten, wie die Quellen sie liefern (Auslastung und Retry-Rate ungerundet, die
+  übrigen Reihen ganze Zahlen), sind es etwa 238 KB: 13 Radios etwa 3,1 MB, 32 Radios etwa
+  7,6 MB; die vollen 8 Tage passen weiter für alle 32 Radios. Im ungünstigsten Fall (jedes
+  Gleitkommafeld mit voller Stellenzahl) sind es etwa 283 KB: 13 Radios etwa 3,7 MB, 32 Radios
+  etwa 9,0 MB. Dann beginnt das Kürzen bei etwa 28 Radios, und 32 Radios behalten etwa
+  6,5 Tage Stundenverlauf. Die Grenze bleibt 8 MB. Gerundetes Speichern steht als Option in
+  TODO.md.
+
+### Bekannte Grenzen
+
+- **Fehlgeschlagenes Schreiben:** Der `Store` von Home Assistant fängt einen Schreibfehler ab,
+  protokolliert ihn und meldet nichts zurück. WiFi RF hält das Schreiben dann für erledigt
+  (`dirty` gelöscht, `last_save_bytes` gesetzt), obwohl die Datei älter ist. Die nächste
+  Abfrage schärft das nächste Schreiben, die Datei holt also eine Verzögerung später auf;
+  nur ein Fehler beim letzten Schreiben vor Entladen oder Herunterfahren wird nicht
+  wiederholt.
+
+### Tests
+
+- `tests/test_rf_store_followup.py` (14 Tests): Übergabe zwischen Thread und Event-Loop
+  (Ergebnis im Loop angewendet, Payload beim Entladen im Executor gebaut, `dirty` bleibt bei
+  einer Abfrage nach der Momentaufnahme), Erholung nach einem fehlgeschlagenen Schreiben mit
+  dem echten `Store`, vergessener Router während eines Schreibens, Zählung von `trimmed`,
+  Kapazität mit gelieferten Werten und im ungünstigsten Fall (27 Radios passen, 29 nicht),
+  atomares Schreiben, Freigabe der geladenen Datei.
+- Jede Änderung einmal zurückgenommen: Ergebnis aus dem Schreib-Thread angewendet,
+  Payload beim Entladen im Event-Loop gebaut, Prüfung des Änderungszählers entfernt,
+  erneutes Schreiben nach einem Vergessen während eines Schreibens entfernt, Vergessen
+  wartet wieder eine Verzögerung, jeder Schnitt gezählt, nicht atomar: je ein Test scheitert;
+  geladene Datei behalten: drei Tests scheitern.
+
 ### Self-Healing, Paket B (Grundlage, noch nicht verdrahtet)
 
 Erster Baustein von Phase 7 „Self-Healing“: Datenmodell mit Zustandsmaschine und Speicher. Für

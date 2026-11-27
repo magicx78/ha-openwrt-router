@@ -390,9 +390,10 @@ async def test_steady_state_stays_under_a_low_limit_after_trimming(disk, radios)
 
 
 def test_the_limit_holds_eight_days_of_hourly_history_for_the_radio_cap():
-    """The documented capacity (CHANGELOG 1.52.3, wifi-rf plan §8.3): the full
-    hourly history of ``WIFI_RF_MAX_RADIOS`` radios fits below the trim
-    target, so nothing is trimmed in normal operation."""
+    """Rounded values only (a lower bound): the full hourly history of
+    ``WIFI_RF_MAX_RADIOS`` radios fits below the trim target. Values as the
+    sources deliver them and the full-precision worst case are in
+    ``test_rf_store_followup`` (review of 1.52.3)."""
     with patch.object(
         rf_store, "Store", lambda *a, **kw: FakeStore(FakeDisk(), *a, **kw)
     ):
