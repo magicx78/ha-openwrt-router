@@ -828,18 +828,16 @@ def _count_kept(
     b: VerifySnapshot,
     a: VerifySnapshot,
     *,
-    lower_is_worse: bool,
     words: tuple[str, str, str],
 ) -> Criterion:
+    """A count that must not go down (fewer is worse, more is better)."""
     miss = _missing(cid, b, a, (fact,))
     if miss is not None:
         return miss
     bv, av = getattr(b, fact).value, getattr(a, fact).value
-    worse = av < bv if lower_is_worse else av > bv
-    better = av > bv if lower_is_worse else av < bv
-    if worse:
+    if av < bv:
         return _c(cid, _W, words[0], bv, av)
-    if better:
+    if av > bv:
         return _c(cid, _I, words[1], bv, av)
     return _c(cid, _H, words[2], bv, av)
 
@@ -1022,7 +1020,6 @@ def _criterion(
             "ap_interfaces",
             b,
             a,
-            lower_is_worse=True,
             words=("ap_interfaces_lost", "ap_interfaces_more", "ap_interfaces_held"),
         )
     if cid == "dependants_not_degraded":
