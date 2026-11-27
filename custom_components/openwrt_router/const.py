@@ -947,9 +947,13 @@ WIFI_RF_MAX_HOURLY_BUCKETS = 8 * 24 + 2  # per radio and series (8 days)
 WIFI_RF_MAX_DAILY_BUCKETS = 31 + 1  # per radio and series
 # Raw points (memory only, for the 1 h window) per radio and series.
 WIFI_RF_MAX_RAW_POINTS = 240
-# File limit (1.52.3: 8 MB, was 2 MB). The full history of 32 radios with all
-# seven series is about 7.2 MB; over the limit the oldest buckets are trimmed
-# to WIFI_RF_TRIM_HEADROOM below it (hourly first, then daily).
+# File limit (1.52.3: 8 MB, was 2 MB). A radio with all seven series at its
+# bucket caps takes about 238 kB with values as the sources deliver them
+# (utilization and retry rate unrounded, the rest whole numbers): 13 radios
+# about 3.1 MB, 32 radios about 7.6 MB, so the radio cap fits. With every
+# float field at full precision it is about 283 kB (32 radios 9.0 MB) and
+# trimming starts at about 28 radios. Over the limit the oldest buckets are
+# trimmed to WIFI_RF_TRIM_HEADROOM below it (hourly first, then daily).
 WIFI_RF_MAX_STORE_BYTES = 8_000_000
 WIFI_RF_TRIM_HEADROOM = 0.05
 # Part 2 (wifi_rf_entities.py): a bounded entity set, pushed by SIGNAL_WIFI_RF.
