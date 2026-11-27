@@ -124,6 +124,11 @@ COOLDOWN_DEFAULT_S: Final = 1800
 COOLDOWN_BOUNDS_S: Final = (600, 86400)
 MAX_ATTEMPTS_DEFAULT: Final = 2
 MAX_ATTEMPTS_BOUNDS: Final = (1, 3)
+# Attempts are limited per sliding 24 h span of safety time (review of
+# PR #77): an attempt record keeps the times of its latest attempts, at most
+# as many as the strictest limit can need.
+ATTEMPT_WINDOW_S: Final = 86400
+RECENT_ATTEMPTS_MAX: Final = MAX_ATTEMPTS_BOUNDS[1]
 BACKOFF_BASE_DEFAULT_S: Final = 1800
 BACKOFF_BASE_BOUNDS_S: Final = (600, 86400)
 BACKOFF_CAP_DEFAULT_S: Final = 86400
@@ -1880,7 +1885,13 @@ class AttemptRecord(_Record):
     last_at: float | None = None
     cooldown_until: float | None = None
     backoff_step: int = 0
+    # the outcome of the LAST attempt; None while it is pending (never
+    # recorded) - booking an attempt resets it (review of PR #77)
     last_result: str | None = None  # a CallResult or VerificationResult value
+    # safety times of the latest attempts, oldest first (sliding window;
+    # store minor version 2). Empty in records of minor version 1: then
+    # every counted attempt is taken as made at ``last_at``.
+    recent: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate."""
@@ -1893,6 +1904,25 @@ class AttemptRecord(_Record):
             _int(self.backoff_step, "attempt.backoff_step", 0, BACKOFF_STEP_MAX),
         )
         _set(self, "last_result", _opt_code(self.last_result, "attempt.last_result"))
+        recent = _tuple(
+            self.recent,
+            "attempt.recent",
+            RECENT_ATTEMPTS_MAX,
+            lambda v: _ts(v, "attempt.recent"),
+        )
+        if not recent and self.count > 0:
+            # a record written before the sliding window: the latest known
+            # time for every counted attempt (blocks at least as long)
+            latest = self.last_at if self.last_at is not None else self.window_start
+            if latest is not None:
+                recent = (latest,) * min(self.count, RECENT_ATTEMPTS_MAX)
+        _set(self, "recent", tuple(sorted(recent)))
+
+    def times_in_window(
+        self, now: float, window_s: float = ATTEMPT_WINDOW_S
+    ) -> tuple[float, ...]:
+        """Attempt times within the sliding window that ends at ``now``."""
+        return tuple(t for t in self.recent if t > now - window_s)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

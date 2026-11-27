@@ -1,13 +1,15 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
-     Paket C1 (Branch feature/self-healing-c1, 2026-11-27). Gebaut sind heal_model.py und
-     heal_store.py (Paket B), die Kennung `rem_` in core_models.py und seit Paket C1
+     Paket D (Branch feature/self-healing-d, 2026-11-27, auf B und C1). Gebaut sind heal_model.py
+     und heal_store.py (Paket B), die Kennung `rem_` in core_models.py, seit Paket C1
      heal_engine.py, heal_views.py, der Modulschalter `self_healing_enabled` und die
-     Verdrahtung in __init__.py, config_flow.py und diagnostics.py. Aussagen zu B und C1 sind am
-     Code gelesen und mit tests/test_heal_*_v1530.py geprüft (FakeDisks, ein Test schreibt eine
-     echte Datei mit HAs Store; die C1-Tests mit dem echten Network-Intelligence-Motor der
-     P6-Tests und dem echten api/Coordinator aus tests/full_router_kit.py); nicht auf Routern,
+     Verdrahtung in __init__.py, config_flow.py und diagnostics.py, seit Paket D
+     heal_catalog.py und heal_policy.py (reine Logik, von der Engine noch nicht aufgerufen).
+     Aussagen zu B, C1 und D sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
+     Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
+     tests/full_router_kit.py); nicht auf Routern,
      nicht in einer laufenden HA-Instanz. Alles andere in dieser
      Datei ist **Plan** und als solcher markiert: Jeder Abschnitt hat eine Zeile
      „Stand heute“. Keine IPs, MACs, Hostnamen, Client-Namen, Passwörter oder Tokens;
@@ -69,6 +71,14 @@ Datensatz an, der bis „vorgeschlagen“ (PROPOSED) läuft und dort stehen blei
 und keine neue unique_id. Die Datei `openwrt_router.self_healing` entsteht mit dem ersten
 Datensatz (verzögert) und spätestens, wenn die Engine stoppt.
 
+**Stand heute (Paket D):** Dazu kommen der geschlossene Katalog (`heal_catalog.py`,
+Abschnitt 7) und die Richtlinie (`heal_policy.py`, Abschnitte 9 und 10): Risiko nach Kontext,
+Konfidenzwert, die fünf Ergebnisse, Modi und Allowlist, Schleifenschutz-Entscheidungen. Beide
+sind **reine Logik** ohne HA-Import, ohne Router-Aufruf, ohne Zeitquelle und ohne
+Ausführungsweg. Die Engine aus C1 ruft sie noch nicht auf (sie nutzt weiter
+`ObserveOnlyDecider`); das Einsetzen über die Schnittstelle `HealDecider` ist ein eigenes
+kleines Paket nach dem Merge von D. Auch Paket D ändert für Benutzer nichts.
+
 ## 2. Modulaufbau
 
 Geplant ist **eine** Instanz für die ganze Flotte je HA-Installation, verdrahtet wie Security
@@ -80,8 +90,8 @@ frei).
 |---|---|---|---|
 | `heal_model.py` | rein (ohne HA) | Zustände, die eine Übergangstabelle, `RemediationAction`, Neustartregel, Schleifenschutz-Daten, Einstellungen, Wartungsfenster; `transition()` ist der einzige Weg, einen Zustand zu ändern | **gebaut** (Paket B) |
 | `heal_store.py` | async | Store `openwrt_router.self_healing`, Schreiben vor dem Handeln, Grenzen | **gebaut** (Paket B) |
-| `heal_catalog.py` | rein | geschlossene Liste typisierter Aktionen | Plan (Paket D) |
-| `heal_policy.py` | rein | Risiko, Konfidenz, die fünf Ergebnisse, Modi, Allowlist, Schutzschalter | Plan (D, I) |
+| `heal_catalog.py` | rein | geschlossene Liste typisierter Aktionen, Parameterprüfung, Rollback-Aussage je Aktion | **gebaut** (Paket D) |
+| `heal_policy.py` | rein | Risiko nach Kontext, Konfidenzwert, die fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter und Flotten-Pause als Entscheidungen | **gebaut** (Paket D); die Engine (C1) ruft sie noch nicht auf – ein eigenes kleines Paket setzt einen `HealDecider` über `heal_policy` ein (Abschnitt 2.1), I ruft `record_outcome` |
 | `heal_preflight.py` | rein + async | Vorabprüfungen aus vorhandenen Daten, **kein Router-Aufruf** | Plan (E) |
 | `heal_playbooks.py` | rein | Playbooks A–G als versionierte Daten | Plan (F, G) |
 | `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
@@ -254,7 +264,7 @@ die Meldung nennt nur den Feldnamen, nie den Wert.
 | `prerequisites`, `planned_changes`, `expected_impact` | Listen; Auswirkung `{clients_on_router, clients_on_component, dependants (Router-Kennungen), est_outage_s}` – Zahlen, keine Client-Namen |
 | `preflight` | Liste `{check, outcome pass/fail/unknown, reason}` |
 | `approval` | `{status, guard_approval_id (apr_…), binding_hash, requested_by, decided_by, expires_at}`; `requested_by`/`decided_by` sind **Akteursarten**, keine Benutzer |
-| `backup_ref` | `{version_id (bkp_…) oder null, reason}`; für einen Dienst-Neustart `null` mit `not_needed_no_config_change` |
+| `backup_ref` | `{version_id (bkp_…) oder null, reason}`; für einen Dienst-Neustart `null` (Plan, Paket G: der Neustart schreibt keine Konfiguration, lädt aber die **gespeicherte** – eine abweichende gespeicherte Konfiguration sperrt ihn, Abschnitt 9.1) |
 | `execution` | `{attempt_no, intent_written_at, call_started_at, call_finished_at, call_result ok/rejected/inconclusive}` |
 | `verification` | `{result resolved/partial/not_resolved/unknown/new_fault, before{}, after{}, checks[]}`; `before`/`after` höchstens 32 Schlüssel, Listen höchstens 32 Einträge |
 | `rollback` | `{mechanism, statement, status}`; `mechanism` ist immer `none` |
@@ -325,7 +335,8 @@ solche Datensätze** (`is_new`: DETECTED mit genau einem Verlaufseintrag, `updat
 `from_dict` gebauter Datensatz mit anderen Werten wird abgelehnt; nur das Laden der Datei
 bringt solche Datensätze.
 
-**Stand heute:** gebaut und getestet. Niemand erzeugt bisher Datensätze außer den Tests.
+**Stand heute:** gebaut und getestet. Seit Paket C1 legt die Engine Datensätze an (Observe, bis
+PROPOSED, Abschnitt 2.1).
 
 ## 4. Zustände und Übergänge
 
@@ -406,11 +417,13 @@ sie wirklich bis zum dauerhaften Schreiben kommen: gemessen führen 30 von 40 L�
 eine Aktion aus, 48 Ausführungen insgesamt, keine doppelt. Der Test verlangt mindestens 20
 Läufe und 40 Ausführungen. (Vor dem Review lief dort keine einzige Ausführung.)
 
-**Stand heute:** gebaut und getestet; die Engine, die die Übergänge auslöst, fehlt.
+**Stand heute:** gebaut und getestet. Seit Paket C1 löst die Engine die Übergänge DETECTED →
+ANALYZED → PROPOSED und das Schließen aus; alles ab PREFLIGHT fehlt noch (C2, E, H, I).
 
 ## 5. Speicher, Neustart, Grenzen, Versionen
 
-Code: `heal_store.SelfHealingStore`. Store `openwrt_router.self_healing`, Version 1.1, über
+Code: `heal_store.SelfHealingStore`. Store `openwrt_router.self_healing`, Version 1.2 (Minor 2
+seit Paket D: Versuchsdatensätze tragen zusätzlich `recent`, Abschnitt 10.2), über
 `core_store.create_store` (private Datei, atomares Schreiben, Migrationsfunktion ab dem ersten
 Tag). Inhalt:
 
@@ -439,9 +452,11 @@ Neustartregel etwas geändert oder etwas Kaputtes übersprungen hat.
 3. Nur beim Eintritt in EXECUTING: der Schleifenschutz prüft je Schlüssel (Router, Aktion,
    Bauteil) einen offenen Schutzschalter (`breaker_open`), eine laufende Abklingzeit
    (`cooling_down`) und die Versuche in 24 h (`max_attempts`). Geht es weiter, wird der
-   Versuch **im selben Schreiben** gebucht: Zähler und 24-h-Fenster, Abklingzeit = die längere
-   von `cooldown_s` und dem exponentiellen Backoff (`backoff_base_s` · 2^(n−1), höchstens
-   `backoff_cap_s`), `execution.attempt_no` = Nummer des Versuchs. Alles auf der Sicherheitsuhr
+   Versuch **im selben Schreiben** gebucht: Zeitpunkt in `recent`, Zähler = Versuche in den
+   letzten 24 h (gleitendes Fenster, Abschnitt 10.2), Abklingzeit = die längere von `cooldown_s`
+   und dem exponentiellen Backoff (`backoff_base_s` · 2^(n−1), höchstens `backoff_cap_s`), nie
+   kürzer als eine schon laufende; das Ergebnis des neuen Versuchs ist offen (`last_result`
+   `None`); `execution.attempt_no` = Nummer des Versuchs. Alles auf der Sicherheitsuhr
    (Abschnitt 5.2). Das ist eine zweite Linie neben der Entscheidung der Engine (Paket D/I).
 4. Die Schreibnummer (`write_seq`) wird **vor** dem Warten vergeben. Die Datei mit dem neuen
    Zustand wird **sofort** geschrieben und **zurückgelesen** (im Executor). Nur wenn die
@@ -706,7 +721,9 @@ tragen Wanduhr-Zeiten des Administrators; eins fällt erst, wenn Wanduhr **und**
 Schlüssel werden ignoriert); eine unbekannte Hauptversion → `.bak` und leer, wie bei den
 Core-Speichern.
 
-**Stand heute:** gebaut und getestet; nichts lädt den Speicher, es entsteht keine Datei.
+**Stand heute:** gebaut und getestet. Seit Paket C1 lädt die Engine den Speicher beim Start; die
+Datei entsteht mit dem ersten Datensatz (Abschnitt 1). Paket D hat Minor 2 hinzugefügt
+(`recent`, Abschnitt 10.2).
 
 ## 6. Die eine Sicherheitskette
 
@@ -734,21 +751,73 @@ Guard-Aktion, kein Router-Aufruf.
 
 ## 7. Geschlossener Katalog der Aktionen
 
-Das Risiko wird berechnet (Grundklasse + Rolle + Topologie + Clients), nie nur aus dem Namen
-gelesen.
+Code: `heal_catalog.py` (Paket D), Katalogfassung `CATALOG_VERSION = 1`. Der Katalog ist
+**Daten**: je Aktion ein unveränderlicher `CatalogEntry` in einer schreibgeschützten Abbildung
+(`CATALOG`), beim Import einmal gebaut. Es gibt keine Funktion, die eine Aktion hinzufügt,
+ersetzt oder entfernt; eine Kennung aus dem Frontend, einem Dienst oder einem Vorfall wird
+nachgeschlagen, nie gedeutet. Das Risiko wird berechnet (Grundklasse + Kontext, Abschnitt 9),
+nie nur aus dem Namen gelesen.
 
-| Kennung | Router-Aufruf | Risiko | Verfügbar |
-|---|---|---|---|
-| `observe.evaluate` | keiner (vorhandene Daten) | 0 | ja |
-| `diag.refresh` | ein normaler Poll | 1 | ja, höchstens 1 je 5 min je Router |
-| `diag.ha_probes` | Netzwerkdiagnose auf HA-Seite | 1 | nur mit eingeschalteter Diagnose |
-| `service.restart` (`dnsmasq`, `odhcpd`) | `rc init` über `restart_service_typed` | 2 | **ab 1.54.0**, nur im Modus Freigabe |
-| `wifi.radio_restart` | `network.wireless down/up` (auf der Flotte nicht geprüft) | 2 | nein (`call_unverified_on_fleet`) |
-| `router.reboot` | – | 3 | nein, modelliert und gesperrt; der vorhandene Knopf bleibt |
-| `config.restore` | – | 3 | nein; Playbook F liefert nur einen Probelauf |
-| `interface.cycle` | – | 3 | nein, nur Empfehlung |
-| `client.*` (trennen, sperren, umlenken) | – | – | nie |
-| Firewall, VLAN, Management-Adresse, Routing, Firmware | – | 3 | nie in Phase 7 |
+| Kennung | Parameter (geschlossen) | Router-Aufruf (nur Name) | ACL | Status | Grundrisiko | Rollback-Aussage |
+|---|---|---|---|---|---|---|
+| `observe.evaluate` | – | keiner | – | bereit | 0 | `read_only_nothing_changes`: nichts ändert sich |
+| `diag.refresh` | – | `coordinator.refresh` (ein normaler Poll) | vorhandene Lese-Rechte | bereit; höchstens einmal je 5 min je Router (`min_interval_s = 300`, `heal_policy.interval_verdict`) | 1 | `read_only_nothing_changes` |
+| `diag.ha_probes` | – | `diag.manual_run` (HA-Seite) | – | bereit, nur mit eingeschalteter Diagnose | 1 | `read_only_nothing_changes` |
+| `service.restart` | `service` ∈ {`dnsmasq`, `odhcpd`} | `rc.init.restart` | `rc/init` (nicht in ACL v8; heute nur über die Root-Anmeldung) | **bereit** für das erste Schreib-Release (`first_write_release_approval_only`), nur mit Freigabe | 2 | `applies_saved_config_no_undo_manual_if_not_back`: der Neustart lädt die **gespeicherte** Konfiguration – weicht sie von der laufenden ab, setzt er diese Änderung in Kraft; es gibt kein Zurücknehmen; kommt der Dienst nicht wieder, **manuelle Wiederherstellung** |
+| `wifi.radio_restart` | `radio` ∈ {`radio0` … `radio3`} | `network.wireless.down_up` | `network.wireless/down`, `/up` (in ACL v8) | **gesperrt** (`call_unverified_on_fleet`) | 2 | `up_undoes_down_only_while_path_holds`: ein zweiter Aufruf (`up`) nimmt es zurück, **nur solange der Management-Weg hält**, sonst manuell |
+| `router.reboot` | – | `system.reboot` | `system/reboot` (nicht in ACL v8) | **gesperrt** (`modelled_blocked_no_out_of_band`); der vorhandene Knopf bleibt | 3 | `no_rollback_no_out_of_band_path`: kein Rollback, manuelle Wiederherstellung |
+| `config.restore` | `version_id` = `bkp_` + 32 hex | keiner (kein Ausführer) | – | **gesperrt** (`restore_dry_run_only`); Playbook F liefert nur einen Probelauf | 3 | `no_rollback_restore_is_manual`: kein Rollback, manuell |
+| `interface.cycle` | `interface` ∈ {`lan`, `wan`, `wan6`} | `network.interface.down_up` | `network.interface/down`, `/up` (nicht in ACL v8) | **gesperrt** (`recommendation_only_no_acl`), nur Empfehlung | 3 | `up_undoes_down_only_while_path_holds` |
+
+**Nie im Katalog** (eine solche Kennung wird abgelehnt wie jede unbekannte, die Erklärung
+nennt die Familie): Aktionen an Clients (`client.*`: trennen, sperren, umlenken;
+`never_client_action`), Firewall (`never_firewall`), VLAN (`never_vlan`), Management-Adresse
+(`never_management_ip`), Routing (`never_routing`), Firmware (`never_firmware`),
+`network reload` (`never_network_reload`), ein Neustart von `wpad` (`never_wpad_restart`; als
+Dienstname von `service.restart` ist `wpad` ebenfalls kein erlaubter Wert), das Löschen von
+DHCP-Leases (`dhcp.*`, `never_dhcp_lease_delete`), UCI-Schreiben und Befehle
+(`never_config_write`, `never_shell`).
+
+**Vorläufig, nicht entschieden:** Die Auswahl oben (nur `service.restart` für das erste
+Schreib-Release; Funk-Neustart, Router-Neustart, Wiederherstellen und Schnittstelle ab/an
+modelliert und gesperrt; Auto-Heal nur bis Risiko 1) ist die **strenge Voreinstellung aus dem
+Auftrag zu Paket D**. Der Eigentümer hat die offenen Fragen Q5–Q7 (Abschnitt 16) noch nicht
+beantwortet; entschieden ist nur, dass 1.53.0 nur beobachtet.
+
+Jeder Eintrag trägt außerdem: Fassung, ob er schreibt, was er unterbricht (`disruption`:
+keiner, Dienst, Funk, Schnittstelle, Router), das Zielbauteil, die **Fakten, die die Richtlinie
+braucht** (`needs_facts`, Felder von `heal_policy.RiskContext`), die **Prüfungen danach**
+(`verification_probes`, z. B. `service_running_new_pid`, `service_stable_two_polls`,
+`root_incident_not_reopened`) und die geschätzte Unterbrechung.
+
+**Prüfung** (`validate(action_type, params)` → `ValidatedAction` mit Parametern und Bauteil,
+sonst `CatalogError` mit einem Code, der den Wert nie wiederholt): die Kennung muss ein
+genaues `str` sein und im Katalog stehen (keine Groß-/Kleinschreibung, keine Leerzeichen, keine
+Unterklasse von `str`); Parameter müssen eine Abbildung mit genau den bekannten Namen sein; jeder
+Wert muss ein genaues `str` aus der geschlossenen Menge sein bzw. die feste Form `bkp_` + 32 hex
+(ganz, `fullmatch`) haben. Jeder Wert wird **genau einmal** gelesen; geprüft und behalten wird
+derselbe Wert, als schreibgeschützte Abbildung. Codes: `action_type_invalid`,
+`unknown_action`, `never_*`, `params_invalid`, `param_unknown`, `param_missing`,
+`param_value_invalid`, `entry_not_in_catalog`, `components_invalid`. Eine gesperrte Aktion
+besteht die Prüfung der Form; die Richtlinie lehnt sie als „Nicht unterstützt“ mit ihrem Grund
+ab.
+
+**Eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst** (Review PR #77):
+`__post_init__` verlangt, dass `entry` **dasselbe Objekt** wie `CATALOG[entry.action_type]` ist
+(eine gleiche oder veränderte Kopie wird mit `entry_not_in_catalog` abgelehnt), prüft die
+Parameter noch einmal und leitet die Bauteile aus ihnen ab (andere Bauteile:
+`components_invalid`). `dataclasses.replace` läuft durch dieselbe Prüfung.
+
+**DECIDED (Paket D):** keine Rollback-Art „heilt sich über den Dienst-Supervisor“. procd startet
+einen abgestürzten Dienst zwar neu, aber das ist kein Rollback: kommt `dnsmasq` nach einem
+Neustart wegen eines Konfigurationsfehlers nicht hoch, scheitert auch procd. Die Aussage für
+`service.restart` ist deshalb die strengere „keine Konfigurationsänderung, sonst manuell“.
+**DECIDED:** Funk und Schnittstelle nehmen nur Namen aus einer festen Liste
+(`radio0`–`radio3`, `lan`/`wan`/`wan6`), keine vom Router gelieferten Namen – beide Aktionen
+sind gesperrt, und eine feste Liste lässt sich nicht einschleusen.
+
+**1.53.0 führt nichts aus, was einen Router aufruft:** `EXECUTABLE_IN_RELEASE` enthält nur
+`observe.evaluate` (kein Router-Aufruf). Paket C2 (1.54.0) nimmt `service.restart` auf.
 
 Gemeinsame Vorabprüfungen (jede `pass`, `fail` oder `unknown`; `fail` oder `unknown` einer
 kritischen sperrt): Router erreichbar, Identität eindeutig, Aktion unterstützt, Rechte
@@ -760,8 +829,11 @@ Bestätigtes Commit (`uci apply` mit Rollback) gibt es in rpcd, es ist aber unge
 der ACL, deckt nur UCI ab und geht bei einem Neustart von rpcd oder des Routers verloren. Kein
 Watchdog, kein zweiter Zugangsweg.
 
-**Stand heute:** nichts davon gebaut. Das Modell kennt nur die Risikoklassen 0–3 und lehnt
-eine Allowlist mit Risiko über 1 ab (Abschnitt 10).
+**Stand heute (Paket D):** Katalog, Parameterprüfung, Rollback-Aussagen und die Liste der
+nie erlaubten Familien sind gebaut und getestet (`tests/test_heal_catalog_v1530.py`). Die
+gemeinsamen Vorabprüfungen oben sind **nicht** gebaut (Paket E); die Richtlinie liest deren
+Ergebnis heute als Fakten aus `RiskContext` (Abschnitt 9). Kein Eintrag hat einen Ausführer;
+`router_call` und `required_acl` sind nur Namen für Erklärung und Prüfung.
 
 ## 8. Playbooks A–G
 
@@ -783,23 +855,156 @@ nutzen Daten, die ohnehin gepollt werden.
 
 ## 9. Entscheidung und Konfidenz
 
-Geplante Bewertung (fest, jeder Faktor mit Grund gespeichert):
+Code: `heal_policy.py` (Paket D). Eingaben sind eingefrorene Fakten, **keine Zeit und kein
+Router-Aufruf**: `DecisionInput` (Aktion, Parameter, `IncidentFacts`, `RiskContext`, Zahl der
+fehlgeschlagenen oder unbekannten Versuche in 24 h, Konfigurationsänderung im selben Bereich in
+24 h). Jedes Feld von `RiskContext` und `IncidentFacts` darf `None` sein, ebenso die Zahl der
+früheren Versuche – das heißt „unbekannt“ und wird nie als „harmlos“ gelesen (Review PR #77:
+kein `or 0`, kein Wahrheitswert-Test auf einem Eingabefakt). `DecisionInput` nimmt nur genau
+`IncidentFacts` und `RiskContext` (keine Unterklassen) und hält die Parameter als eingefrorene
+Kopie, deren Werte genau einmal gelesen wurden.
 
-```
-base  = {confirmed: 0.9, likely: 0.7, possible: 0.4, unknown: 0.0}[cause_level]
-fit   = 1.0 (direkter Zustand des Ziels), 0.5 (nur Log-Hinweise), sonst 0
-score = base × fit − 0.3 je fehlgeschlagenem/unbekanntem Versuch desselben Schlüssels in 24 h
-                   − 0.2 bei Drift im selben Bereich in 24 h;   begrenzt auf [0, 1]
-```
+### 9.1 Risiko nach Kontext (`classify_risk`)
 
-Ergebnis (erste passende Regel): **Unsupported**, **Not Safe**, **Insufficient Evidence**
-(`score < 0.6`, eine Hypothese mit weniger als zwei Quellenfamilien, nur zeitliche Nähe,
-fehlende Logs, veraltete Hinweise), **Requires Approval** (Risiko ≥ 2, Modus Freigabe, nicht
-auf der Allowlist), **Recommended**. Zeitliche Nähe allein führt nie zu einer schreibenden
+Ausgang ist das Grundrisiko des Katalogs (Abschnitt 7). Regeln **heben nur an**, keine senkt:
+
+| Regel (Code) | gilt für | Wirkung |
+|---|---|---|
+| `role_unknown` | schreibende Aktion, Rolle des Routers unbekannt | HOCH |
+| `identity_not_confirmed` | schreibende Aktion, Identität nicht bestätigt | HOCH |
+| `open_security_finding` | schreibende Aktion, offene Erkennung des Security Centers | HOCH |
+| `in_maintenance_window` | schreibende Aktion im Wartungsfenster | mindestens MITTEL |
+| `service_disabled_on_purpose` | Dienst-Neustart eines absichtlich abgeschalteten Dienstes (er würde einen zweiten DHCP-/DNS-Server starten) | HOCH |
+| `service_config_unapplied` | Dienst-Neustart, während die gespeicherte Konfiguration des Dienstes von der laufenden abweicht (`service_config_unapplied is True`): der Neustart würde diese Änderung in Kraft setzen; richtiger Weg ist das Drift-Playbook | HOCH |
+| `service_serves_other_routers` | Dienst-Neustart auf einem Router, dessen DNS/DHCP andere Router bedient (`service_dependant_routers > 0`) | mindestens MITTEL (eigener Regelcode für die Freigabe) |
+| `target_on_management_path` | Funk oder Schnittstelle auf HAs Weg zum Router; **jeder** Router-Neustart | HOCH |
+| `wireless_uplink_radio` | Funk mit STA- oder Mesh-Schnittstelle | HOCH |
+| `uplink_for_other_routers` | Neustart eines Routers, hinter dem andere hängen; Funk/Schnittstelle, die deren Uplink trägt | HOCH |
+| `clients_affected` | Unterbrechung mit Clients am Router (Funk: am Funk) | mindestens MITTEL |
+| `context_missing` | ein Fakt aus `needs_facts` der Aktion ist unbekannt | HOCH, **nicht bewertet** |
+
+Für `service.restart` sind seit dem Review von PR #77 zusätzlich nötig: `service_enabled`,
+`service_config_unapplied`, `clients_on_router`, `dependants` (hinter dem Router hängende
+Router), `service_dependant_routers` und `service_dependant_clients` (Router und Clients, die
+DNS/DHCP dieses Routers nutzen); fehlt einer, ist das Risiko HOCH und nicht bewertet. Die Rolle
+ist für jede schreibende Aktion nötig. `classify_risk` nimmt nur eine echte `ValidatedAction`
+und genau `RiskContext`, sonst `PolicyError`.
+
+Beispiele aus der Form dieser Flotte (ein Gateway, mehrere APs; drei APs hängen hinter einem
+AP; ein kleiner AP hat dnsmasq und odhcpd absichtlich aus):
+
+- `wifi.radio_restart` (Grundrisiko 2) auf dem AP, hinter dem drei APs hängen: läuft deren
+  Uplink über diesen Funk (`target_carries_dependants`), greift `uplink_for_other_routers` →
+  HOCH; mit Mesh- oder STA-Schnittstelle zusätzlich `wireless_uplink_radio`. Derselbe Neustart
+  an einem AP am Ende der Kette, ohne Uplink und ohne Management-Weg, bleibt 2. Das Ergebnis
+  ist heute in beiden Fällen **Unsupported** (`action_disabled`, die Aktion ist gesperrt);
+  die Not-Safe-Gründe stehen trotzdem in `hits` und würden auch nach einer Freischaltung
+  sperren.
+- `service.restart dnsmasq` (Grundrisiko 2) auf dem Gateway, dessen DNS/DHCP fünf Router und
+  ihre Clients nutzen → bleibt 2 (Freigabe; **DECIDED** vom Auftraggeber: nicht höher), aber
+  mit dem Regelcode `service_serves_other_routers`, und die Freigabe zeigt Zahl der Router und
+  Clients (`impact`, siehe 9.3). Derselbe Neustart auf einem AP ohne abhängige Router hat
+  diesen Code nicht und eine kleinere Auswirkung; das Risiko sinkt nie unter 2. Auf dem kleinen
+  AP, auf dem dnsmasq absichtlich aus ist → `service_disabled_on_purpose` → HOCH, **Not Safe**:
+  „läuft nicht“ ist dort der Sollzustand.
+
+### 9.2 Konfidenzwert (`score`)
+
+Ganze Punkte von 0 bis 100 (`ScoreBreakdown.unit` = Punkte/100 für `Decision.score`). Jeder
+Beitrag steht mit Code und Grund in `contributions`; ihre Summe ist immer `total` (die
+Begrenzung ist eine eigene Zeile).
+
+| Faktor (Code) | Punkte |
+|---|---|
+| `cause_level` | confirmed 40 · likely 30 · possible 15 · unknown/fehlt 0 |
+| `cause_status` | bestätigte Ursache +10, Hypothese 0 |
+| `incident_confidence` | 10 × Konfidenz des Vorfalls (0–1), kaufmännisch gerundet; fehlt: 0 |
+| `source_families` | 0 Familien 0 · 1 Familie 5 · 2 und mehr 10 |
+| `target_fact` | direkter Zustand des Ziels 30 · nur Log-Hinweis 10 · keiner 0 |
+| `prior_attempts` | −25 je fehlgeschlagenem oder offenem Versuch desselben Schlüssels in 24 h; **Verlauf unbekannt** (`None`): −25 (`prior_attempts_unknown`) und eine schreibende Aktion ist gesperrt (`history_unknown`) |
+| `config_change` | −20 bei einer Konfigurationsänderung im selben Bereich in 24 h **oder wenn unbekannt** |
+| `severity` | Schwere `info` −10, **unbekannt** (`None`, `severity_unknown`) ebenfalls −10, sonst 0 |
+| `clamp` | was nötig ist, damit die Summe in 0..100 bleibt |
+
+Schwelle für eine schreibende Aktion: **60** (`PolicyLimits.score_min`, nur strenger
+einstellbar: 60–100). Ein bestätigter Wurzelvorfall (Konfidenz 1,0, Schwere nicht `info`,
+keine Konfigurationsänderung) mit direktem Zielzustand und zwei Quellenfamilien liegt bei
+40+10+10+10+30 = 100; derselbe Vorfall mit einem gescheiterten
+Versuch in 24 h bei 75, mit zweien bei 50 (unter der Schwelle).
+
+### 9.3 Die fünf Ergebnisse (`decide`)
+
+`decide()` sammelt **jede** Regel, die greift (`hits` mit Code, Ergebnis, sperrend ja/nein,
+Einzelheiten ohne Adressen), und nimmt das erste Ergebnis in dieser Reihenfolge:
+
+1. **Unsupported**: Kennung nicht im Katalog oder `never_*`, Parameter abgelehnt, Aktion
+   gesperrt (`action_disabled` mit ihrem Grund), schreibende Aktion für einen Folgevorfall
+   (`not_root_incident`, repariert wird nur der Wurzelvorfall), Diagnose aus
+   (`diagnostics_off`).
+2. **Not Safe** (nur schreibende): Router nicht erreichbar, die harten Risikogründe aus 9.1
+   (Identität, Rolle, Security, absichtlich aus, ungeladene Dienst-Konfiguration,
+   Management-Weg, Funk-Uplink, Uplink anderer Router), offener Schutzschalter, gleichzeitige
+   Reparatur, **Ursache sicher außerhalb des Routers** bei einem Dienst-Neustart
+   (`cause_outside_router`, Regel von Playbook A), bewertetes Risiko HOCH
+   (`risk_high_no_recovery`: es gibt keinen Rollback-Mechanismus).
+3. **Insufficient Evidence**: ein nötiger Fakt fehlt (`context_missing`); für schreibende
+   außerdem Verlauf der Versuche unbekannt (`history_unknown`), kein Vorfall, Wurzel unbekannt,
+   bei einem Dienst-Neustart Ort der Ursache unbekannt (`cause_location_unknown`), **nur
+   zeitliche Nähe**
+   (`temporal_correlation_only`), veraltete Hinweise, Hypothese mit weniger als zwei
+   Quellenfamilien, kein direkter Zielzustand, Wert unter der Schwelle. Nächster Schritt ist
+   dann immer `diag.refresh`.
+4. **Requires Approval**: schreibende Aktion mit Risiko ≥ 2.
+5. **Recommended**: alles andere (Diagnose, Risiko ≤ 1).
+
+Dazu zwei Hinweise, die nie sperren: `impact_summary` (Art der Unterbrechung, Clients am
+Router und am Ziel, abhängige Router, **Router und Clients, die DNS/DHCP dieses Routers
+nutzen**, geschätzte Unterbrechung) und `recovery_statement` (Rollback-Art und -Aussage aus
+dem Katalog). Dieselbe Auswirkung steht in `PolicyDecision.impact` und in der Erklärung;
+`to_impact()` liefert den `Impact`-Datensatz des Modells für den Plan (bei einem
+Dienst-Neustart sind `clients_on_component` die Clients, die den Dienst nutzen; die Kennungen
+der abhängigen Router füllt die Engine). Jeder Code hat einen deutschen Satz in
+`REASON_TEXT_DE`; `PolicyDecision.explanation()` liefert Ergebnis, Begründung, Auswirkung und
+alle Regeln als Klartext, `to_model()` den `Decision`-Datensatz des Modells.
+
+**Zeitliche Nähe allein führt nie zu einer schreibenden Aktion:** `temporal_only` muss
+ausdrücklich `False` sein; `None` zählt wie `True`. Eine lesende Aktion bleibt erlaubt und
+bekommt den Hinweis `temporal_link_diagnose_only`.
+
+**DECIDED (Paket D, jeweils die strengere Lesart):** fehlender Kontext → Risiko HOCH,
+„nicht bewertet“ und **Insufficient Evidence** (nicht Not Safe: erst nachsehen, dann
+entscheiden); unbekannte Frische zählt als veraltet, unbekannte Konfigurationsänderung als
+Änderung, unbekannte Wurzel als Insufficient Evidence; jeder Router-Neustart gilt als auf dem
+Management-Weg; Schwere `info` kostet 10 Punkte; Requires Approval hängt am Risiko, nicht am
+Modus – den Modus prüft erst `gate()` (Abschnitt 10). **DECIDED (Review PR #77):** unbekannter
+Verlauf der Versuche kostet 25 Punkte und sperrt jede schreibende Aktion; unbekannte Schwere
+zählt wie `info`; unbekannter Ort der Ursache sperrt einen Dienst-Neustart (Insufficient
+Evidence), sicher außerhalb heißt Not Safe; eine ungeladene Dienst-Konfiguration heißt Not
+Safe für den Neustart, unbekannt Insufficient Evidence, nur sicher `False` lässt ihn weiter.
+Die allgemeinen −20 für eine Konfigurationsänderung in 24 h bleiben daneben.
+
+**Stand heute (Paket D):** Risiko, Wert, Ergebnis und Erklärung sind gebaut und getestet
+(`tests/test_heal_policy_v1530.py`). Wer die Fakten füllt (Network Intelligence, Security
+Center, Topologie, Vorabprüfungen), ist offen (Anbindung an die Engine aus C1 als eigenes
+Paket, dazu E, F); bis dahin ist jedes unbekannte Feld „unbekannt“ und sperrt eine schreibende
 Aktion.
 
-**Stand heute:** nur die Daten: `Decision` (Ergebnis, `score`, `factors`, `why`, `why_not`),
-`Risk`, `Cause`. Keine Bewertung.
+**Anbindung an die Engine (eigenes Paket nach dem Merge von D, hier nicht gebaut):** Die
+Schnittstelle `HealDecider` aus C1 (Abschnitt 2.1) lässt sich mit den öffentlichen Funktionen
+bedienen: ein `PolicyDecider.propose(context)` baut aus `DecisionContext` einen
+`DecisionInput` (Aktion und Parameter aus dem Datensatz; `role`, Identität =
+`identity_status == "confirmed"`, `in_maintenance` in `RiskContext`), ruft `gate()` und gibt
+`Proposal(decision=d.to_model(), risk=d.risk.to_model(), expected_impact=d.to_impact(),
+executable=False)` zurück. Ein Probelauf außerhalb des Repos mit dieser Form läuft durch die
+Prüfung der Engine (`_decide`) ohne `decider_failed`. `DecisionContext` hat heute **nicht**:
+Erreichbarkeit, abhängige Router, Clients, Security-Erkennungen, gleichzeitige Reparatur,
+Schutzschalter, die Dienst- und Zielfakten, `diag_enabled`, alle `IncidentFacts`
+(Schwere, Ursachenstufe, Konfidenz, Wurzel, Frische, Zielzustand, Ursache außerhalb), den
+Verlauf der Versuche (`prior_failed_attempts` aus `LoopState` auf der Sicherheitsuhr) und
+Konfigurationsänderungen in 24 h. Ohne sie bleibt jede schreibende Aktion Insufficient
+Evidence – streng, aber ohne Nutzen. Die Engine nutzt heute `SelfHealingStore.effective_mode()`
+(bei Flotten-Pause Freigabe statt Observe); das Anbindungspaket soll den Modus über `gate()`
+bzw. `heal_policy.effective_mode` nehmen.
 
 ## 10. Modi, Wartung, Schleifenschutz
 
@@ -814,9 +1019,9 @@ Entscheidungen des Eigentümers, im Modell umgesetzt:
   (`DEFAULT_MODULE_ENABLED = True`, `DEFAULT_MODE = observe`; `HealSettings.from_dict({})`
   liefert genau das, ebenso jeder unbekannte Router über `HealSettings.router(rid)`).
 - **Auto-Heal ist nie voreingestellt, die Allowlist ist leer.**
-- **DECIDED (Frage Q7, die strengere Lesart):** Eine Allowlist darf nur Aktionen bis Risiko 1
-  enthalten (`AUTO_HEAL_MAX_RISK`); Risiko 2 und 3 lehnt das Modell ab. Höchstens 16 Einträge
-  je Router.
+- **Vorläufig (Frage Q7, strenge Voreinstellung, bis der Eigentümer entscheidet):** Eine
+  Allowlist darf nur Aktionen bis Risiko 1 enthalten (`AUTO_HEAL_MAX_RISK`); Risiko 2 und 3
+  lehnt das Modell ab. Höchstens 16 Einträge je Router.
 
 **Wartung:** Netz und Router übernehmen das Wartungsfenster und den Router-Schalter von Network
 Intelligence (eine Wahrheit für beide Module). Schnittstellen und Dienste bekommen eigene
@@ -829,11 +1034,12 @@ Router, Ziel, Beginn, Ende oder offen, Grund, angelegt von `engine` oder `admin`
 | Mechanismus | Standard | Grenzen |
 |---|---|---|
 | Abklingzeit je (Router, Aktion, Bauteil) | 30 min | 10 min – 24 h |
-| Versuche je Schlüssel in 24 h | 2 | 1–3 |
+| Versuche je Schlüssel in **jeder** Spanne von 24 h (gleitendes Fenster) | 2 | 1–3 |
 | Wartezeit zwischen Versuchen | 30 min × 2^n | höchstens 24 h |
 | Schutzschalter je Schlüssel | schließt nur durch Bestätigung eines Administrators | – |
 | Flotten-Pause | ab 3 Fehlschlägen in 24 h, 24 h lang | 1–10; 1 h – 7 Tage |
 | gleichzeitig laufende Aktionen in der Flotte | 1 | 1 |
+| Mindestabstand je Router und Aktion (Katalog `min_interval_s`) | `diag.refresh`: 5 min | – |
 | Doppelte (Review P2-6) | eine offene Aktion je (Router, Aktion, Parameter), **je Wurzelvorfall** (flottenweit) und **je (Router, Bauteil)** über alle Bauteile der Aktion (ohne Bauteil: der Router selbst); sonst wird die vorhandene offene Aktion zurückgegeben | – |
 | Router-Sperre | eine laufende Reparatur je Router | – |
 | Hold | Router (oder Flotte) nur Observe, Abschnitt 5.1 | – |
@@ -857,12 +1063,138 @@ mit `release_external_lock(router_id, lock_id)` frei und halten ihren Schreibzug
 `record_external_write()` fest (Router, Quelle, Ziel, Zeitpunkt, Audit-Kennung; die letzten
 200). Eine hängende Fremd-Sperre entfernt nur ein Administrator (Abschnitt 5.1).
 
+### 10.1 Richtlinie: Modus, Freigabe, Auto-Heal (`gate`, Paket D)
+
+`gate(inp, mode=…, allowlist=…, module_enabled=…, held=…, fleet_paused=…, guards_green=…,
+limits=…)` sagt, was mit der Aktion eines `DecisionInput` auf einem Router geschehen darf
+(`Permission`: `none`, `recommend`, `run_read_only`, `needs_approval`, `auto_run`).
+
+**Der Gate nimmt die Eingabe, nie eine Entscheidung** (Review PR #77, P1): er prüft Aktion und
+Parameter selbst gegen den Katalog und ruft `decide()` selbst auf; die Entscheidung, die er
+dabei getroffen hat, steht in `GateVerdict.decision`. Eine von außen gebaute, mit
+`dataclasses.replace` veränderte oder umetikettierte `PolicyDecision` kann deshalb nichts
+freischalten – es gibt keinen Weg, sie dem Gate zu geben (ein anderer Typ als genau
+`DecisionInput` ist ein `PolicyError`). `limits` muss genau `PolicyLimits` sein. Ob Wartung
+ist, liest der Gate aus `inp.context.in_maintenance` – derselbe Fakt, den `decide()` liest
+(eine Quelle). `gate_for_router()` liest Modus, Allowlist, Hold und Pause aus `HealSettings`
+und `LoopState`, auf der Sicherheitsuhr. Prüfreihenfolge, die erste passende gewinnt:
+
+1. `module_enabled`, `held` oder `fleet_paused` ist kein echter Wahrheitswert (etwa `None`)
+   → `none` (`gate_input_invalid`). Modul aus → `none` (`module_disabled`).
+2. Aktion oder Parameter vom Katalog abgelehnt → `none` mit dem Code der Ablehnung; Aktion
+   gesperrt (`action_disabled`) oder ihr Risiko **unter** dem Grundrisiko des Katalogs
+   (`risk_below_catalog`) → `none`.
+3. **Risiko 3 → immer `none`** (`risk_high_never_authorised`) – kein Modus, kein Schalter und
+   keine Allowlist ändert das.
+4. Entscheidung nicht Recommended oder Requires Approval → `none` (`decision_blocked`).
+5. Risiko 0 und nicht schreibend → `run_read_only` in jedem Modus.
+6. **Wirksamer Modus** (`effective_mode`): Modul aus → Observe; **gesperrter Router (Hold) oder
+   pausierte Flotte → Observe für alles ab Risiko 1** (Entscheidung des Eigentümers); einer der
+   drei Schalter kein echter Wahrheitswert → Observe; sonst der eingestellte Modus.
+7. Observe → `recommend` (Grund `observe_mode`, `router_held` oder `fleet_paused`).
+8. Freigabe → `needs_approval` für alles ab Risiko 1.
+9. Auto-Heal → `auto_run` **nur**, wenn die Aktion Risiko ≤ 1 hat, nicht Requires Approval ist,
+   ein gültiger Allowlist-Eintrag sie mit genau diesen Parametern deckt, **sicher keine**
+   Wartung ist (`inp.context.in_maintenance is False`) und alle Vorabprüfungen **sicher grün** sind
+   (`guards_green is True`); sonst `needs_approval` mit allen Gründen (`risk_above_auto_limit`,
+   `not_allowlisted`, `in_maintenance`, `guards_not_green`).
+
+Darf etwas laufen (`run_read_only`, `auto_run`), aber das Release kann die Aktion nicht
+ausführen, kommt `not_in_release` dazu und `executable_now` bleibt falsch. In 1.53.0 ist nur
+`observe.evaluate` ausführbar.
+
+**DECIDED (Paket D):** eine pausierte Flotte heißt in der Richtlinie **Observe** (Regel des
+Eigentümers), strenger als `SelfHealingStore.effective_mode()` aus Paket B, der dann Freigabe
+liefert. Ein Test hält fest, dass die Richtlinie nie mehr erlaubt als der Speicher; die Engine
+(Anbindung nach C1, dann I) soll `heal_policy.effective_mode` bzw. `gate` benutzen. **DECIDED:** `diag.refresh`
+hat Risiko 1, ist also im Modus Observe nur eine Empfehlung und in 1.53.0 nicht ausführbar.
+**DECIDED (Review PR #77):** der Gate nimmt den `DecisionInput` und entscheidet selbst
+(statt `PolicyDecision` unbaubar zu machen); ein Schalter, der kein echter Wahrheitswert ist,
+heißt `none`.
+
+**Allowlist** (`validate_allowlist(vorschlag)` → `AllowlistVerdict`, alles oder nichts):
+abgelehnt werden keine Liste (`allowlist_invalid`), mehr als 16 Einträge (`too_many_entries`),
+ein Eintrag, den das Modell ablehnt (`entry_invalid`, darunter `max_risk` über 1), unbekannte
+und `never_*`-Aktionen, gesperrte Aktionen (`action_disabled`), Parameter außerhalb der
+geschlossenen Mengen, Aktionen mit Grundrisiko über 1 (`risk_above_auto_limit`: Risiko 2 und 3
+nie), ein `max_risk` unter dem Risiko der Aktion (`max_risk_below_action_risk`, er könnte nie
+passen) und Doppelte (`duplicate_entry`). `is_allowlisted()` prüft jeden gespeicherten Eintrag
+beim Lesen noch einmal; ein Eintrag, der heute nicht mehr gültig wäre, passt nie. Heute bleibt
+damit nur `diag.refresh` und `diag.ha_probes` als möglicher Allowlist-Inhalt.
+
+### 10.2 Schleifenschutz als Entscheidungen (Paket D)
+
+Alle Zeiten sind Zeiten der **Sicherheitsuhr** (`safe_now`, Abschnitt 5.2), nie die Wanduhr;
+`safe_now_of(clock)` liest nur `clock.safe`.
+
+- **Gleitendes Fenster** (Review PR #77, **DECIDED** vom Auftraggeber): höchstens N Versuche in
+  **jeder** Spanne von 24 h Sicherheitszeit, nicht in einem festen Fenster, das nach 24 h neu
+  anfängt. Jeder Versuchsdatensatz hält dafür die Zeitpunkte der letzten (höchstens 3 =
+  größtes N) Versuche in `recent`; gezählt werden die, die jünger als 24 h sind
+  (`AttemptRecord.times_in_window`). Sind N aufgebraucht, darf der nächste Versuch erst, wenn
+  der älteste der N letzten die Spanne verlässt: `retry_at` = dessen Zeit + 24 h.
+- **Abklingzeit und Wartezeit** (`cooldown_after`, `backoff_schedule`, `book_attempt`): nach
+  Versuch *n* in den letzten 24 h wartet der Schlüssel max(Abklingzeit, min(Basis × 2^(n−1),
+  Obergrenze)). Mit den Standards (30 min, Basis 30 min, Obergrenze 24 h, 2 Versuche) heißt das
+  **1800 s nach dem ersten, 3600 s nach dem zweiten Versuch**; bei 3 erlaubten Versuchen 1800,
+  3600, 7200 s. Eine laufende Abklingzeit wird **nie verkürzt** (`max(alt, neu)`), auch nicht
+  wenn ältere Versuche die Spanne verlassen haben. Beim Buchen wird das Ergebnis auf „offen“
+  (`None`) gesetzt. `book_attempt` bucht genau wie `heal_store._next_attempts` (ein Test
+  vergleicht beide über Zufallsfolgen).
+- **Speicherformat** (`heal_store`, Minor 2, nur hinzugefügt): `recent` ist ein neues Feld des
+  Versuchsdatensatzes. Eine Datei des bisherigen Stands (Minor 1, ohne `recent`) lädt weiter;
+  ihre Versuche gelten streng als **zum Zeitpunkt des letzten Versuchs** (`last_at`, sonst
+  `window_start`) gemacht, so oft wie `count` (höchstens 3) – das zählt nie weniger als vorher.
+- **Darf noch ein Versuch laufen** (`loop_verdict`, `loop_verdict_for`), Reihenfolge: offener
+  Schutzschalter auf irgendeinem Schlüssel (`breaker_open`, kein Zeitpunkt – nur ein
+  Administrator schließt), Flotten-Pause (`fleet_paused`, bis zu ihrem Ende), Abklingzeit
+  (`cooling_down`, bis zur spätesten), Versuche in den letzten 24 h aufgebraucht
+  (`max_attempts`, bis der älteste zählende die Spanne verlässt). Dieselbe Reihenfolge wie
+  `heal_store._attempt_refusal`.
+- **Mindestabstand** (`interval_verdict(action, last_run_at=…, safe_now=…)`): eine Aktion mit
+  `min_interval_s` im Katalog (heute `diag.refresh`, 300 s) läuft je Router höchstens einmal in
+  diesem Abstand; sonst `min_interval` mit `retry_at`. `last_run_at` `None` heißt „lief hier nie“.
+- **Schutzschalter** (`record_outcome`, `OutcomeEvent`): **sofort offen** nach jedem Ausgang,
+  der den Router sperrt (`not_resolved`, `partial`, `new_fault`, `unknown`, `escalated`,
+  `stuck_released`), nach `rolled_back` und nach jedem unterbrochenen Versuch
+  (`outcome_event_for` liefert dann `unknown`) – damit sind die beiden Auflagen für Paket I
+  aus Abschnitt 15 erfüllt. Eine saubere Ablehnung durch den Router vor jeder Änderung
+  (`rejected`) zählt und öffnet nach **1** automatischen oder **2** manuellen Fehlschlägen
+  (`PolicyLimits`, nur strenger einstellbar). `resolved` schließt **nie** einen offenen
+  Schalter und setzt den Zähler **nicht** zurück (Review PR #77, **DECIDED**: sonst öffnen
+  manuelle Ablehnungen im Wechsel mit Erfolgen ihn nie); die Fehlschläge zählen, bis ein
+  Administrator bestätigt. Schließen und Zurücksetzen nur `acknowledge_breaker(…, actor=admin)`.
+- **Flotten-Pause:** jeder Ausgang außer `resolved` ist ein Fehlschlag; 3 Fehlschläge in 24 h
+  (Sicherheitsuhr) pausieren Auto-Heal flottenweit für 24 h (Grund `fleet_failures`); eine
+  schon laufende längere Pause bleibt.
+- **Doppelte** (`dedupe_verdict`): je (Router, Aktion, Parameter), je Wurzelvorfall und je
+  (Router, Bauteil), mit denselben Kennungen wie der Speicher; zurück kommen die Kennung der
+  vorhandenen offenen Aktion und die Art (`action`, `incident`, `component`). Aktion,
+  Parameter und Bauteile kommen aus der Prüfung des Katalogs, nie vom Aufrufer (eine
+  abgelehnte Aktion ist ein `CatalogError`).
+- **Konfidenzwert:** `prior_failed_attempts()` zählt für Abschnitt 9.2 die Versuche
+  desselben Schlüssels in den letzten 24 h, die nicht sicher erfolgreich waren. Der Speicher
+  hält je Schlüssel die Zeitpunkte und nur das Ergebnis des **letzten** Versuchs; nur wenn
+  dieser letzte in der Spanne liegt und `resolved` ist, zählt er nicht. Ein Versuch, dessen
+  Ausgang noch nicht festgehalten ist, zählt als **offen**, nie als Erfolg (das Buchen setzt
+  das Ergebnis zurück). Über mehrere Schlüssel gilt der höchste Wert.
+
+Beispiel aus dem Auftrag: `service.restart dnsmasq` scheitert zweimal am selben Router
+(`not_resolved`). Nach dem ersten Mal ist der Schutzschalter des Schlüssels offen; ein zweiter
+Versuch kommt ohne Bestätigung eines Administrators gar nicht zustande. Scheitern in 24 h
+drei Aktionen irgendwo in der Flotte, pausiert die Flotte 24 h und jeder Router gilt ab Risiko 1
+als Observe.
+
 **Stand heute:** Grenzen, Zähler, Sperre, Holds und Fremd-Schreibzugriffe gibt es als Daten mit
 Prüfung, Speicherung und Tests. Der Speicher zählt Versuche und hält Abklingzeit, Versuche in
 24 h, offene Schutzschalter und Holds beim dauerhaften Schritt nach EXECUTING ein (Abschnitt 5).
-Es gibt **keine Logik**, die einen Schutzschalter öffnet oder die Flotte nach Fehlschlägen
-pausiert – außer der Pause nach einem verlorenen oder beschädigten Speicher. Knöpfe und
-Schalter benutzen die Sperre noch nicht.
+**Paket D** liefert die Logik, die einen Schutzschalter öffnet, die Flotte nach Fehlschlägen
+pausiert und den Modus wirksam macht – als reine Funktionen, die neue Kopien zurückgeben. Noch
+ruft sie niemand auf und nichts schreibt ihr Ergebnis in den Speicher (die Engine aus C1 geht
+nur bis PROPOSED; Anbindung als eigenes Paket, Ausgänge mit I). Am Speicher aus Paket B hat Paket D nur das gleitende Fenster, die nie verkürzte
+Abklingzeit und das offene Ergebnis beim Buchen geändert (Review PR #77, Punkte 6–8, Minor 2).
+Der dauerhafte Schritt des Speichers lehnt während einer Flotten-Pause noch **nicht** ab
+(siehe Abschnitt 15). Knöpfe und Schalter benutzen die Sperre noch nicht.
 
 ## 11. HTTP-API, Entitäten, Ereignisse, Dienste
 
@@ -943,11 +1275,16 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Nicht-Administrator oder Automation löst ein Schreiben aus | Guard, schreibende Routen nur für Administratoren, keine Dienste, nur lesende Entitäten | Plan |
 | Freigabe wiederholt, doppelt ausgeführt | einmalige Schreiberlaubnis, Idempotenz, Prüfsumme | **teilweise**: das Modell lässt EXECUTING nur einmal zu; der Speicher gibt bei gleicher Idempotenz-, Aktions-, Vorfall- oder Bauteilkennung die vorhandene Aktion zurück, lehnt eine Idempotenz-Kennung ohne Datensatz ab, und die Eingaben dieser Prüfung sind eingefroren |
 | Zustand ändert sich zwischen Freigabe und Ausführung | `binding_hash` mit Fingerabdruck, letzte Vorabprüfung | Funktion `binding_hash()` vorhanden; Bindung und Fingerabdruck sind nach der Planung unveränderlich |
-| Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; Öffnen der Schutzschalter fehlt (Paket I) |
+| Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; die Logik, die Schutzschalter öffnet und die Flotte pausiert, ist gebaut (`heal_policy.record_outcome`, Paket D), aber noch nicht aufgerufen (Anbindung an die Engine aus C1 als eigenes Paket, Ausgänge mit I) |
+| Automatischer Eingriff nur wegen zeitlicher Nähe | `temporal_only` muss ausdrücklich `False` sein, sonst Insufficient Evidence | **gebaut** in der Richtlinie (Abschnitt 9.3) |
+| Risiko 3 über einen allgemeinen Schalter oder eine Allowlist erlaubt | Risiko 3 nie erlaubt; Allowlist nur bis Risiko 1; der Gate prüft Katalog und Parameter selbst und trifft die Entscheidung selbst | **gebaut** in der Richtlinie (Abschnitt 10.1) |
+| Gefälschte oder veränderte Entscheidung (eigener Konstruktor, `dataclasses.replace`, andere Parameter als geprüft) | `gate()` nimmt nur den `DecisionInput` und ruft `decide()` selbst; eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst, mit erneuter Prüfung der Parameter; Parameter werden einmal gelesen und eingefroren | **gebaut** (Review PR #77, Abschnitte 7 und 10.1) |
+| Unbekannter Kontext als harmlos gelesen | jedes unbekannte Feld zählt als HOCH und nicht bewertet; unbekannter Verlauf der Versuche sperrt ein Schreiben; Schalter des Gates (`held`, `fleet_paused`, `module_enabled`) müssen echte Wahrheitswerte sein | **gebaut** (Abschnitte 9 und 10.1) |
+| Versuchsgrenze am Fensterrand umgangen (zwei Versuche kurz vor und zwei kurz nach dem Ende eines festen Fensters) | gleitendes Fenster: höchstens N Versuche in jeder Spanne von 24 h; Abklingzeit nie verkürzt; offener Ausgang zählt nie als Erfolg | **gebaut** in Richtlinie und Speicher (Abschnitt 10.2) |
 | Ergebnis unbekannt, die nächste Aktion verschlimmert es | Hold bis zur Freigabe durch einen Administrator | **gebaut** im Speicher (Abschnitt 5.1) |
 | Wanduhr springt (NTP, RTC, Hand) | Sicherheitsuhr: monotone Zeit im Lauf, Höchstmarke der Wanduhr über Starts, im Zweifel länger warten | **gebaut** (Abschnitt 5.2); ein Start kann höchstens 900 s gewinnen |
-| Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | Plan |
-| Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab |
+| Erzwungene Störungen (DNS absichtlich kaputt) | höchstens 2 Versuche in 24 h, Regel „Ursache außerhalb“ | **teilweise**: die Richtlinie sperrt einen Dienst-Neustart bei `cause_outside_router` (sicher außerhalb: Not Safe, unbekannt: Insufficient Evidence); den Fakt füllt erst Paket F |
+| Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab; der Katalog (Paket D) nimmt nur genaue `str` aus geschlossenen Mengen, keine Unterklassen, keine Zusatzschlüssel, und wiederholt abgelehnte Werte nie; nie-Familien (Client, Firewall, VLAN, Management, Routing, Firmware, `network`, `wpad`, UCI, Shell) stehen nicht im Katalog. Kein Schreibweg vorhanden |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
 | Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | Sperre und Fremd-Schreibzugriff als Daten vorhanden, noch nicht benutzt |
@@ -959,16 +1296,23 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Paket | Inhalt | Stand |
 |---|---|---|
 | **B** | Zustandsmaschine, Datenmodell, Speicher, Neustartregel, Grenzen | **gebaut** (PR #75) |
-| C1 | Engine-Gerüst, Modulschalter, Verdrahtung, lesende Routen, Listener | **dieser Stand** (nur Observe, Abschnitt 2.1 und 11) |
-| D | Katalog und Richtlinie | offen |
+| **C1** | Engine-Gerüst, Modulschalter, Verdrahtung, lesende Routen, Listener | **gebaut** (PR #78; nur Observe, Abschnitt 2.1 und 11) |
+| **D** | Katalog (`heal_catalog.py`) und Richtlinie (`heal_policy.py`): Risiko nach Kontext, Konfidenzwert, fünf Ergebnisse, Modi, Allowlist, Abklingzeit, Schutzschalter, Flotten-Pause – reine Logik; die Engine ruft sie noch nicht auf (eigenes kleines Paket nach dem Merge: ein `HealDecider` über `heal_policy`, Abschnitt 2.1) | **dieser Stand** |
 | E | Vorabprüfungen | offen |
-| F | Playbooks A–G | offen |
+| F | Playbooks A–G; **muss `IncidentFacts.cause_outside_router` füllen** (Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt) – bis dahin ist er `None` und sperrt jeden Dienst-Neustart (Insufficient Evidence) | offen |
 | G | Anbindung Configuration Manager (Sicherungsverweis, Drift-Plan, Probelauf) | offen |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
-| I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
+| I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
 | J | Tab im Dashboard | offen |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
+
+**Auflage für Paket I oder C2 (Review PR #77):** der dauerhafte Schritt des Speichers nach
+EXECUTING (`heal_store._attempt_refusal`) prüft heute Hold, Schutzschalter, Abklingzeit und
+Versuche, aber **keine Flotten-Pause**. Die Richtlinie lehnt in der Pause ab (`loop_verdict`,
+`fleet_paused`); damit der Speicher nie lockerer ist als die Richtlinie, muss dieser Schritt
+während einer Flotten-Pause ebenfalls ablehnen. Paket D hat das nicht geändert (erlaubt waren
+im Speicher nur die Punkte 6–8 des Reviews).
 | L | Gesamttests, Leistung, Sicherheitsprüfung, Doku | offen |
 
 Entscheidungen des Eigentümers:
@@ -993,9 +1337,9 @@ Hold.
 | Q2 | Standard nach dem Update | **entschieden:** an, jeder Router in Observe; Auto-Heal nie voreingestellt, Allowlist leer |
 | Q3 | Router-Rechte für `rc init` | offen (Empfehlung des Entwurfs: Root-Anmeldung dokumentieren, später ein eigener rpcd-Benutzer) |
 | Q4 | vorhandene Knöpfe und Schalter | **teilweise:** Sperre je Router und Erfassen von Schreibzugriffen außerhalb der Engine sind im Modell; ob Knöpfe und Schalter sie benutzen und ob sie nur für Administratoren werden, ist offen |
-| Q5 | Funk-Neustart | offen (Entwurf: nicht in 1.54.0) |
-| Q6 | Router-Neustart als Aktion | offen (Entwurf: nie im Katalog) |
-| Q7 | Was Auto-Heal enthalten darf | offen; das Modell setzt die strengere Lesart um: nur Risiko ≤ 1 |
+| Q5 | Funk-Neustart | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): modelliert und gesperrt; nur `service.restart` (dnsmasq, odhcpd, Risiko 2, nur mit Freigabe) ist für das erste Schreib-Release vorgesehen |
+| Q6 | Router-Neustart als Aktion | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): modelliert und gesperrt, ebenso Wiederherstellen und Schnittstelle ab/an; der vorhandene Knopf bleibt |
+| Q7 | Was Auto-Heal enthalten darf | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): nur Risiko ≤ 1; Risiko 3 erlaubt kein allgemeiner Schalter; unbewertetes Risiko zählt als HOCH |
 | Q8 | Watchdog auf dem Router | offen (Entwurf: keiner) |
 
 ## 17. Tests und was nicht geprüft ist
@@ -1037,6 +1381,65 @@ Hold.
   Tests für Schutzmechanismen ohne scheiternden Test: Wartungsfenster nur bei beiden Uhren,
   veraltete Endstempel, Datensätze ohne Stempel, Zurücksetzen der monotonen Bezugszeit beim Laden,
   monotone Uhr rückwärts. Jeder Schutz wurde einzeln entfernt; die Tests scheitern dann.
+- `tests/test_heal_catalog_v1530.py` (Paket D, 86 Tests): der Katalog ist genau die Liste des
+  Eigentümers, jeder Eintrag ist in sich stimmig (Status mit Grund, Rollback-Art passt zur
+  Aktion – schreibende nie `read_only`, Neustart, Wiederherstellen und Dienst-Neustart nur
+  manuell; die Fakten sind Felder von `RiskContext`, im Richtlinien-Test), `service.restart` ist
+  die einzige bereite schreibende Aktion, 1.53.0 führt nichts aus, was einen Router aufruft,
+  der Katalog ist unveränderlich, die Tabelle ist reines JSON; Prüfung gültiger und gesperrter
+  Aktionen, jede nie-Familie, Parameterfehler (auch Shell-Zeichen, Groß-/Kleinschreibung,
+  Unterklassen von `str`), Fehlermeldungen ohne den Wert; dazu eine Eigenschaftsprüfung mit
+  5 Startwerten × 2000 zufälligen Kennungen und Parametern (nur Katalogeinträge kommen durch).
+- `tests/test_heal_policy_v1530.py` (Paket D, 141 Tests): Risiko je Rolle und Topologie, jede
+  Kontextregel einzeln, fehlender Kontext, Risiko sinkt nie (Zufall); die Regeltabelle des
+  Werts, Summe und Wiederholbarkeit; alle fünf Ergebnisse mit Erklärung und deutschem Text;
+  nicht erlaubte Aktionen, Risiko 3 über einen allgemeinen Schalter, gefälschtes Risiko (zu
+  hoch und unter dem Katalog); jede Not-Safe- und Insufficient-Regel, zeitliche Nähe als
+  Eigenschaft, Folgevorfall, Diagnose aus, Grenzen von `PolicyLimits`; Observe, Freigabe,
+  Auto-Heal, Hold, Pause, Wartung, Modul aus, `effective_mode`, `gate_for_router`;
+  Allowlist-Prüfung und erneute Prüfung gespeicherter Einträge; Wartezeit, Abklingzeit,
+  Versuche und Fenster **gegen `heal_store._attempt_refusal` und `_next_attempts`**;
+  Schutzschalter je Ausgang, Schwelle für `rejected`, `outcome_event_for` gegen
+  `hold_reason_for`, unterbrochen → `unknown`; Flotten-Pause und Fenster, längere Pause
+  bleibt, das dnsmasq-Beispiel des Auftrags; Rundreise der Schutzschalter durch `LoopState`;
+  nur Sicherheitsuhr (Wanduhr verändert, Ergebnis gleich); Doppelte; Richtlinie nie lockerer als
+  `SelfHealingStore.effective_mode`; Reinheit (per AST: kein Import von `homeassistant`,
+  `api`, `coordinator`, `heal_store`, `aiohttp`, `asyncssh`, `subprocess`, `socket`, `time`,
+  `datetime`).
+- **Mutationsprüfung Paket D:** 32 gezielte Änderungen an `heal_catalog.py` und
+  `heal_policy.py` (je eine Schutzregel entfernt oder gelockert, etwa `wpad` erlaubt,
+  Neustart bereit, keine Begrenzung des Werts, Risiko 3 nicht abgelehnt, Allowlist-Einträge
+  nicht neu geprüft, `resolved` schließt den Schutzschalter, Wanduhr statt Sicherheitsuhr);
+  alle 32 lassen mindestens einen Test scheitern.
+- `tests/test_heal_review_pr77_v1530.py` (Review PR #77, 108 Tests): zu jedem Punkt des
+  Reviews der umgedrehte Angriffstest; gegen den Stand vor der Korrektur scheitern 94 davon, die
+  übrigen halten Schutz fest, der schon da war, aber ohne Test (etwa `fullmatch`, saubere
+  Ablehnungen in der Flotten-Pause). Gate nimmt keine Entscheidung (auch nicht über
+  `dataclasses.replace`), erneute Prüfung von Aktion und Parametern, Parameter, die bei jedem
+  Lesen etwas anderes liefern; unbekannter Verlauf; `held`/`fleet_paused`/`module_enabled`
+  `None`; gefälschte `ValidatedAction`; Rolle, Topologie und Auswirkung des Dienst-Neustarts;
+  gleitendes Fenster und Vergleich Richtlinie/Speicher über Zufallsfolgen; Laden einer Datei
+  im Format Minor 1; nie verkürzte Abklingzeit; offener Ausgang; ungeladene
+  Dienst-Konfiguration; Ursache außerhalb; Prüfung der Sicherungskennung mit `fullmatch`;
+  `is_root=None` allein; saubere Ablehnungen in der Flotten-Pause; Schwelle 59/60; Konfidenz
+  über 1, negativ, NaN, bool; Typprüfung von `limits`; manuelle Ablehnungen im Wechsel mit
+  Erfolgen; `diag.refresh` je 5 min; `dhcp.*`; die Doku nennt Q5–Q7 vorläufig. Dazu je ein
+  Test für die zehn Mutationen, die das Review überlebt hatten, und für eigene, die zuerst
+  überlebten (Clients am Funk, jeder Neustart auf dem Management-Weg, `max_risk` des Eintrags,
+  `risk_high_no_recovery`, Auto-Heal nie bei Requires Approval, Typprüfung vor jeder frühen
+  Ablehnung, Wartezeit nach gesenkter Grenze, `resolved` nur für den eigenen Versuch).
+- **Mutationsprüfung Review PR #77:** die 32 Mutationen des Reviewers (4 davon an den neuen
+  Code angepasst, weil sich die Stelle geändert hat) und 44 eigene an den neuen Regeln (Gate,
+  Katalogbindung, None-Regeln, gleitendes Fenster in Richtlinie und Speicher, Abklingzeit,
+  offenes Ergebnis, Ursache außerhalb, ungeladene Konfiguration, Auswirkung, Mindestabstand):
+  jede der 76 lässt mindestens einen Test scheitern, darunter die zehn, die das Review
+  überlebt hatten (M3, M5, M6, M8, M16, M19, M22, M23, M24, M26).
+
+Nicht geprüft (Paket D): wer die Fakten von `RiskContext` und `IncidentFacts` füllt (etwa
+`service_config_unapplied`, `service_dependant_routers`, `cause_outside_router`) und ob sie
+stimmen (Network Intelligence, Topologie, Security Center, Vorabprüfungen – Anbindung, E, F);
+die Aufrufe der Engine (Anbindung nach C1, dann I); dass die Router-Aufrufe der gesperrten Aktionen auf der Flotte
+so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Oberfläche.
 
 - `tests/test_heal_engine_v1530.py` (C1): Auftragstest 1 (Observe: ein Datensatz bis
   PROPOSED, nie weiter, kein Plan ausführbar, auch nicht mit einem handelnden Entscheider und

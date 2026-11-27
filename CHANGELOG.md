@@ -200,6 +200,86 @@ oder Refresh. Entwicklerdoku: `docs/self-healing.md` (Abschnitte 2.1 und 11).
   Vorfälle in der Wartung erzeugen keinen Datensatz.
 - Nicht in einer laufenden HA-Instanz und nicht auf Routern geprüft.
 
+### Self-Healing, Paket D (Katalog und Richtlinie, noch nicht verdrahtet)
+
+Zweiter Baustein von Phase 7: der geschlossene Katalog der Aktionen und die Richtlinie, die
+über jede Aktion entscheidet. Beides ist reine Logik ohne HA-Import, ohne Router-Aufruf und
+ohne Ausführungsweg; nichts ruft sie bisher auf. Für Benutzer ändert sich nichts: keine Route,
+keine Entität, keine neue unique_id, keine Datei, keine ACL-Änderung. Entwicklerdoku:
+`docs/self-healing.md`, Abschnitte 7, 9 und 10.
+
+- `heal_catalog.py`: acht Aktionen als unveränderliche Daten, je mit Parametern aus einer
+  geschlossenen Menge, Router-Aufruf (nur als Name), nötigen Rechten, Grundrisiko, Fakten,
+  Prüfungen danach und einer ehrlichen Rollback-Aussage. Bereit sind nur `observe.evaluate`,
+  `diag.refresh`, `diag.ha_probes` (lesend) und `service.restart` für dnsmasq und odhcpd
+  (Risiko 2, nur mit Freigabe, für das erste Schreib-Release vorgesehen). Funk-Neustart,
+  Router-Neustart, Wiederherstellen und Schnittstelle ab/an sind modelliert und gesperrt.
+  Aktionen an Clients, Firewall, VLAN, Management-Adresse, Routing, Firmware, `network reload`
+  und ein Neustart von `wpad` kommen nie in den Katalog. Ausführbar in diesem Stand ist nur
+  `observe.evaluate`, das keinen Router aufruft.
+- `heal_policy.py`:
+  - Risiko nach Kontext: Rolle, Identität, Security-Erkennung, Wartung, absichtlich
+    abgeschalteter Dienst, Management-Weg, Funk-Uplink, Uplink anderer Router, Clients. Regeln
+    heben nur an; ein unbekannter Fakt zählt als hohes Risiko.
+  - Konfidenzwert 0–100 aus einer festen Regeltabelle (Ursache, Bestätigung, Konfidenz,
+    Quellenfamilien, Zielzustand, frühere Versuche, Konfigurationsänderung, Schwere),
+    Schwelle 60.
+  - Genau eines der fünf Ergebnisse (Nicht unterstützt, Nicht sicher, Zu wenig Hinweise,
+    Freigabe nötig, Empfohlen) mit jeder Regel, die gegriffen hat, und deutschem Text.
+    Zeitliche Nähe allein führt nie zu einer schreibenden Aktion.
+  - Modi und Prüfung vor dem Ausführen: Observe empfiehlt nur. Freigabe ab Risiko 1.
+    Auto-Heal nur für Einträge der Allowlist bis Risiko 1, außerhalb der Wartung und mit grünen
+    Vorabprüfungen. Risiko 3 erlaubt kein Modus und kein Schalter. Ein gesperrter Router und
+    eine pausierte Flotte gelten ab Risiko 1 als Observe.
+  - Prüfung einer Allowlist, bevor ein Administrator sie speichert.
+  - Schleifenschutz als Entscheidung: Wartezeiten 30 min, dann 60 min, höchstens 24 h. Der
+    Schutzschalter öffnet sofort nach jedem nicht gelösten, unbekannten, eskalierten oder
+    zurückgerollten Versuch; nach einer sauberen Ablehnung erst ab 1 automatischen bzw.
+    2 manuellen. Schließen kann ihn nur ein Administrator. Flotten-Pause 24 h ab 3
+    Fehlschlägen in 24 h. Alle Zeiten laufen auf der Sicherheitsuhr.
+- Am Speicher aus Paket B ändert sich nur das Zählen der Versuche (siehe unten); ein Test hält
+  fest, dass Richtlinie und Speicher Versuche gleich zählen und die Richtlinie nie mehr erlaubt
+  als der Speicher.
+- Tests: `tests/test_heal_catalog_v1530.py` (86), `tests/test_heal_policy_v1530.py` (141) und
+  `tests/test_heal_review_pr77_v1530.py` (108). Bei der Mutationsprüfung ließ jede der 32
+  gezielten Lockerungen mindestens einen Test scheitern.
+
+#### Nach dem Review von PR #77
+
+- **Der Gate nimmt keine Entscheidung mehr an.** `gate()` bekommt den `DecisionInput`, prüft
+  Aktion und Parameter selbst gegen den Katalog und trifft die Entscheidung selbst; eine
+  gefälschte oder mit `dataclasses.replace` veränderte Entscheidung kann nichts freischalten.
+  Eine `ValidatedAction` gibt es nur um den Katalogeintrag selbst; Parameter werden genau
+  einmal gelesen und eingefroren. Wartung liest der Gate aus demselben Fakt wie `decide()`.
+- **Unbekannt heißt nie harmlos:** unbekannter Verlauf der Versuche sperrt jede schreibende
+  Aktion (`history_unknown`) und kostet 25 Punkte; unbekannte Schwere zählt wie `info`;
+  `held`, `fleet_paused` und `module_enabled` müssen echte Wahrheitswerte sein.
+- **Dienst-Neustart:** bleibt Risiko 2 auf dem Gateway, aber Rolle, abhängige Router und die
+  Zahl der Router und Clients, die DNS/DHCP des Routers nutzen, sind nötige Fakten; die
+  Freigabe zeigt diese Zahlen, und ein Router, dessen DNS/DHCP andere Router bedient, bekommt
+  den Regelcode `service_serves_other_routers`. Eine gespeicherte, noch nicht geladene
+  Konfiguration des Dienstes sperrt den Neustart (Not Safe), unbekannt heißt Insufficient
+  Evidence. Neu ist der Fakt „Ursache außerhalb des Routers“ (Paket F füllt ihn): sicher
+  außerhalb sperrt, unbekannt ebenfalls. Rollback-Aussage ehrlicher: lädt die gespeicherte
+  Konfiguration, kein Zurücknehmen, manuelle Wiederherstellung, wenn der Dienst nicht
+  wiederkommt.
+- **Versuchsgrenze als gleitendes Fenster:** höchstens N Versuche in jeder Spanne von 24 h
+  (vorher ein festes Fenster, das nach 24 h neu anfing). Eine laufende Abklingzeit wird nie
+  verkürzt, ein Versuch ohne festgehaltenen Ausgang zählt nie als Erfolg, und Erfolge setzen
+  die Fehlschläge eines Schutzschalters nicht mehr zurück. Speicher
+  `openwrt_router.self_healing` jetzt Version 1.2: der Versuchsdatensatz bekommt nur das Feld
+  `recent` dazu; eine Datei des bisherigen Stands lädt weiter (ihre Versuche gelten als zum
+  letzten Versuch gemacht).
+- Kleineres: `diag.refresh` höchstens einmal je 5 Minuten je Router; das Löschen von
+  DHCP-Leases (`dhcp.*`) steht nie im Katalog; `PolicyLimits` meldet Fehler als
+  `PolicyError`; `limits` muss genau `PolicyLimits` sein; Doppelte werden aus der Prüfung des
+  Katalogs abgeleitet.
+- Die Auswahl der Aktionen (Fragen Q5–Q7) ist als **vorläufige strenge Voreinstellung**
+  beschrieben, nicht als Entscheidung des Eigentümers.
+- Mutationsprüfung: die 32 Mutationen des Reviewers (darunter die zehn, die das Review
+  überlebt hatten) und 44 eigene an den neuen Regeln lassen jede mindestens einen Test
+  scheitern.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
