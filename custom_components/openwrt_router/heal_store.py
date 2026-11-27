@@ -64,7 +64,8 @@ only beyond the highest wall time ever seen, at most one step (900 s).
 Terminal records are kept from the safety time they ended
 (``loop.terminal_at``), never by their wall stamps.
 
-**Limits** (never a non-terminal action is evicted): at most
+**Limits** (never a non-terminal action is evicted, and never the terminal
+record a hold in force names, so the hold can be rebuilt from it): at most
 ``MAX_ACTIONS`` records and ``MAX_OPEN_PER_ROUTER`` non-terminal ones per
 router (a new action beyond that is refused with :class:`CapacityError`),
 terminal records older than ``TERMINAL_RETENTION_S`` are pruned, and the
@@ -103,6 +104,7 @@ from .heal_model import (
     LOCK_SOURCE_ENGINE,
     LOCKING_STATES,
     TERMINAL_STATES,
+    TIME_MAX,
     TRANSITIONS,
     ActionState,
     Actor,
@@ -166,6 +168,10 @@ HOLD_BLOCKED_STATES: Final = frozenset(
     }
 )
 # Size estimate: bytes allowed per record for the separators between them.
+# Safety time this close to TIME_MAX cannot carry a cooldown or a window:
+# the durable step into EXECUTING is refused (``clock_invalid``) and load
+# holds and pauses end at TIME_MAX (review 3).
+CLOCK_HEADROOM_S: Final = 400 * 86400
 _SEPARATOR_BYTES: Final = 2
 
 _STOPPING: Final = (CoreState.stopping, CoreState.final_write, CoreState.stopped)
@@ -542,7 +548,7 @@ class SelfHealingStore:
                 router_id=router_id,
                 reason=reason,
                 since=safe,
-                until=None if no_end else safe + hold_s,
+                until=None if no_end else min(safe + hold_s, TIME_MAX),
             )
         )
 
@@ -678,7 +684,7 @@ class SelfHealingStore:
         """Pause Auto-Heal fleet-wide (attempts and breakers are unknown).
 
         ``now`` is safety-clock time."""
-        until = now + self.settings.limits.fleet_pause_s
+        until = min(now + self.settings.limits.fleet_pause_s, TIME_MAX)
         fleet = self.loop.fleet
         if fleet.paused_until is None or fleet.paused_until < until:
             self.loop.fleet = FleetPause(
@@ -723,7 +729,7 @@ class SelfHealingStore:
         if self.monotonic is not None:
             mono = float(self.monotonic())
             if self._mono_last is not None:
-                elapsed = max(0.0, mono - self._mono_last)
+                elapsed = mono - self._mono_last  # the model clamps at 0
             self._mono_last = mono
         self.loop.clock = self.loop.clock.observe(wall, elapsed)
         return float(self.loop.clock.safe or 0.0)
@@ -908,6 +914,8 @@ class SelfHealingStore:
             loop = _copy_loop(self.loop)
             attempts: dict[LoopKey, AttemptRecord] = {}
             if new.state is ActionState.EXECUTING:
+                if safe > TIME_MAX - CLOCK_HEADROOM_S:
+                    return DurableResult(False, current, "clock_invalid")
                 refused = self._attempt_refusal(new, safe)
                 if refused is not None:
                     return DurableResult(False, current, refused)
@@ -1119,12 +1127,17 @@ class SelfHealingStore:
         total = base + sum(sizes.values())
         evicted: list[str] = []
         if total > self.max_bytes:
+            held = self._held_ids(loop)
+
+            def kept(action: RemediationAction) -> bool:
+                return not action.is_terminal or action.action_id in held
+
             open_total = base + sum(
-                size for aid, size in sizes.items() if not actions[aid].is_terminal
+                size for aid, size in sizes.items() if kept(actions[aid])
             )
             if open_total <= self.max_bytes:
                 for gone in sorted(
-                    (a for a in actions.values() if a.is_terminal),
+                    (a for a in actions.values() if not kept(a)),
                     key=lambda a: (a.updated_at, a.action_id),
                 ):
                     if total <= self.max_bytes:
@@ -1137,10 +1150,27 @@ class SelfHealingStore:
         self.last_bytes = total
         return self._payload_of(actions, loop, seq), evicted, total > self.max_bytes
 
+    @staticmethod
+    def _held_ids(loop: LoopState) -> set[str]:
+        """Action ids a hold in force names: their records are never
+        evicted or pruned, so the hold can always be rebuilt from them."""
+        safe = float(loop.clock.safe or 0.0)
+        return {
+            hold.action_id
+            for hold in loop.holds.values()
+            if hold.action_id is not None and hold.active(safe)
+        }
+
     def _evict_oldest_terminal(self, count: int) -> int:
-        """Drop up to ``count`` terminal records, oldest first."""
+        """Drop up to ``count`` terminal records, oldest first (never one a
+        hold in force names)."""
+        held = self._held_ids(self.loop)
         terminal = sorted(
-            (a for a in self.actions.values() if a.is_terminal),
+            (
+                a
+                for a in self.actions.values()
+                if a.is_terminal and a.action_id not in held
+            ),
             key=lambda a: (a.updated_at, a.action_id),
         )[:count]
         for action in terminal:
@@ -1234,8 +1264,9 @@ class SelfHealingStore:
         safe = self._observe(wall)
         removed = 0
         cutoff = safe - TERMINAL_RETENTION_S
+        held = self._held_ids(self.loop)
         for action in list(self.actions.values()):
-            if not action.is_terminal:
+            if not action.is_terminal or action.action_id in held:
                 continue
             ended = self.loop.terminal_at.get(action.action_id)
             if ended is None:  # not stamped yet: its retention starts now
@@ -1354,14 +1385,18 @@ class SelfHealingStore:
     ) -> bool:
         """An admin releases the hold of a router (None: the fleet's).
 
-        Every terminal record of the router whose end holds it is marked
+        Only when a hold was removed (the return value is True), every
+        terminal record of the router whose end holds it is marked
         ``hold_released``, so the hold is not placed again when the holds
-        are rebuilt from the records (a damaged loop section). ``ts`` is the
-        admin's wall time (for the caller's audit entry).
+        are rebuilt from the records (a damaged loop section). Without a
+        hold in place nothing changes: a call can never silently disarm the
+        holds of later loads. ``ts`` is the admin's wall time (for the
+        caller's audit entry).
         """
         _require_admin(actor, ts)
         gone = self.loop.holds.pop(router_id or FLEET_HOLD_KEY, None)
-        marked = 0
+        if gone is None:
+            return False
         if router_id is not None:
             for action_id, action in list(self.actions.items()):
                 if (
@@ -1371,10 +1406,8 @@ class SelfHealingStore:
                     and hold_reason_for(action) is not None
                 ):
                     self.actions[action_id] = action.with_flags(hold_released=True)
-                    marked += 1
-        if gone is not None or marked:
-            self.schedule()
-        return gone is not None
+        self.schedule()
+        return True
 
     def admin_release_stuck(
         self, action_id: str, *, actor: Actor | str, ts: float

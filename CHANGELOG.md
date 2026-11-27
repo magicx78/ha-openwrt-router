@@ -94,7 +94,9 @@ Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/
   - Ein unbekannter oder eskalierter Ausgang, ein unlesbarer Datensatz oder ein verlorener
     Speicher setzt den Router bzw. die Flotte in Observe (Hold), bis ein Administrator oder
     die Zeit es aufhebt.
-  - Wartezeiten laufen auf einer Uhr, die eine springende Wanduhr nie verkürzt.
+  - Wartezeiten laufen auf einer Sicherheitsuhr: während HA läuft, verkürzt eine springende
+    Wanduhr sie nie; ein Start von HA kann sie um höchstens 900 s je Start verkürzen
+    (Stand nach dem dritten Review, siehe unten).
   - Beim Ausführen gelten Abklingzeit, Versuche in 24 h und offene Schutzschalter.
   - Abgeschlossene Datensätze fallen nur, wenn das die Datei wirklich unter die Grenze bringt.
 - Nach dem zweiten Review von PR #75:
@@ -116,6 +118,18 @@ Route, keine Entität, keine neue unique_id, keine Datei. Entwicklerdoku: `docs/
     löscht keinen Verlauf mehr. Wartungsfenster fallen erst, wenn Wanduhr und Sicherheitsuhr
     90 Tage über ihrem Ende sind.
   - Der Speicher nimmt nur Datensätze an, wie `RemediationAction.new()` sie anlegt.
+- Nach dem dritten Review von PR #75:
+  - Sicherheitsuhr: Die Höchstmarke rückt während des Laufs um die gezählte Zeit mit. Echte
+    Zeit zählt damit nie doppelt – vorher zählte die Laufzeit nach einem Zurückstellen der
+    Wanduhr beim nächsten Start noch einmal (eine Abklingzeit von 30 min war nach rund 15 min
+    vorbei). Garantie: während HA läuft, verkürzt keine Änderung der Wanduhr eine Wartezeit; ein
+    Start von HA kann sie um höchstens 900 s je Start verkürzen (so viel zählt auch echte
+    Ausfallzeit).
+  - Der Datensatz hinter einem geltenden Hold wird nie verdrängt und nie nach 90 Tagen entfernt,
+    damit der Hold nach einem kaputten Schleifenschutz-Abschnitt wieder entsteht.
+  - Eine Sicherheitszeit nahe dem höchsten gültigen Wert führt beim Ausführen zur Ablehnung
+    `clock_invalid` statt zu einem Fehler; Holds und Pausen beim Laden enden dort.
+  - `release_hold()` ändert nur etwas, wenn wirklich ein Hold aufgehoben wurde.
 - `core_models.py`: Kennungspräfix `rem_` für Reparaturdatensätze.
 
 ## [1.52.3] - 2026-11-27

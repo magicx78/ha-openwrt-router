@@ -393,7 +393,7 @@ Sicherheitsuhr, Abschnitt 5.2):
 
 | Grenze | Wert | Verhalten |
 |---|---|---|
-| Datensätze gesamt | 500 | ein neuer verdrängt den ältesten Endzustand; gibt es keinen, wird er abgelehnt (`CapacityError`) |
+| Datensätze gesamt | 500 | ein neuer verdrängt den ältesten Endzustand, nie einen, den ein geltender Hold nennt (Review 3); gibt es keinen, wird er abgelehnt (`CapacityError`) |
 | offene je Router | 20 | darüber wird ein neuer abgelehnt |
 | Aufbewahrung Endzustände | 90 Tage Sicherheitsuhr ab dem Ende | `prune()` entfernt ältere; gemessen ab der Sicherheitszeit, zu der der Datensatz endete (`loop.terminal_at`), nie an seinen Wanduhr-Stempeln (Review 2, P2-4) |
 | Idempotenz | 24 h, höchstens 1000 | die Kennung einer **offenen** Aktion bleibt immer; die einer beendeten ist nach 24 h vergessen (siehe unten) |
@@ -402,7 +402,7 @@ Sicherheitsuhr, Abschnitt 5.2):
 | Schutzschalter | ein **offener** bleibt immer; geschlossene 90 Tage, höchstens 1000 | |
 | Holds | ohne Ende nur durch einen Administrator; mit Ende danach | |
 | Fremd-Schreibzugriffe | die letzten 200 | |
-| Datei | 1 000 000 Byte | darüber fallen Endzustände, die ältesten zuerst – aber **nur, wenn das die Datei unter die Grenze bringt**. Sind die offenen Datensätze allein schon zu groß, fällt nichts (Review P2-10): ein verzögertes Schreiben wird trotzdem ausgeführt (gezählt, `save_over_size`), weil sonst eine offene Aktion verloren ginge, und ein Schreiben vor dem Handeln wird abgelehnt (`over_size`) |
+| Datei | 1 000 000 Byte | darüber fallen Endzustände, die ältesten zuerst (nie einer, den ein geltender Hold nennt) – aber **nur, wenn das die Datei unter die Grenze bringt**. Sind die offenen Datensätze allein schon zu groß, fällt nichts (Review P2-10): ein verzögertes Schreiben wird trotzdem ausgeführt (gezählt, `save_over_size`), weil sonst eine offene Aktion verloren ginge, und ein Schreiben vor dem Handeln wird abgelehnt (`over_size`) |
 
 **Idempotenz (Review P2-5).** Eine bekannte Idempotenz-Kennung, deren Datensatz fehlt
 (verdrängt oder entfernt), wird abgelehnt (`IdempotencyExpiredError`) und **nie** zu einer neuen
@@ -459,9 +459,19 @@ länger gilt.
 setzt sie für jeden solchen Datensatz neu, ohne Ende – ein kaputter Abschnitt `loop` macht aus
 ihnen also nicht mehr einen 24-h-Hold der Flotte. Hebt ein Administrator den Hold eines Routers
 auf, markiert `release_hold()` jeden beendeten Datensatz dieses Routers, dessen Ende einen Hold
-setzt, mit `flags.hold_released`; markierte Datensätze setzen ihren Hold nicht wieder. Holds
-ohne Datensatz (`lock_forced`, `record_unreadable`, `store_lost`) kommen bei einem kaputten
-Abschnitt `loop` nicht zurück; dann gilt der 24-h-Hold der Flotte.
+setzt, mit `flags.hold_released`; markierte Datensätze setzen ihren Hold nicht wieder. Das
+geschieht **nur, wenn wirklich ein Hold aufgehoben wurde** (Rückgabe True); ohne Hold ändert
+`release_hold()` nichts und gibt False zurück, kann also nie stillschweigend künftige Holds
+entschärfen (Review 3). **DECIDED (Unter-Sitzung, Review 3):** diese Variante statt „True,
+wenn markiert“, weil ein Aufruf ohne Hold sonst die Wiederherstellung nach einem kaputten
+Abschnitt `loop` abschalten könnte.
+
+Der Datensatz hinter einem geltenden Hold wird **nie verdrängt und nie nach 90 Tagen entfernt**
+(weder beim Anlegen noch wegen der Dateigröße noch von `prune()`; Review 3): sonst bliebe nach
+einem kaputten Abschnitt `loop` nichts, woraus der Hold wieder entsteht. Erst nach der Freigabe
+gilt seine Aufbewahrung wieder. Holds ohne Datensatz (`lock_forced`, `record_unreadable`,
+`store_lost`) kommen bei einem kaputten Abschnitt `loop` nicht zurück; dann gilt der 24-h-Hold
+der Flotte.
 
 **Auswege für den Administrator (Review P3).** `admin_release_stuck(action_id, actor=admin, ts=…)`
 führt eine Aktion, die in EXECUTING, VERIFYING oder ROLLING_BACK hängt, über die
@@ -483,11 +493,15 @@ von HA gibt (Review 2, P2-1):
 
 - **Während HA läuft** zählt die **monotone Uhr** (Standard `time.monotonic`, im Speicher über
   `monotonic=` einstellbar): der Schritt ist die monotone Zeit seit der letzten Beobachtung
-  (`observe(wall, elapsed=…)`). Die Wanduhr bewegt die Sicherheitsuhr dann **gar nicht**.
+  (`observe(wall, elapsed=…)`). Die Wanduhr bewegt die Sicherheitsuhr dann **gar nicht**. Die
+  Höchstmarke `high` rückt um denselben Schritt mit (und auf die Wanduhrzeit, wenn die höher
+  ist; Review 3) – so zählt die im Lauf gezählte Zeit beim nächsten Start nicht noch einmal,
+  auch wenn die Wanduhr im Lauf zurückgestellt war.
 - **Bei der ersten Beobachtung nach einem Start** (die monotone Uhr beginnt mit jedem Prozess
-  neu) und ohne monotone Quelle zählt die Wanduhr, aber **nur, soweit sie über der höchsten je
-  gesehenen Wanduhrzeit liegt** (`high`, steht in der Datei und sinkt nie). Ein Sprung zurück
-  zählt nichts, und die Strecke bis zur alten Höchstmarke zählt auch danach nicht noch einmal.
+  neu) und ohne monotone Quelle zählt die Wanduhr, aber **nur, soweit sie über der Höchstmarke
+  liegt** (`high`: die höchste gesehene Wanduhrzeit, im Lauf um die gezählte Zeit vorgerückt;
+  steht in der Datei und sinkt nie). Ein Sprung zurück zählt nichts, und die Strecke bis zur
+  Höchstmarke zählt auch danach nicht noch einmal.
 
 Sprünge werden gezählt (`jumps_ahead`, `jumps_back`, in `stats()`).
 
@@ -501,13 +515,20 @@ sich genauso aushebeln (Review 2, P2-1).
 - **Während HA läuft, verkürzt keine Änderung der Wanduhr eine Wartezeit** – weder vor noch
   zurück noch hin und her. Die Sicherheitsuhr läuft dann nie schneller als die monotone Uhr,
   also nie schneller als die echte Zeit.
-- **Verkürzen kann eine Wartezeit nur ein Start von HA**, bei dem die Wanduhr über jeder bisher
-  gesehenen Wanduhrzeit liegt, und zwar um **höchstens 900 s je Start** – so viel zählt auch
-  echte Ausfallzeit; beides ist von außen nicht zu unterscheiden. Eine Wanduhr, die einmal falsch
-  vorgeht und dabei bleibt, gewinnt diese 900 s nur einmal.
+- **Verkürzen kann eine Wartezeit nur ein Start von HA**, und zwar um **höchstens 900 s je
+  Start**: beim Start zählt nur die Wanduhrzeit über der Höchstmarke, höchstens 900 s. Weil die
+  Marke im Lauf mit der gezählten Zeit vorrückt, ist das echte Ausfallzeit oder Zeit, um die
+  die Wanduhr der echten Zeit vorausgeht – beides ist von außen nicht zu unterscheiden. Echte
+  Zeit zählt nie doppelt (Review 3: vorher zählte die Laufzeit nach einem Zurückstellen beim
+  nächsten Start noch einmal, 48 solche Zyklen in 12 h ergaben 24 h). Eine Wanduhr, die einmal
+  falsch vorgeht und dabei bleibt, gewinnt die 900 s nur einmal.
 - Alles andere **verlängert** Wartezeiten höchstens: Ausfallzeit über 900 s, mehr als 900 s
   zwischen zwei Beobachtungen, eine Wanduhr, die nach einem Start unter ihrer Höchstmarke liegt
   (sie zählt erst wieder, wenn sie die Marke überholt).
+- Liegt die Sicherheitszeit weniger als 400 Tage vor `TIME_MAX` (eine absurde Wanduhr beim
+  ersten Start), lehnt der dauerhafte Schritt in EXECUTING mit `clock_invalid` ab, und Holds und
+  Pausen beim Laden enden bei `TIME_MAX` (Review 3). Die Uhr bleibt dort stehen; nur ein
+  Administrator kann das auflösen (Datei neu anlegen).
 
 **DECIDED (P2-9, Review 2 P2-1): im Zweifel länger warten** – monotone Uhr während des Laufs,
 Höchstmarke über Starts. Der Preis: ging die Wanduhr einmal weit vor und wurde dann korrigiert,
@@ -526,13 +547,13 @@ tragen Wanduhr-Zeiten des Administrators; eins fällt erst, wenn Wanduhr **und**
 
 | Wartezeit | Uhr | Sprung zurück | Sprung nach vorn |
 |---|---|---|---|
-| Abklingzeit, Backoff (`cooldown_until`) | Sicherheitsuhr | im Lauf: zählt nicht; beim Start: nichts unter der Höchstmarke – länger | im Lauf: zählt nicht; beim Start: höchstens +900 s über der Höchstmarke |
-| 24-h-Fenster der Versuche | Sicherheitsuhr | länger | im Lauf nie kürzer; beim Start höchstens 900 s kürzer |
-| Pause der Flotte (`paused_until`) | Sicherheitsuhr | länger | ebenso |
-| Hold mit Ende (`until`) | Sicherheitsuhr | länger | ebenso |
-| Idempotenz (24 h) | Sicherheitsuhr | länger behalten | ebenso |
-| Aufbewahrung Endzustände (90 Tage) | Sicherheitsuhr ab `loop.terminal_at` | länger behalten | ebenso; nie an Wanduhr-Stempeln gemessen |
-| Aufbewahrung Versuche (7 Tage), Schutzschalter (90 Tage) | Sicherheitsuhr | länger behalten | ebenso |
+| Abklingzeit, Backoff (`cooldown_until`) | Sicherheitsuhr | im Lauf: ohne Wirkung (echte Zeit zählt weiter, die Marke rückt mit), beim nächsten Start zählt sie nicht noch einmal; nach einem Start: nichts unter der Marke – länger | im Lauf: ohne Wirkung; beim Start: höchstens +900 s über der Marke |
+| 24-h-Fenster der Versuche | Sicherheitsuhr | im Lauf ohne Wirkung; nach einem Start länger | im Lauf nie kürzer; beim Start höchstens 900 s kürzer |
+| Pause der Flotte (`paused_until`) | Sicherheitsuhr | ebenso | ebenso |
+| Hold mit Ende (`until`) | Sicherheitsuhr | ebenso | ebenso |
+| Idempotenz (24 h) | Sicherheitsuhr | im Lauf ohne Wirkung; nach einem Start länger behalten | ebenso |
+| Aufbewahrung Endzustände (90 Tage) | Sicherheitsuhr ab `loop.terminal_at`; nie ein Datensatz, den ein geltender Hold nennt | ebenso | ebenso; nie an Wanduhr-Stempeln gemessen |
+| Aufbewahrung Versuche (7 Tage), Schutzschalter (90 Tage) | Sicherheitsuhr | ebenso | ebenso |
 | Aufbewahrung Wartungsfenster (90 Tage nach `end`) | Wanduhr **und** Sicherheitsuhr | länger behalten | länger behalten |
 | Wartungsfenster aktiv | Wanduhr **oder** Sicherheitsuhr | zählt, solange eine von beiden im Fenster liegt: länger | ebenso: länger |
 | Freigabe (`approval.expires_at`) | Guard des Core, nicht dieser Speicher (das Feld ist nur Auskunft) | offen für C2: ein Sprung zurück darf eine Freigabe nicht verlängern | verfällt früher (sicher) |
@@ -841,6 +862,13 @@ Hold.
   Versuchsbuchung im dauerhaften Schritt, Sperre von Flush und Schließen, Reservierung der
   Schreibnummer, Nummernprüfung beim Rücklesen, Idempotenz-Kennungen offener Aktionen,
   `audit_refs` nur wachsend.
+- `tests/test_heal_review3_v1530.py`: die Punkte des dritten Reviews (vor der Korrektur rot):
+  Laufzeit zählt beim nächsten Start nicht doppelt (Modell und Abklingzeit im Speicher), Kappung
+  der Höchstmarke, der Datensatz hinter einem Hold bleibt (Verdrängen, Größe, `prune()`), saubere
+  Ablehnung nahe `TIME_MAX` (Ausführen und Laden), `release_hold()` ohne Hold ändert nichts. Dazu
+  Tests für Schutzmechanismen ohne scheiternden Test: Wartungsfenster nur bei beiden Uhren,
+  veraltete Endstempel, Datensätze ohne Stempel, Zurücksetzen der monotonen Bezugszeit beim Laden,
+  monotone Uhr rückwärts. Jeder Schutz wurde einzeln entfernt; die Tests scheitern dann.
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (nichts ist verdrahtet), mit echten Plattenfehlern außer dem nachgestellten `WriteError`,
@@ -862,7 +890,12 @@ Felder bis an ihre Grenzen füllen (gemessen ist nur der Datensatz der Tests).
   einer langen Pause dauern Abklingzeiten und Holds entsprechend länger. Die Engine muss die Uhr
   regelmäßig abfragen (C1).
 - Ein Start mit einer Wanduhr über der Höchstmarke kann eine Wartezeit um höchstens 900 s
-  verkürzen (Abschnitt 5.2); das ist von echter Ausfallzeit nicht zu unterscheiden. Der
+  verkürzen (Abschnitt 5.2); das ist von echter Ausfallzeit nicht zu unterscheiden. Eine Wanduhr,
+  die bei jedem Start um weitere 900 s vorgeht, gewinnt 900 s je Start (Test des Reviewers
+  `test_restart_loop_with_ever_further_ahead_clock_gains_n_steps`).
+- Ein kaputter Datensatz, der beendet ist (etwa RESOLVED oder FAILED), aber im Verlauf
+  EXECUTING zeigt, sperrt seinen Router bis zur Freigabe durch einen Administrator (streng
+  gewählt, siehe Abschnitt 5). Der
   Modelltest des Reviewers `test_clock_wrong_then_corrected_gains_time` (reine Wanduhr, ohne
   monotone Zeit) bleibt deshalb grün; im Speicher gilt dieser Weg nur für die erste Beobachtung
   nach einem Start.

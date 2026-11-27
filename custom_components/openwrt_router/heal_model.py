@@ -148,6 +148,7 @@ _MIXED_SEGMENT_MIN: Final = 12
 _DIGIT_SEGMENT_MIN: Final = 16
 _DIGIT_SEGMENT_DIGITS: Final = 4
 _TS_MAX: Final = 1e11  # far beyond any wall time; above it is not a time
+TIME_MAX: Final = _TS_MAX  # the highest valid time (wall or safety clock)
 
 
 # ---------------------------------------------------------------------------
@@ -2066,16 +2067,18 @@ class SafetyClock(_Record):
     * ``elapsed`` given (monotonic seconds since the previous observation
       in the same run of HA): the step is ``elapsed``. The wall clock does
       not move the safety clock at all, so no wall-clock change (ahead,
-      back, flapping) can make it run faster than real time.
+      back, flapping) can make it run faster than real time. ``high`` moves
+      on by the same step (and to the wall time if that is higher), so run
+      time counted here never counts again at the next start.
     * ``elapsed`` None (the first observation after a start, or no
       monotonic source): the step is how far the wall time is beyond
       ``high``, the highest wall time ever observed (persisted, never
       lowered). A jump back adds nothing and the time it "gave back" is
       never counted again; a jump ahead or a downtime adds one step.
 
-    So waits are only ever lengthened by a wrong wall clock, except once per
-    start: a wall clock wrong ahead of every wall time seen before can add
-    at most ``CLOCK_STEP_MAX_S`` that did not pass.
+    So waits are only ever lengthened by a wrong wall clock, except at a
+    start: a wall clock ahead of the true time and above ``high`` can add
+    at most ``CLOCK_STEP_MAX_S`` that did not pass, once per start.
     """
 
     _what = "clock"
@@ -2128,13 +2131,17 @@ class SafetyClock(_Record):
         ):
             ahead = min(ahead + 1, CLOCK_JUMPS_MAX)
         if elapsed is not None:
-            step = elapsed
+            step = min(elapsed, float(CLOCK_STEP_MAX_S))
+            # the counted run time also raises the mark: at the next start
+            # the same real time cannot count again as wall time above it
+            high = max(min(self.high + step, _TS_MAX), wall)
         else:
-            step = max(0.0, wall - self.high)
+            step = min(max(0.0, wall - self.high), float(CLOCK_STEP_MAX_S))
+            high = max(self.high, wall)
         return SafetyClock(
             wall=wall,
-            safe=min(self.safe + min(step, float(CLOCK_STEP_MAX_S)), _TS_MAX),
-            high=max(self.high, wall),
+            safe=min(self.safe + step, _TS_MAX),
+            high=high,
             jumps_ahead=ahead,
             jumps_back=back,
         )
@@ -2535,6 +2542,7 @@ __all__ = [
     "LOCKING_STATES",
     "PLANNING_STATES",
     "TERMINAL_STATES",
+    "TIME_MAX",
     "TRANSITIONS",
     "WRITE_AHEAD_STATES",
     "ActionState",
