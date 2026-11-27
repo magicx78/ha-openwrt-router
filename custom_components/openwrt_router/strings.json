@@ -465,6 +465,9 @@
     "update_check_failed": {
       "message": "Checking for package updates failed: {error}"
     },
+    "repair_running": {
+      "message": "A Self-Healing repair is running on this router. The action was not run; try again when the repair has finished."
+    },
     "update_check_running": {
       "message": "An update check is already running on this router. Wait for its result."
     },

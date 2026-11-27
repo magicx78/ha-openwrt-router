@@ -558,11 +558,11 @@ async def test_a_lock_an_admin_removed_is_not_released_by_the_old_press(
 ) -> None:
     world = await World().start()
     gw = await world.gateway()
-    gate = asyncio.Event()
+    gates = {"dnsmasq": asyncio.Event(), "firewall": asyncio.Event()}
     real = gw.api.control_service
 
     async def slow(name: str, action: str) -> bool:
-        await gate.wait()
+        await gates[name].wait()
         return await real(name, action)
 
     gw.api.control_service = slow
@@ -573,10 +573,11 @@ async def test_a_lock_an_admin_removed_is_not_released_by_the_old_press(
     await until(lambda: world.store.loop.lock_holder(world.rid), "second lock")
     new = world.store.loop.lock_holder(world.rid)
     assert new is not None
-    gate.set()
+    gates["dnsmasq"].set()
     await first
     # the first press's lock is gone; it must not free the second's
     assert world.store.loop.lock_holder(world.rid) is new
+    gates["firewall"].set()
     await second
     assert world.store.loop.lock_holder(world.rid) is None
     assert [_data(e)["lock"] for e in world.audits()] == ["taken", "taken"]
@@ -790,9 +791,7 @@ async def test_an_engine_without_core_takes_no_lock(disks: Any) -> None:
 
 
 @pytest.mark.parametrize("off", ["not_loaded", "settings_off", "closed", "no_engine"])
-async def test_module_off_never_refuses_and_takes_no_lock(
-    disks: Any, off: str
-) -> None:
+async def test_module_off_never_refuses_and_takes_no_lock(disks: Any, off: str) -> None:
     world = await World().start()
     gw = await world.gateway()
     action_id = await world.engine_holds()
@@ -817,8 +816,10 @@ async def test_module_off_never_refuses_and_takes_no_lock(
 async def test_a_failing_audit_never_fails_the_press(disks: Any) -> None:
     world = await World().start()
     gw = await world.gateway()
-    world.api.emit = MagicMock(side_effect=RuntimeError("audit down"))
-    assert await record(gw) == EXPECTED_MAIN
+    with patch.object(
+        type(world.api), "emit", MagicMock(side_effect=RuntimeError("audit down"))
+    ):
+        assert await record(gw) == EXPECTED_MAIN
     assert world.store.loop.lock_holder(world.rid) is None
     writes = world.store.loop.external_writes
     assert len(writes) == len(ACTIONS)
@@ -828,8 +829,12 @@ async def test_a_failing_audit_never_fails_the_press(disks: Any) -> None:
 async def test_a_refused_prefix_never_fails_the_press(disks: Any) -> None:
     world = await World().start()
     gw = await world.gateway()
-    world.api.register_event_prefix = MagicMock(side_effect=ValueError("taken"))
-    assert await record(gw) == EXPECTED_MAIN
+    with patch.object(
+        type(world.api),
+        "register_event_prefix",
+        MagicMock(side_effect=ValueError("taken")),
+    ):
+        assert await record(gw) == EXPECTED_MAIN
     assert world.audits() == []
 
 

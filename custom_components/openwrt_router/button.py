@@ -7,6 +7,11 @@ Provides:
 
 There is deliberately no "install updates" button any more: OpenWrt advises
 against a blanket package upgrade (flash wear, broken dependencies).
+
+Reload WiFi, Reboot and the service restart buttons run through
+``heal_guard.async_manual_action`` (Self-Healing, package K2): refused while
+a Self-Healing repair holds the router's lock, otherwise unchanged, with
+the lock held for the press and one Core audit entry.
 """
 
 from __future__ import annotations
@@ -39,6 +44,12 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
+from .heal_guard import (
+    TARGET_SYSTEM,
+    TARGET_WIFI,
+    ManualAction,
+    async_manual_action,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -191,7 +202,15 @@ class OpenWrtButtonEntity(ButtonEntity):
 
     async def _press_reload_wifi(self) -> None:
         """Handle reload WiFi button press."""
-        success = await self._api.reload_wifi()
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.WIFI_RELOAD,
+            TARGET_WIFI,
+            self._context,
+        ) as outcome:
+            success = await self._api.reload_wifi()
+            outcome.report(success)
         if success:
             _LOGGER.info(
                 "WiFi reloaded successfully on %s", self._entry.data.get("host")
@@ -215,13 +234,22 @@ class OpenWrtButtonEntity(ButtonEntity):
         """
         _LOGGER.info("Rebooting %s", self._entry.data.get("host"))
 
-        try:
-            success = await self._api.reboot()
-        except Exception:
-            # A press must never raise into HA — SSH helpers can throw
-            # more than the OpenWrt* API errors.
-            _LOGGER.exception("Error rebooting %s", self._entry.data.get("host"))
-            return
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.ROUTER_REBOOT,
+            TARGET_SYSTEM,
+            self._context,
+        ) as outcome:
+            try:
+                success = await self._api.reboot()
+            except Exception:
+                # A press must never raise into HA — SSH helpers can throw
+                # more than the OpenWrt* API errors.
+                _LOGGER.exception("Error rebooting %s", self._entry.data.get("host"))
+                outcome.failed()
+                return
+            outcome.report(success)
 
         if success:
             _LOGGER.info("Reboot triggered on %s", self._entry.data.get("host"))
@@ -313,7 +341,15 @@ class OpenWrtServiceRestartButton(ButtonEntity):
 
     async def async_press(self) -> None:
         _LOGGER.info("Restarting service %s", self._service_name)
-        success = await self._api.control_service(self._service_name, "restart")
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.SERVICE_RESTART,
+            self._service_name,
+            self._context,
+        ) as outcome:
+            success = await self._api.control_service(self._service_name, "restart")
+            outcome.report(success)
         if success:
             _LOGGER.info("Service %s restarted successfully", self._service_name)
         else:
