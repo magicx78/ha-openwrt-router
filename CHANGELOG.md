@@ -550,8 +550,8 @@ Ausführungsweg. Keine neue Entität, keine neue unique_id, keine ACL-Änderung.
 Self-Healing liest jetzt, was der Configuration Manager über die Konfiguration weiß
 (`heal_config_link.py`). Nur lesen: **kein Router-Aufruf**, kein Wiederherstellen, kein
 Probelauf, kein Audit-Eintrag. Geschrieben wird nur in einem Fall, und das tut der Core selbst:
-ist ein gespeichertes Artefakt beschädigt, markiert sein Versionsspeicher die Version beim
-Vergleich als `corrupt`, speichert den Index einmal und feuert ein Ereignis
+ist ein gespeichertes Artefakt beschädigt oder gelöscht, markiert sein Versionsspeicher die
+Version beim Vergleich als `corrupt` bzw. `missing`, speichert den Index einmal und feuert ein Ereignis
 `configuration.integrity_failed`, einmal je beschädigter Version und ohne Router-Aufruf (die
 erste Fassung dieses Eintrags sagte „nichts wird geschrieben“; das war falsch). Die Engine ruft es noch nicht auf
 (die Anbindung an die Faktenquelle `HealFactsProvider` beschreibt die Doku). Für Benutzer
@@ -568,11 +568,17 @@ Abschnitt 7.2.
   bei oder vor dem Beginn des Fensters verglichen. Der Vergleich zeigt so **alle** Änderungen im
   Fenster; eine frühere Änderung im Bereich des Vorfalls wird nicht mehr von einer späteren
   anderswo verdeckt. Eine Änderung, die älter ist als das Fenster, ist keine Drift dieses
-  Vorfalls: „keine Änderung“ nur, wenn der Speicher es belegt (derselbe Inhalt an beiden Enden,
-  nichts anderes dazwischen), sonst unbekannt. Neue Gründe: `window_base_missing` (keine
-  Version vor dem Fenster, nie „keine Änderung“), `change_too_old`, `changed_and_reverted`
-  (geändert und im Fenster zurückgenommen), `change_may_predate_window` (die erste Änderung
-  kann vor dem Fenster liegen; streng ausgelegt, bei täglichen Sicherungen oft unbekannt).
+  Vorfalls. **Ein bekanntes „keine Änderung“ gibt es nie:** der Speicher kann es nicht belegen
+  (eine Änderung kann noch nicht gesichert sein, ein A→B→A ohne gespeichertes B, ein neuer
+  Inhalt genau zum Beginn gesichert). `diff_proven` ist daher nur „ja“ oder unbekannt, nie
+  „nein“; zeigt der Speicher keine Änderung, ist der Grund `no_change_seen`. Neue Gründe:
+  `window_base_missing` (keine Version vor dem Fenster), `change_too_old`, `no_change_seen`,
+  `changed_and_reverted` (im Fenster geändert und zurückgenommen, nur erkannt, wenn die
+  Zwischenversion gespeichert ist), `change_may_predate_window` (die erste Änderung kann vor
+  dem Fenster liegen).
+- **Ehrlicher Hinweis:** mit einer Sicherung am Tag ist eine Änderung fast nie belegbar (das
+  Review hat 0 von 24 Anfangsstunden gemessen). Playbook F ist damit nahezu wirkungslos, bis
+  öfter gesichert wird oder bei erkannter Drift eine Sicherung entsteht; für 1.53.0 akzeptiert.
   Zwei verschiedene Inhalte mit derselben Zeit sind auch auf der Seite der Basis
   `ambiguous_order`. Bekannte Grenze: ein Bereich, der im Fenster geändert und vor dessen Ende
   zurückgesetzt wurde, während sich ein anderer dauerhaft änderte, ist nicht sichtbar.
@@ -596,16 +602,20 @@ Abschnitt 7.2.
   Konfiguration, nicht die laufende. Ein Dienst-Neustart bleibt dadurch gesperrt.
 - **Richtlinie:** `config_change_24h` ist nur „ja“, wenn ein Vergleich eine Änderung im
   Bereich in den letzten 24 h belegt (dieselbe Fensterlogik), sonst unbekannt, nie „nein“.
-- **Für das Paket, das den Adapter verdrahtet:** acht Pflichtregeln in der Doku (Abschnitt
+- **Für das Paket, das den Adapter verdrahtet:** zehn Pflichtregeln in der Doku (Abschnitt
   7.2), u. a. dasselbe `before` für das async Lesen und den synchronen Aufruf (bei
-  `async_read_stored_diff` jetzt Pflicht) und Zwischenspeichern je (Router, `base_id`,
-  `other_id`).
-- **Tests:** `tests/test_heal_config_link_v1530.py` (124 Tests), darunter ein Zufallstest
-  mit 8000 Verläufen gegen die echten Änderungszeiten, ein Test mit dem echten Core, der
-  **null Router-Aufrufe** nachweist, und einer über einem beschädigten Artefakt (genau ein
+  `async_read_stored_diff` jetzt Pflicht), `before` = Beginn − 0,001 s bei einem auf
+  Millisekunden gerundeten Wert, Zwischenspeichern je (Router, `base_id`, `other_id`) und je
+  Änderung des Versionsindex (etwa 9 µs je Version), und: aus diesem Modul gibt es kein
+  bekanntes Nein, `None` ist nie eine Erlaubnis.
+- **Tests:** `tests/test_heal_config_link_v1530.py` (129 Tests), darunter ein Zufallstest
+  mit 8000 Verläufen gegen die echten Änderungszeiten (auch „keine Änderung gesehen“: 442 von
+  1548 solchen Läufen hatten in Wahrheit eine Änderung), ein Test, dass keine Eingabe
+  `diff_proven = false` ergibt, ein Test mit dem echten Core, der **null Router-Aufrufe**
+  nachweist, und einer über einem beschädigten und einem gelöschten Artefakt (genau ein
   Speichern des Index und ein Ereignis, beim zweiten Lesen nichts). Mutationsprüfung auf
-  grünem Stand: 111 Mutationen (26 neue, je eine für jede im Review geänderte Regel), alle
-  scheitern; fünf erst nach neuen Tests.
+  grünem Stand: 115 Mutationen (je eine für jede in den beiden Reviews geänderte Regel, auch
+  die, die `no_change_seen` wieder zu „nein“ macht), alle scheitern.
 
 ## [1.52.3] - 2026-11-27
 
