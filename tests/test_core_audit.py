@@ -40,11 +40,11 @@ async def _log(hass=None) -> AuditLog:
 
 async def test_case14_rings_are_separate_and_bounded(disks: FakeDisks) -> None:
     log = await _log()
-    for i in range(1005):
+    for i in range(1105):
         log.emit(REGISTERED, router_id=R1, now=T0 + timedelta(seconds=i))
     for i in range(505):
         log.emit(ADOPTED, router_id=R1, now=T0 + timedelta(seconds=i))
-    assert log.ring_size(AuditRing.GENERAL) == 1000
+    assert log.ring_size(AuditRing.GENERAL) == 1100  # 1000 before 1.53.0
     assert log.ring_size(AuditRing.SECURITY) == 500
     assert log.stats["evicted_general"] == 5
     assert log.stats["evicted_security"] == 5

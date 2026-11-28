@@ -1,4 +1,4 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine; Paket G: Anbindung Configuration Manager)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine; Paket G: Anbindung Configuration Manager; Paket K1: Entitäten, Ereignis, Audit, Security-Veto)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
      Paket X (Branch feature/self-healing-x, 2026-11-27, auf B, C1, D, E und F). Gebaut sind heal_model.py
@@ -9,8 +9,11 @@
      (Vorabprüfungen und Sammler, nicht angebunden), seit Paket F heal_playbooks.py (reine
      Logik, noch nicht aufgerufen), seit Paket X (Branch feature/self-healing-x) entscheidet
      die Engine über heal_policy.gate (PolicyDecider), seit Paket G (Branch
-     feature/self-healing-g) liest heal_config_link.py den Configuration Manager (nicht angebunden).
-     Aussagen zu B, C1, D, E, F, X und G sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     feature/self-healing-g) liest heal_config_link.py den Configuration Manager (nicht angebunden),
+     seit Paket K1 (Branch feature/self-healing-k1, 2026-11-28) gibt es heal_journal.py (Audit,
+     Bus-Ereignis, Signal) und heal_entities.py (nur lesende Entitäten) und das Security-Veto
+     als Fakt der Engine.
+     Aussagen zu B, C1, D, E, F, X, G und K1 sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
      tests/full_router_kit.py); nicht auf Routern,
@@ -72,7 +75,8 @@ startet mit dem ersten Router-Eintrag, hört auf die Vorfall-Meldungen von Netwo
 Intelligence und legt zu einem gemeldeten Wurzelvorfall auf genau einem Router einen
 Datensatz an, der bis „vorgeschlagen“ (PROPOSED) läuft und dort stehen bleibt. Es gibt
 **keinen Router-Aufruf, keinen Schreibweg, keinen Dienst, keine Entität, kein Bus-Ereignis**
-und keine neue unique_id. Die Datei `openwrt_router.self_healing` entsteht mit dem ersten
+und keine neue unique_id (Entitäten, Ereignis und unique_ids kamen mit Paket K1, siehe unten).
+Die Datei `openwrt_router.self_healing` entsteht mit dem ersten
 Datensatz (verzögert) und spätestens, wenn die Engine stoppt.
 
 **Stand heute (Paket D):** Dazu kommen der geschlossene Katalog (`heal_catalog.py`,
@@ -107,6 +111,16 @@ Vergleich zweier **gespeicherter** Versionen und liefert daraus die Fakten für 
 Änderung, Bereiche, Zeit, Sicherung für den Plan) und die Sicherungsfakten der Vorabprüfungen.
 Kein Router-Aufruf, kein Wiederherstellen, kein Probelauf; die Engine ruft sie noch nicht auf.
 
+**Stand heute (Paket K1):** Self-Healing ist sichtbar und nachvollziehbar, weiter **nur
+Observe**. Dazu kommen sieben lesende Flotten-Entitäten und ein Sensor „Self-Healing-Modus“ je
+Router (Abschnitt 11, `heal_entities.py`), das Bus-Ereignis `openwrt_router_remediation_event`
+(Abschnitt 11) und ein Audit-Eintrag je Zustandswechsel über das Audit des Core mit dem Präfix
+`self_healing.` (Abschnitt 12, `heal_journal.py`). Offene Erkennungen des Security Centers sind
+ein **Fakt der Engine** (Abschnitt 12): eine offene Erkennung heißt Not Safe, ein Security Center,
+das aus ist oder nicht bereit, heißt unbekannt und sperrt damit jedes Schreiben. Kein
+zusätzlicher Router-Aufruf, kein Knopf, kein Schalter, kein Dienst. Mit dem Modul aus entsteht
+keine dieser Entitäten; vorhandene werden beim Ausschalten aus dem Entitätsregister entfernt.
+
 ## 2. Modulaufbau
 
 Geplant ist **eine** Instanz für die ganze Flotte je HA-Installation, verdrahtet wie Security
@@ -126,7 +140,8 @@ frei).
 | `heal_verify.py` | rein + async | Ergebnisklassen aus späteren Polls | Plan (H) |
 | `heal_engine.py` | async | Ablauf, Sperren, Warteschlange, Zeitgeber, Neustart | **gebaut** bis PROPOSED (C1, Abschnitt 2.1); Ausführen, Sperren, Warteschlange Plan (C2, I) |
 | `heal_views.py` | HTTP | Routen (Abschnitt 11) | **gebaut**: fünf lesende Routen (C1); schreibende Plan (C2) |
-| `heal_entities.py` | HA | nur lesende Entitäten | Plan (K) |
+| `heal_journal.py` | HA | Audit-Eintrag je Zustandswechsel, Bus-Ereignis, Signal an die Entitäten; kein Router-Aufruf | **gebaut** (Paket K1, Abschnitte 11 und 12) |
+| `heal_entities.py` | HA | nur lesende Entitäten (Sensoren, Binärsensor) aus dem Speicher der Engine | **gebaut** (Paket K1, Abschnitt 11) |
 | `heal_executor.py` | async | **das einzige Modul, das schreibend einen Router aufruft** | Plan (C2, 1.54.0) |
 | `api.py` (Ergänzung) | – | `restart_service_typed(name)` mit fester Dienstliste | Plan (C2, 1.54.0) |
 | `frontend/…/enterprise/selfhealing/` | TS | Tab „Self-Healing“ | Plan (J) |
@@ -136,8 +151,11 @@ Namen (aus dem Entwurf übernommen): Modul `self_healing`, Dateien `heal_*.py`, 
 `/api/openwrt_router/enterprise/selfhealing/v1/`. Der Store-Schlüssel steht in
 `heal_store.py` (nicht in `const.py`), wie bei der Time Machine; seit C1 stehen in `const.py`
 der Optionsschlüssel `self_healing_enabled` (Standard an) und die `hass.data`-Schlüssel der
-Engine und der gebundenen Routen. Audit-Präfix und Modulname im Audit gibt es noch nicht
-(Paket K).
+Engine und der gebundenen Routen. Seit Paket K1 gibt es Audit-Präfix `self_healing.` und
+Modulname `self_healing` im Audit (`heal_journal.EVENT_PREFIX`, `MODULE`; Paket K2 nutzt denselben
+Modulnamen mit dem engeren Präfix `self_healing.manual.`); sie stehen nicht in
+`core_models.MODULE_EVENT_PREFIXES`, sondern werden beim Binden an den Core registriert, wie bei
+der Time Machine. `rem_` ist die Kennung der Datensätze, nicht das Audit-Präfix.
 
 ### 2.1 Die Engine (Paket C1)
 
@@ -2118,8 +2136,8 @@ Fehlschläge 30 Tage, letztes Ergebnis, „Auto-Heal an“ als Binärsensor, Mod
 kommen in den unique_id-Snapshot. Ein Bus-Ereignis `openwrt_router_remediation_event` ohne
 Adressen. **Keine Dienste.**
 
-**Stand heute (C1):** fünf **lesende** Routen, sonst nichts davon. Keine schreibende Route,
-keine Entität, keine unique_id, kein Ereignis, kein Dienst.
+**Stand heute (C1):** fünf **lesende** Routen. Keine schreibende Route, kein Dienst. Seit
+Paket K1 dazu die lesenden Entitäten und das Bus-Ereignis (Abschnitte 11.1 und 11.2).
 
 | Route (GET) | Recht | Inhalt |
 |---|---|---|
@@ -2147,13 +2165,94 @@ als die vorhandenen lesenden Enterprise-Routen Nicht-Administratoren zeigen. Die
 Routen `history` und `…/preflight` sind in C1 in `actions/{id}` (Verlauf) und `plans`
 (Vorschau) enthalten.
 
+### 11.1 Entitäten (`heal_entities.py`, Paket K1)
+
+Nur **Sensoren und ein Binärsensor**; kein Knopf, kein Schalter, kein Dienst. Jeder Wert kommt
+aus dem Speicher der laufenden Engine (Datensätze, Einstellungen, Schleifenschutz). Kein
+Router-Aufruf, kein Lesen von der Platte, keine Änderung am Speicher: die Sicherheitszeit ist die,
+die die Engine zuletzt beobachtet hat (`store.loop.clock.safe`), nie ein neues `store.now()`. Die
+Entitäten pollen nicht (`should_poll` aus); sie schreiben ihren Zustand, wenn das Journal das
+Signal `openwrt_router_self_healing_update` schickt (nach jedem Zustandswechsel und bei jedem
+Takt der Engine, also spätestens alle 300 s). Ohne laufende Engine sind sie nicht verfügbar.
+
+| unique_id | Art | Wert |
+|---|---|---|
+| `openwrt_router_fleet_self_healing_mode` | Sensor, Aufzählung `observe`/`approval`/`auto_heal`/`mixed` | geltender Modus der geladenen Router, `mixed` bei verschiedenen; unbekannt ohne geladenen Router oder wenn ein Router unbekannt ist |
+| `openwrt_router_fleet_remediation_active` | Sensor, Zahl | Datensätze nicht im Endzustand |
+| `openwrt_router_fleet_remediation_pending` | Sensor, Zahl | Datensätze in WAITING_APPROVAL |
+| `openwrt_router_fleet_remediation_succeeded_30d` | Sensor, Zahl, Attribut `window_days: 30` | in den letzten 30 Tagen mit RESOLVED beendet |
+| `openwrt_router_fleet_remediation_failed_30d` | Sensor, Zahl, Attribut `window_days: 30` | in den letzten 30 Tagen in einem anderen Endzustand beendet, **nachdem** eine Ausführung begann (abgelehnte oder abgebrochene Vorschläge sind keine Reparatur) |
+| `openwrt_router_fleet_remediation_last_result` | Sensor, Aufzählung `resolved`/`rejected`/`cancelled`/`escalated`/`manual_recovery_required`/`rolled_back` | Endzustand des zuletzt beendeten Datensatzes; Attribute `action_id`, `router_id`, `action_type`, `incident_type`, `ended_at` (nicht im Recorder) |
+| `openwrt_router_fleet_auto_heal_enabled` | Binärsensor | Auto-Heal gilt auf mindestens einem Router; unbekannt, wenn ein Router unbekannt ist und keiner Auto-Heal hat |
+| `<entry_id>_self_healing_mode` | Sensor, Aufzählung `observe`/`approval`/`auto_heal`, Diagnose, am Router-Gerät | geltender Modus dieses Routers; Attribute `router_id`, `configured_mode`, `held`, `fleet_paused`, `module_enabled` |
+
+- Die Flotten-Entitäten haben kein Gerät und gibt es einmal je HA-Instanz. Sie hängen an der
+  Plattform des Eintrags mit der kleinsten Eintragskennung; wird dieser entladen, ziehen sie zu
+  einem anderen geladenen Eintrag um (gleiche unique_id).
+- Die Präfixe `openwrt_router_fleet_self_healing_*`, `openwrt_router_fleet_remediation_*`,
+  `openwrt_router_fleet_auto_heal_*` und das Suffix `_self_healing_mode` kommen sonst nicht vor;
+  der Snapshot (`EXPECTED_SELF_HEALING`, 8 Kennungen) hält sie fest, und die 130 vorhandenen
+  bleiben unverändert.
+- **Lebenslauf:** Die Plattformen `sensor` und `binary_sensor` jedes Eintrags bieten ihr
+  `async_add_entities` an; angelegt wird, sobald die Engine läuft (Schalter
+  `self_healing_enabled` an, Standard). Ausgeschaltet stoppt die Engine, und die Entitäten werden
+  aus dem Entitätsregister entfernt. Mit dem Schalter aus beim Start entsteht keine. Ist der
+  Schalter an und die Engine läuft nur noch nicht (Neustart), wird nichts entfernt. Ein fehlendes
+  Entitätsregister wird nie angelegt.
+- **Unbekannt bleibt unbekannt:** ein Fehler beim Lesen gibt `unknown`, nie einen erfundenen
+  Wert; eine unbekannte Sicherheitszeit gibt einen unbekannten Modus.
+- **Grenze der 30-Tage-Zähler:** Der Speicher verdrängt die ältesten beendeten Datensätze, wenn
+  er voll ist (Abschnitt 5). Hat er das getan und liegt kein behaltener beendeter Datensatz vor dem
+  Fenster, sind beide Zähler unbekannt. Der Zähler der Verdrängungen (`evicted_terminal`) wird
+  nicht gespeichert: nach einem Neustart weiß die Engine nicht mehr, dass vorher verdrängt wurde,
+  und die Zähler können dann zu klein sein (QUESTION K1-5, Abschnitt 16).
+- **Sprache:** Namen und Zustandstexte stehen in `strings.json`, `translations/en.json` und
+  `translations/de.json` (`translation_key`, `has_entity_name`).
+
+### 11.2 Bus-Ereignis (`heal_journal.py`, Paket K1)
+
+Ein Ereignistyp: `openwrt_router_remediation_event`, gefeuert mit `hass.bus.async_fire` und
+`EventOrigin.local`, nur für Übergänge im eigenen Speicher der Engine. Das Journal hört auf kein
+Ereignis und feuert nie eines weiter, das von außen kam.
+
+| `state` | Übergang |
+|---|---|
+| `proposed` | → PROPOSED |
+| `approval_required` | → WAITING_APPROVAL |
+| `started` | → EXECUTING |
+| `succeeded` | → RESOLVED |
+| `failed` | → FAILED |
+| `rollback_started` | → ROLLING_BACK |
+| `rollback_failed` | ROLLING_BACK → MANUAL_RECOVERY_REQUIRED |
+| `manual_recovery_required` | → MANUAL_RECOVERY_REQUIRED (von anderswo) |
+| `escalated` | → ESCALATED |
+
+Andere Übergänge (DETECTED, ANALYZED, PREFLIGHT, APPROVED, REJECTED, CANCELLED, VERIFYING,
+ROLLBACK_PENDING, ROLLED_BACK) feuern kein Ereignis, schreiben aber ihren Audit-Eintrag. In
+1.53.0 (nur Observe) kommt nur `proposed` vor.
+
+Nutzdaten, genau diese 14 Schlüssel: `action_id`, `action_type`, `actor` (Akteursart),
+`device_id` (HAs Gerätekennung des Routers, `None` wenn unbekannt), `from_state`, `incident_id`,
+`incident_type`, `outcome` (Ergebnis der Entscheidung, nur beim neuesten Verlaufseintrag),
+`reason` (Code des Übergangs), `risk_class` (nur beim neuesten Verlaufseintrag), `router_id`
+(Kennung des Core), `state`, `to_state`, `ts` (Zeit des Übergangs). **Nie** eine Adresse, ein
+Host- oder Client-Name, ein Geheimnis oder ein Konfigurationsinhalt.
+
+Rate: höchstens **30 Ereignisse in jeder Spanne von 60 s** (gleitendes Fenster auf der
+monotonen Uhr); die übrigen werden verworfen und gezählt (`events_suppressed`), ihr
+Audit-Eintrag wird trotzdem geschrieben.
+
+**DECIDED (K1):** Das Ereignis trägt `device_id` (HAs undurchsichtige Kennung, wie die
+Doku zu Integrations-Ereignissen empfiehlt), nicht die Eintragskennung.
+
 ## 12. Time Machine, Audit, Security Center, KI-Berater
 
 Geplant:
 
 - **Audit:** Präfix `self_healing.` mit Modul `self_healing`, Ereignisse für jeden Schritt ab
   dem Vorschlag, Pflichtereignisse ab der Freigabe. Den Anteil am Audit-Kontingent (siebtes
-  Modul) und die Gesamtgröße passt **Paket K** an, nicht Paket B.
+  Modul) und die Gesamtgröße passt ein späteres Paket an (K2, QUESTION K1-2), nicht Paket B
+  und nicht K1.
 - **Time Machine:** Marken `remediation_event` aus den echten Audit-Zeitpunkten, keine
   erfundenen Ereignisse; „vorher/nachher“ aus den eigenen Messungen der Aktion.
 - **Security Center:** eine offene Erkennung am Router oder seinem Management-Weg heißt
@@ -2162,8 +2261,87 @@ Geplant:
 - **KI-Berater:** nur eine Schnittstelle; Rat ändert nie Risiko, Richtlinie, Modus, Allowlist
   oder Freigabe.
 
-**Stand heute:** nichts davon gebaut. In `core_models.py` steht nur die Kennung `rem_`;
-Audit-Präfix, Audit-Anteil und Pflichttypen sind unverändert.
+**Stand heute (Paket K1):** Audit mit eigenem Anteil, Time Machine (über das Audit) und das
+Security-Veto sind gebaut; eine eigene Time-Machine-Quelle nicht (QUESTION K1-1, Abschnitt 16);
+KI-Berater nicht. In `core_models.py` ändern sich nur `AUDIT_MAX_EVENTS` und
+`AUDIT_SHARED_MODULES` (Abschnitt 12.1).
+
+### 12.1 Audit (`heal_journal.py`)
+
+- **Ein Eintrag je Zustandswechsel**, sonst keiner: das Journal vergleicht nach jedem Vorfall,
+  jedem Takt, dem Start und jedem hinzugekommenen Router die Länge des Verlaufs jedes Datensatzes
+  mit der zuletzt gesehenen und schreibt für jeden neuen Verlaufseintrag genau einen
+  Audit-Eintrag. Ein Takt ohne Übergang und eine Entscheidung, die nichts ändert, schreiben
+  nichts. Beim Start gelten die gespeicherten Längen als gesehen; nur den Eintrag, den die
+  Neustartregel einem unterbrochenen Datensatz anhängt, schreibt es (`LoadResult.recovered`).
+  Neue Einträge werden nach (Zeit, Kennung, Stelle) geordnet geschrieben.
+- **Typ** `self_healing.action_<zustand>` (ein Typ je Zustand, 17), Quelle und Modul
+  `self_healing`, Akteur `Actor.for_module("self_healing")` (die Akteursart des Übergangs steht
+  in den Daten), `correlation_id` die Kennung des Datensatzes, `incident_ref` die Vorfall-Kennung,
+  wenn der Core sie als Kennung annimmt.
+- **Daten**, genau diese 12 Schlüssel: `action_id`, `action_type`, `actor`, `at` (Zeit des
+  Übergangs), `delayed`, `from_state`, `incident_id`, `incident_type`, `outcome`, `reason`,
+  `risk_class`, `to_state`. Nur Codes, Kennungen und Zahlen; die Maskierung des Core lässt sie
+  stehen (Test). Die Zeit des Audit-Eintrags ist die Zeit des Schreibens (der Core nimmt keine
+  andere); die Zeit des Übergangs steht in `at`.
+- **Schwere und Ergebnis** je Zustand fest (`AUDIT_LEVEL`): `info` bis APPROVED/RESOLVED,
+  `warning` für FAILED, ROLLBACK_PENDING, ROLLING_BACK, ROLLED_BACK, ESCALATED, `critical` für
+  MANUAL_RECOVERY_REQUIRED. **Pflichttypen** (nie dedupliziert) sind alle Zustände ab der
+  Freigabe (11 Typen); **sicherheitsrelevant** sind EXECUTING und ROLLING_BACK.
+- **Präfix:** `self_healing.` wird beim Binden der Engine an den Core registriert
+  (`register_event_prefix`, `register_audit_mandatory_types`), beim Stoppen wieder abgemeldet; die
+  Einträge bleiben im Audit. **Abstimmung mit Paket K2** (`heal_guard.py`, PR #85, parallel
+  gebaut): K2 registriert für **denselben** Modulnamen `self_healing` das engere Präfix
+  `self_healing.manual.` und schreibt `self_healing.manual.action` (Drücken eines vorhandenen
+  Knopfs oder Schalters). Die Typen von K1 liegen alle unter `self_healing.` außerhalb von
+  `.manual.` (Test). Beide Präfixe bestehen nebeneinander, in jeder Reihenfolge; der Entferner des
+  einen nimmt dem anderen nichts weg; beide zählen als ein Modul (ein Anteil). Test mit dem echten
+  Core: `test_k2_manual_actions_share_the_module_and_coexist`.
+- **Ohne Core** (noch nicht da, Präfix abgelehnt) warten Einträge in einer begrenzten Schlange
+  (100, die ältesten fallen zuerst, gezählt) und werden beim Binden geschrieben; dann ist
+  `delayed` wahr, wenn mehr als 5 s seit dem Übergang vergangen sind. Jeder Fehler wird gezählt
+  (`stats()["journal"]`, Diagnose) und nur mit seinem Typ geloggt; nichts wirft in die Engine.
+- **Anteil am Kontingent:** Self-Healing ist das siebte Modul im allgemeinen Ring (neben
+  config_manager, net_diagnostics, security_center, time_machine, traffic_analytics, wifi_rf).
+  Mit 100 je Modul und 400 für den Core hätten die garantierten Anteile 1100 von 1000 Einträgen
+  ergeben. **Seit K1:** `AUDIT_MAX_EVENTS` = 1100 und `AUDIT_SHARED_MODULES` = 7
+  (`core_models.py`); `AUDIT_MODULE_SHARE` (100) und `AUDIT_CORE_SHARE` (400) bleiben. Kein
+  Eigentümer verliert garantierte Einträge; der Ring hält 100 Einträge mehr. Der Sicherheitsring
+  ist unverändert (Core 500, je Modul 100, alle Module zusammen 500). Tests:
+  `test_the_ring_fits_seven_module_shares_and_the_core` (Konstanten wörtlich) und
+  `test_every_owner_keeps_its_full_share_with_self_healing` (alle sieben Module und der Core
+  genau an ihrem Anteil füllen den Ring ohne Verdrängung; weitere Einträge von Self-Healing
+  kosten nur seine eigenen ältesten).
+
+### 12.2 Time Machine
+
+**Wahrheit oder unbekannt:** Die Time Machine zeigt die Audit-Einträge von Self-Healing über ihre
+vorhandene Quelle `core_audit` als Marken der Art `audit_event` (nur für Administratoren), mit dem
+Titel `core_audit.<typ>` und der Zeit des Audit-Eintrags. Das gilt für die Übergänge der
+Datensätze (`self_healing.action_<zustand>`, K1) **und** für das Drücken vorhandener Knöpfe und
+Schalter (`self_healing.manual.action`, K2); `tm_sources._MODULE_KINDS` nennt das Präfix
+`self_healing.` ausdrücklich mit der Art `audit_event` (der Test nimmt den Typ wörtlich,
+`heal_guard.py` wird nicht importiert). Keine
+erfundenen Zeiten, keine eigenen Ereignisse; ein Test mit dem echten Core belegt die Marken.
+`tm_sources.py` bekommt nur diese Zeile: eine eigene Quelle oder Art `remediation_event` braucht Texte und
+Tabellen im Frontend (die Tests `test_tm_panel_texts_v1500` und `test_tm_modules_v1520` binden
+beides aneinander), also Paket J (QUESTION K1-1). „Vorher/nachher“ aus den eigenen Messungen
+gibt es erst mit Paket H.
+
+### 12.3 Security-Veto (`HealEngine.open_security_findings`)
+
+Die Zahl offener Erkennungen ist ein **Fakt der Engine** (`DecisionContext.open_security_findings`)
+und geht in `RiskContext` vor jedem Wert einer Faktenquelle; eine Faktenquelle kann Erkennungen
+weder verstecken noch erfinden.
+
+- Gezählt werden Erkennungen mit Status `open` oder `confirmed`, jede Schwere, am Router **und
+  alle ohne Router** (Flotte); dieselbe Zählung wie `heal_preflight`, nie lockerer.
+- Mehr als 0 → **Not Safe**; der Datensatz bleibt eine Empfehlung (RECOMMENDED, READ_ONLY).
+- **Security Center aus**, nicht geladen, nicht bereit, keine lesbare Liste, eine unlesbare
+  Erkennung, ein Fehler beim Import oder Lesen → **unbekannt** (`None`, nie 0). Unbekannt zählt
+  als hohes Risiko und sperrt damit jedes Schreiben; ein Modul, das aus ist, sagt nicht „nichts
+  gefunden“.
+- Nur aus dem Speicher des Security Centers, kein Router-Aufruf, wirft nie.
 
 ## 13. Dashboard „Self-Healing Center“
 
@@ -2180,7 +2358,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 
 | Bedrohung | Gegenmaßnahme | Stand heute |
 |---|---|---|
-| Nicht-Administrator oder Automation löst ein Schreiben aus | Guard, schreibende Routen nur für Administratoren, keine Dienste, nur lesende Entitäten | Plan |
+| Nicht-Administrator oder Automation löst ein Schreiben aus | Guard, schreibende Routen nur für Administratoren, keine Dienste, nur lesende Entitäten | **teilweise**: seit K1 nur Sensoren und ein Binärsensor, kein Knopf, kein Schalter, kein Dienst (statischer Test); schreibende Routen und Guard Plan (C2) |
 | Freigabe wiederholt, doppelt ausgeführt | einmalige Schreiberlaubnis, Idempotenz, Prüfsumme | **teilweise**: das Modell lässt EXECUTING nur einmal zu; der Speicher gibt bei gleicher Idempotenz-, Aktions-, Vorfall- oder Bauteilkennung die vorhandene Aktion zurück, lehnt eine Idempotenz-Kennung ohne Datensatz ab, und die Eingaben dieser Prüfung sind eingefroren |
 | Zustand ändert sich zwischen Freigabe und Ausführung | `binding_hash` mit Fingerabdruck, letzte Vorabprüfung | Funktion `binding_hash()` vorhanden; Bindung und Fingerabdruck sind nach der Planung unveränderlich |
 | Engine repariert eigene Nebenwirkungen | Kennzeichnung eigener Aktionen, Schutzschalter, Versuche, Pause, eine Aktion gleichzeitig | **teilweise**: der Speicher hält Abklingzeit, Versuche und offene Schutzschalter beim Ausführen ein; die Logik, die Schutzschalter öffnet und die Flotte pausiert, ist gebaut (`heal_policy.record_outcome`, Paket D), aber noch nicht aufgerufen (Ausgänge mit I); seit Paket X lehnt der dauerhafte Schritt in der Flotten-Pause ab |
@@ -2198,7 +2376,10 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
 | Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | Sperre und Fremd-Schreibzugriff als Daten vorhanden, noch nicht benutzt |
-| Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für den Speicher; Test mit der Maskierung des Core |
+| Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für Speicher, Audit und Bus-Ereignis (feste Schlüssellisten, Test mit der Maskierung des Core, Test ohne Adresse, Titel oder Geheimnis in den Nutzdaten) |
+| Flut von Bus-Ereignissen treibt Automationen | höchstens 30 Ereignisse in 60 s, nur eigene Übergänge, nie ein Ereignis von außen weiter | **gebaut** (K1, Abschnitt 11.2) |
+| Security Center aus oder nicht bereit gilt als „keine Erkennung“ | Fakt der Engine, unbekannt statt 0, unbekannt sperrt jedes Schreiben, Flotten-Erkennungen zählen für jeden Router | **gebaut** (K1, Abschnitt 12.3) |
+| Abgeschaltetes Modul hinterlässt Entitäten | Entfernen aus dem Entitätsregister beim Ausschalten, nichts beim Start mit Schalter aus | **gebaut** (K1, Abschnitt 11.1) |
 | Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers, ohne Ende, wenn er noch eine Ausführung zeigt; Holds aus beendeten Datensätzen werden bei jedem Laden neu gesetzt | **gebaut** |
 
 ## 15. Arbeitspakete und Releases
@@ -2211,10 +2392,11 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | **E** | Vorabprüfungen (`heal_preflight.py`, Abschnitt 7.1): dreizehn Prüfungen, Fingerabdruck, Bindung an Router/Aktion/Parameter und Sicherheitszeit, Sammler nur aus dem Speicher, Fakten für `RiskContext`/`IncidentFacts`; nicht angebunden (Adapter-Paket: Engine und Faktenquelle; C2: letzte Vorabprüfung vor dem Ausführen) | **gebaut** (PR #80) |
 | **F** | Playbooks A–G als Daten (`heal_playbooks.py`): Register, Matcher, Analyse je Playbook, Nie-Regeln, deutsche Texte; **füllt `IncidentFacts.cause_outside_router`** (True/False/None je Playbook, Abschnitt 8.4; Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt). Reine Logik; die Engine ruft es noch nicht auf (Anbindung über die Faktenquelle `HealFactsProvider`, Abschnitt 2.1), die Beweisdaten füllt die Anbindung | **gebaut** (PR #79) |
 | **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **gebaut** (PR #81) |
-| **G** | Anbindung Configuration Manager (`heal_config_link.py`, Abschnitt 7.2): Versionsindex und Vergleich gespeicherter Versionen → Fakten für Playbook F (Sicherungsverweis, Drift-Plan) und Vorabprüfungen; kein Probelauf (er spricht mit dem Router), keine Verdrahtung in die Engine | **dieser Stand** |
+| **G** | Anbindung Configuration Manager (`heal_config_link.py`, Abschnitt 7.2): Versionsindex und Vergleich gespeicherter Versionen → Fakten für Playbook F (Sicherungsverweis, Drift-Plan) und Vorabprüfungen; kein Probelauf (er spricht mit dem Router), keine Verdrahtung in die Engine | **gebaut** (PR #82) |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
 | I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
-| K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
+| **K1** | Entitäten, Ereignis, Audit-Präfix und Pflichttypen, Time Machine über das Audit, Security-Veto, unique_id-Snapshot (Abschnitte 11.1, 11.2, 12) | **dieser Stand** (Branch `feature/self-healing-k1`) |
+| K2 | vorhandene Knöpfe und Schalter: Sperre und Audit `self_healing.manual.action` (`heal_guard.py`) | parallel (PR #85); K1 ist darauf abgestimmt (Abschnitt 12.1) |
 | J | Tab im Dashboard | offen |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
 
@@ -2252,6 +2434,11 @@ Hold.
 | Q7 | Was Auto-Heal enthalten darf | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): nur Risiko ≤ 1; Risiko 3 erlaubt kein allgemeiner Schalter; unbewertetes Risiko zählt als HOCH |
 | Q8 | Watchdog auf dem Router | offen (Entwurf: keiner) |
 | Q9 | Schritt `secured_restore` von Playbook F nennt `deferred_to` „G“, Paket G bringt aber keinen Ausführer | offen (Empfehlung: in einem späteren Paket mit neuer Playbook-Version umbenennen, etwa auf das Paket eines Wiederherstellungs-Ausführers; bis dahin unverändert, der Plan führt ohnehin nie aus) |
+| K1-1 | Eigene Time-Machine-Quelle bzw. Art `remediation_event` | offen (Empfehlung: mit Paket J, weil Frontend-Texte und -Tabellen nötig sind; bis dahin über `core_audit`) |
+| K1-2 | Anteil eines siebten Moduls im allgemeinen Ring | **entschieden (Koordinator):** Ring auf 1100, sieben Anteile zu 100, Core 400; kein Anteil kleiner (Abschnitt 12.1) |
+| K1-3 | Audit-Präfix: `self_healing.` oder `rem_` | **entschieden (Koordinator):** Modulname `self_healing`, Präfix `self_healing.`; `rem_` ist nur die Kennung der Datensätze und nirgends ein Audit-Präfix; `self_healing.manual.` gehört K2 |
+| K1-4 | `self_healing` in `core_models.MODULE_EVENT_PREFIXES` aufnehmen | offen (Empfehlung: nach dem Merge von K1 und K2 mit `self_healing.`; K2s `self_healing.manual.` liegt darunter und bliebe erlaubt; heute registriert die Engine das Präfix beim Binden wie die Time Machine) |
+| K1-5 | Zähler `evicted_terminal` speichern, damit die 30-Tage-Zähler nach einem Neustart eine Verdrängung erkennen | offen (Empfehlung: im nächsten Paket, das `heal_store.py` ändern darf) |
 
 ## 17. Tests und was nicht geprüft ist
 
@@ -2664,7 +2851,85 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   leeren Vergleich –, und vier neue: Grund, Anzeige-Flag, `to_dict`, `missing` im Docstring),
   alle scheitern.
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
-  C1 bringt keine Entität.
+  C1 bringt keine Entität. Seit K1 hält er zusätzlich die 8 Kennungen von Self-Healing fest
+  (`EXPECTED_SELF_HEALING`): mit dem Modul an kommen genau sie zu den 130 vorhandenen dazu,
+  mit dem Modul aus keine; keine vorhandene ändert sich.
+- `tests/test_heal_events_audit_v1530.py` (Paket K1, 95 Tests): Namen, Grenzen, Audit-Typen,
+  Pflicht- und Sicherheitszustände, Daten- und Nutzdatenschlüssel als wörtliche Listen; die
+  ganze Kantentabelle des Modells (32 Kanten) gegen den Ereigniszustand; genau ein Audit-Eintrag
+  je Übergang mit den genauen Daten, keiner je Takt; Abschluss, Neustart (der Eintrag der
+  Neustartregel einmal), kürzerer Verlauf, vergessene Datensätze, Zeitordnung; Warteschlange
+  ohne Core, Grenze 100, `delayed`, abgelehntes Präfix, fehlschlagendes `emit`, Schließen;
+  jede Stelle, an der die Engine das Journal aufruft (Start, hinzugekommene Router, Vorfall,
+  Takt, Stopp) schreibt ihre Übergänge sofort; das Signal genau einmal je Durchgang mit
+  Änderung; Ereignis mit genau den 14 Schlüsseln, ohne Adresse, Titel oder Geheimnis,
+  `EventOrigin.local`, kein Ereignis für eine Meldung von außen, Rate 30/60 s, ein verworfenes
+  Ereignis behält seinen Audit-Eintrag, fehlschlagender Bus und Geräteabfrage; eine
+  Vorfall-Kennung, die der Core nicht annimmt, fehlt im Eintrag; mit dem **echten Core**:
+  gespeicherte Einträge, Maskierung lässt Kennungen stehen, Time-Machine-Marken der Art
+  `audit_event` mit der Zeit des Eintrags, nichts für Nicht-Administratoren, die Konstanten
+  des allgemeinen Rings wörtlich, der Ring mit 1100 Einträgen für sieben Module und den Core
+  ohne Verdrängung, Zusammenleben mit dem Präfix `self_healing.manual.` von K2 und
+  Time-Machine-Marken für `self_healing.manual.action`;
+  Security-Veto: kein Security Center → unbekannt und vor der
+  Faktenquelle, ruhiges Security Center → Freigabe nötig, offene Erkennung → Not Safe (der
+  Datensatz bleibt RECOMMENDED/READ_ONLY), eine Faktenquelle kann Erkennungen weder verstecken
+  noch erfinden, welche Erkennungen zählen, elf Arten eines unbrauchbaren Security Centers →
+  unbekannt, Importfehler → unbekannt, die Kopie des Kontexts behält den Fakt.
+- `tests/test_heal_entities_v1530.py` (Paket K1, 33 Tests): unique_ids, Optionen und
+  Schlüssel wörtlich; Aufzählungs-Sensoren mit Optionen, eingefrorene Beschreibungen, englische
+  und deutsche Texte; statisch: kein Knopf, kein Schalter, kein Dienst, kein `api`, kein
+  `store.now(`; Werte (Flotten-Modus mit `mixed`, ein unbekannter Router macht ihn unbekannt,
+  unbekannte Sicherheitszeit, Auto-Heal, Modus je Router mit Hold, Zähler, 30-Tage-Fenster mit
+  beiden Rändern, Verdrängung und unlesbare Zähler, letztes Ergebnis); Entitäten
+  (Verfügbarkeit, auch bei einer Engine, die noch lädt, Werte, Gerät, Kategorie, Fehler beim
+  Lesen, Signal); Lebenslauf (einmal angelegt, aus entfernt und an wieder angelegt, aus vor dem
+  Speichern der Optionen, aus beim Start, an ohne laufende Engine entfernt nichts, kein
+  Entitätsregister wird angelegt, Umzug der Flotte beim Entladen, kaputtes Modul, Plattformen
+  bleiben); **null zusätzliche Router-Aufrufe**: zwei Polls mit `full_router_kit`, Modul aus
+  gegen Modul an mit allen 9 Entitäten gelesen, dieselbe Aufrufliste.
+- Acht vorhandene Tests in `tests/test_heal_x_engine_v1530.py` bekommen ein ruhiges Security
+  Center (Fixture `quiet_security`): ihre Faktenquelle meldete „0 Erkennungen“, und seit K1
+  gilt der Fakt der Engine.
+- Sechs vorhandene Tests des Audit-Logs (`tests/test_core_audit.py::test_case14_rings_are_separate_and_bounded`
+  und fünf in `tests/test_core_audit_general_quota.py`) rechnen mit 1100 Einträgen und sieben
+  Modulen (die Liste der Module nennt jetzt `time_machine` und `self_healing`, das
+  überzählige Modul ist das achte).
+- **Mutationsprüfung Paket K1:** 92 gezielte Lockerungen auf grünem Stand (34 am Journal, 25 an
+  den Entitäten, 25 an der Engine, 3 an den Plattformen `sensor`/`binary_sensor`, 3 an den
+  Anteilen des Audit-Logs, 2 an der Time-Machine-Zuordnung): je eine
+  Regel entfernt oder gelockert, etwa kein `rollback_failed`, Eintrag der Neustartregel nicht
+  oder alles neu geschrieben, keine Zeitordnung, Entscheidung und Risiko an jedem Eintrag,
+  Schlange ohne Grenze oder mit Verlust des neuesten, `delayed` nie, nie sicherheitsrelevant,
+  keine Pflichttypen, halbe Registrierung bleibt, Rate 31 oder doppeltes Fenster,
+  `EventOrigin.remote`, ein Schlüssel `host` in den Nutzdaten, Fehler von Bus oder `emit`
+  werfen; Flotten-Modus ohne `mixed`, Zähler mit Endzuständen, Fensterrand, Fehlschlag ohne
+  Ausführung, Verdrängung ignoriert, letztes Ergebnis das älteste, unbekannt als falsch,
+  `store.now()`, immer verfügbar, falsches Signal, nicht Diagnose, aus ohne Entfernen, ein
+  angelegtes Entitätsregister; Security-Veto nur `open`, ohne Flotten-Erkennungen, ohne
+  Prüfung von `loaded`/`enabled`/`ready`, unlesbare Erkennung übersprungen, Fehler als 0,
+  Faktenquelle gewinnt; Journal nicht gestartet, gebunden oder geschlossen, je eine fehlende
+  Stelle des Journals in der Engine, Engine ohne Journal, keine Entitäten, kein Entfernen beim
+  Ausschalten, keine Gerätekennung; Plattformen ohne Self-Healing oder mit einem Fehler, der die
+  Plattform scheitern lässt; Ring zurück auf 1000, sechs Anteile, kleinerer Modulanteil; eine
+  andere Art oder keine ausdrückliche Zuordnung für `self_healing.`; das Journal mit dem Präfix
+  `self_healing.manual.` oder einem anderen Modulnamen. Im ersten Lauf überlebten 13; für 12 kam
+  ein Test dazu (Signal je
+  Durchgang mit Änderung, abgelehnte Vorfall-Kennung, ein unbekannter Router macht den
+  Flotten-Modus unbekannt, APPROVED zählt nicht als offene Freigabe, unlesbare Zähler des
+  Speichers, ladende Engine, Neuladen des Gastgebers ohne laufende Engine, sofortiges Journal
+  bei Start, hinzugekommenen Routern, Stopp und Takt, ausdrückliche Zuordnung `self_healing.` in
+  `_MODULE_KINDS`). Jetzt scheitern 91 von 92. Eine bleibt
+  gleichwertig: `_ended_at` prüft, dass der letzte Verlaufseintrag der Zustand des Datensatzes
+  ist; das Modell lehnt jeden anderen Datensatz schon beim Bauen ab (`heal_model`, Prüfung
+  `history`).
+
+Nicht geprüft (Paket K1): in einer laufenden HA-Instanz (Entitätsregister, Umzug der
+Flotten-Entitäten zwischen echten Einträgen, Anzeige im Logbuch, Time Machine im Browser); das
+echte Security Center mit echten Erkennungen (die Tests nehmen Attrappen mit denselben
+Attributen); die Übergänge ab WAITING_APPROVAL im laufenden Betrieb (es gibt sie in 1.53.0
+nicht, geprüft sind sie nur am Journal mit gebauten Datensätzen); die 30-Tage-Zähler nach einem
+Neustart mit vorher verdrängten Datensätzen (QUESTION K1-5).
 
 Nicht geprüft (Paket E): ob der Sicherheitsuhr-Stand `high` in einer laufenden Instanz bei
 einem echten Zurückstellen der Systemuhr so steht wie im Test (die Tests stellen die Uhr des

@@ -31,6 +31,11 @@ except the traffic router sensors, which 1.49.3 did not create here):
   without WiFi RF.
 * ``EXPECTED_TRAFFIC``, 9: Traffic on at the same gateway: 7 router sensors
   ``<entry>_traffic_*`` and the two fleet sensors.
+* ``EXPECTED_SELF_HEALING``, 8 (1.53.0, package K1): Self-Healing running
+  (its default): 6 fleet sensors and 1 fleet binary sensor
+  ``openwrt_router_fleet_*`` plus the router's ``<entry>_self_healing_mode``,
+  appended after the 130 above, which stay the same; with Self-Healing off
+  the lists are exactly ``EXPECTED``.
 
 Not covered: the Enterprise modules WiFi RF, Diagnose, Security Center and
 Configuration Manager, network intelligence and client stability sensors
@@ -376,3 +381,79 @@ async def test_traffic_unique_ids_on_the_gateway(host, disks) -> None:
     coord.poll(data=second)
     await drain(hass)
     assert sorted(host.by_uid()) == EXPECTED_TRAFFIC
+
+
+# --- Self-Healing (1.53.0, package K1) ---------------------------------------------
+
+EXPECTED_SELF_HEALING: dict[str, list[str]] = {
+    "sensor": [
+        "openwrt_router_fleet_self_healing_mode",
+        "openwrt_router_fleet_remediation_active",
+        "openwrt_router_fleet_remediation_pending",
+        "openwrt_router_fleet_remediation_succeeded_30d",
+        "openwrt_router_fleet_remediation_failed_30d",
+        "openwrt_router_fleet_remediation_last_result",
+        "{entry}_self_healing_mode",
+    ],
+    "binary_sensor": ["openwrt_router_fleet_auto_heal_enabled"],
+}
+
+
+async def _entities_self_healing(*, on: bool) -> dict[str, list[str]]:
+    """Like ``_entities``, with the Self-Healing engine running (``on``) or
+    the fleet switch off on the entry."""
+    from unittest.mock import AsyncMock
+
+    from custom_components.openwrt_router import config_api
+    from custom_components.openwrt_router import heal_engine as he
+    from custom_components.openwrt_router.const import (
+        DATA_SELF_HEALING_ENGINE,
+        OPTION_SELF_HEALING_ENABLED,
+    )
+
+    hass, _, _ = await _registry()
+    hass.async_create_task = MagicMock(side_effect=lambda coro, *a, **k: coro.close())
+    api = kit.make_api()
+    coordinator = kit.make_coordinator(hass, api)
+    await kit.full_polls(coordinator)
+    entry = _entry(api, coordinator, {} if on else {OPTION_SELF_HEALING_ENABLED: False})
+    hass.config_entries.async_entries = MagicMock(return_value=[entry])
+    engine = None
+    if on:
+        engine = he.HealEngine(hass)
+        with (
+            patch.object(he, "async_track_time_interval", MagicMock()),
+            patch.object(
+                config_api,
+                "async_get_configuration_api",
+                AsyncMock(side_effect=RuntimeError("no core")),
+            ),
+        ):
+            await engine.async_start()
+        hass.data[DATA_SELF_HEALING_ENGINE] = engine
+    found: dict[str, list[str]] = {}
+    for platform in PLATFORMS:
+        module = importlib.import_module(
+            f"custom_components.openwrt_router.{platform.value}"
+        )
+        added: list[Any] = []
+        await module.async_setup_entry(
+            hass, entry, lambda entities, *a, _into=added, **k: _into.extend(entities)
+        )
+        found[platform.value] = [_uid(e) for e in added]
+    if engine is not None:
+        await engine.async_stop()
+    return found
+
+
+@pytest.mark.asyncio
+async def test_self_healing_adds_its_ids_and_changes_none(disks) -> None:
+    found = await _entities_self_healing(on=True)
+    assert found == {
+        p: uids + EXPECTED_SELF_HEALING.get(p, []) for p, uids in EXPECTED.items()
+    }
+
+
+@pytest.mark.asyncio
+async def test_self_healing_off_creates_none_of_its_ids(disks) -> None:
+    assert await _entities_self_healing(on=False) == EXPECTED

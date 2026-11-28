@@ -155,6 +155,9 @@
       },
       "diag_gateway_reachable": {
         "name": "Gateway erreichbar"
+      },
+      "fleet_auto_heal_enabled": {
+        "name": "Auto-Heal aktiv (mindestens ein Router)"
       }
     },
     "sensor": {
@@ -439,6 +442,46 @@
       },
       "traffic_client_up": {
         "name": "WLAN-Verkehr am AP, Upload {client}"
+      },
+      "fleet_self_healing_mode": {
+        "name": "Self-Healing-Modus (alle Router)",
+        "state": {
+          "observe": "Beobachten",
+          "approval": "Freigabe",
+          "auto_heal": "Auto-Heal",
+          "mixed": "Gemischt"
+        }
+      },
+      "fleet_remediation_active": {
+        "name": "Aktive Reparaturvorgänge (alle Router)"
+      },
+      "fleet_remediation_pending": {
+        "name": "Reparaturvorgänge mit offener Freigabe (alle Router)"
+      },
+      "fleet_remediation_succeeded_30d": {
+        "name": "Erfolgreiche Reparaturen, 30 Tage (alle Router)"
+      },
+      "fleet_remediation_failed_30d": {
+        "name": "Fehlgeschlagene Reparaturen, 30 Tage (alle Router)"
+      },
+      "fleet_remediation_last_result": {
+        "name": "Letztes Reparaturergebnis (alle Router)",
+        "state": {
+          "resolved": "Behoben",
+          "rejected": "Abgelehnt",
+          "cancelled": "Abgebrochen",
+          "escalated": "Eskaliert",
+          "manual_recovery_required": "Manuelle Wiederherstellung nötig",
+          "rolled_back": "Zurückgerollt"
+        }
+      },
+      "self_healing_mode": {
+        "name": "Self-Healing-Modus",
+        "state": {
+          "observe": "Beobachten",
+          "approval": "Freigabe",
+          "auto_heal": "Auto-Heal"
+        }
       }
     },
     "switch": {

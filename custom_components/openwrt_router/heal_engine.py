@@ -85,6 +85,7 @@ from .const import (
     OPTION_SELF_HEALING_ENABLED,
 )
 from .core_models import ROUTER_ID_PREFIX, is_valid_id
+from .heal_journal import HealJournal, device_id_for_entry
 from .heal_model import (
     IN_FLIGHT_STATES,
     LOCKING_STATES,
@@ -173,6 +174,9 @@ _CLOSABLE: Final = frozenset(
 # Event states that make the engine look at an incident (a trigger only).
 _EVENT_STATES: Final = frozenset({"opened", "reopened", "resolved"})
 _ACTIVE_STATUS: Final = "active"
+# Security Center finding states that count as open (package K1; the same
+# set as heal_preflight's security fact)
+_SC_OPEN: Final = frozenset({"open", "confirmed"})
 # NI incident status -> the reason its records close with
 _CLOSED_STATUS: Final[Mapping[str, str]] = {
     "resolved": "incident_cleared",
@@ -265,6 +269,10 @@ class DecisionContext:
     # repair lock or another record in flight; None: unknown)
     severity: str | None = None
     concurrent_repair: bool | None = None
+    # package K1: open findings of the Security Center on this router plus
+    # fleet-wide ones (None: the center is off, not loaded, not ready or
+    # its findings cannot be read; never 0 then)
+    open_security_findings: int | None = None
 
 
 def _detached(context: DecisionContext) -> DecisionContext:
@@ -690,6 +698,8 @@ class PolicyDecider:
             in_maintenance=maintenance,
             breaker_open=breaker_open,
             concurrent_repair=context.concurrent_repair,
+            # engine-owned (package K1): a provider cannot say "no findings"
+            open_security_findings=context.open_security_findings,
         )
         incident: hp.IncidentFacts | None = None
         if action.incident_id is not None:
@@ -1024,13 +1034,20 @@ class HealEngine:
         monotonic: Callable[[], float] | None = time.monotonic,
         store: SelfHealingStore | None = None,
         decider: HealDecider | None = None,
+        journal: HealJournal | None = None,
     ) -> None:
-        """Nothing is read or attached before :meth:`async_start`."""
+        """Nothing is read or attached before :meth:`async_start`.
+
+        ``journal`` (package K1): audit entries, the bus event and the
+        entity signal of every transition; None (the default) journals
+        nothing. The running engine of an HA instance has one.
+        """
         self.hass = hass
         self.clock = clock
         self.monotonic = monotonic
         self.store = store or SelfHealingStore(hass, clock=clock, monotonic=monotonic)
         self.decider: HealDecider = decider or DEFAULT_DECIDER
+        self.journal: HealJournal | None = journal
         self.entries: set[str] = set()
         self.loaded = False
         self.closed = False
@@ -1068,6 +1085,13 @@ class HealEngine:
                 len(self.load_result.recovered),
             )
         self.loaded = True
+        if self.journal is not None:
+            self._guard(
+                "journal start",
+                self.journal.start,
+                self.store.actions,
+                [rec[0] for rec in self.load_result.recovered],
+            )
         self._unsubs.append(
             self.hass.bus.async_listen(EVENT_INCIDENT, self._on_incident)
         )
@@ -1079,6 +1103,7 @@ class HealEngine:
         await self.async_bind_core()
         self.last_tick_mono = self._mono()
         self._guard("start reconcile", self.reconcile)
+        self._journal_sweep()
 
     async def async_stop(self) -> None:
         """Detach everything and write the store a last time."""
@@ -1096,6 +1121,9 @@ class HealEngine:
         self._skip_memo.clear()
         self._dedupe_seen.clear()
         self._unknown_seen.clear()
+        if self.journal is not None:
+            self._journal_sweep()
+            self._guard("journal close", self.journal.close)
         await self.store.async_close()
 
     async def async_bind_core(self) -> None:
@@ -1109,6 +1137,8 @@ class HealEngine:
         except Exception as err:  # noqa: BLE001 - runs on without router ids
             _LOGGER.debug("Self-Healing: no core yet (%s)", type(err).__name__)
             self._api = None
+        if self._api is not None and self.journal is not None and not self.closed:
+            self._guard("journal bind", self.journal.bind, self._api)
 
     def add_entry(self, entry_id: str) -> None:
         """A router entry is loaded."""
@@ -1122,6 +1152,7 @@ class HealEngine:
             self.add_entry(entry_id)
         await self.async_bind_core()
         self._guard("reconcile", self.reconcile)
+        self._journal_sweep()
 
     def remove_entry(self, entry_id: str) -> None:
         """A router entry is unloaded (its records stay)."""
@@ -1208,6 +1239,20 @@ class HealEngine:
         """The module switch of the store's settings (default on)."""
         return self.store.settings.enabled is True
 
+    # -- journal (package K1) ----------------------------------------------------------
+
+    def _device_id(self, router_id: str) -> str | None:
+        return device_id_for_entry(self.hass, self.entry_for_router(router_id))
+
+    def _journal_sweep(self) -> int:
+        """Journal the new transitions (none without a journal); the count."""
+        if self.journal is None:
+            return 0
+        found = self._guard(
+            "journal", self.journal.sweep, self.store.actions, self._device_id
+        )
+        return found if isinstance(found, int) else 0
+
     # -- events ------------------------------------------------------------------------
 
     def _guard(self, name: str, func: Callable[..., Any], *args: Any) -> Any:
@@ -1235,6 +1280,7 @@ class HealEngine:
             self.counters["skipped_remote_event"] += 1
             return
         self._guard("incident", self.handle_incident, getattr(event, "data", None))
+        self._journal_sweep()
 
     def handle_incident(self, data: Any) -> None:
         """Bring one incident in line with Network Intelligence.
@@ -1292,6 +1338,9 @@ class HealEngine:
         self.counters["ticks"] += 1
         self.last_tick_mono = self._mono()
         self._guard("tick", self.tick)
+        if self.journal is not None and not self._journal_sweep():
+            # time-based values (30 days) and modes move without a change
+            self._guard("journal signal", self.journal.signal)
 
     def tick(self) -> None:
         """Read the safety clock, prune, bind the core, reconcile."""
@@ -1784,6 +1833,49 @@ class HealEngine:
             for a in self.store.open_actions(rid)
         )
 
+    def _security_center(self) -> Any:
+        try:
+            from .security_center import async_get_security_center
+
+            return async_get_security_center(self.hass)
+        except Exception:  # noqa: BLE001 - no center: unknown
+            return None
+
+    def open_security_findings(self, router_id: str) -> int | None:
+        """Open Security Center findings on ``router_id`` plus fleet-wide
+        ones (package K1, memory only; never raises).
+
+        Open means status ``open`` or ``confirmed``, any severity (the same
+        count as ``heal_preflight``: the engine's fact is never laxer than
+        a provider's). None, never 0, when the center is not running, not
+        loaded, off or not ready, or when any finding cannot be read: a
+        module that is off does not say "nothing found".
+        """
+        try:
+            sc = self._security_center()
+            if sc is None or getattr(sc, "loaded", None) is not True:
+                return None
+            if getattr(sc, "enabled", None) is not True:
+                return None
+            if getattr(sc, "ready", None) is not True:
+                return None
+            incidents = getattr(sc, "incidents", None)
+            if not isinstance(incidents, Mapping):
+                return None
+            count = 0
+            for inc in list(incidents.values()):
+                if not isinstance(inc, Mapping):
+                    return None  # an unreadable finding may be an open one
+                rid = inc.get("router_id")
+                if rid is not None and not isinstance(rid, str):
+                    return None
+                if rid in (router_id, None) and inc.get("status") in _SC_OPEN:
+                    count += 1
+            return count
+        except Exception as err:  # noqa: BLE001 - unknown, never "no findings"
+            _LOGGER.debug("Self-Healing: findings unknown (%s)", type(err).__name__)
+            return None
+
     def context_for(self, action: RemediationAction) -> DecisionContext:
         """The decider's view of one record (reads the safety clock).
 
@@ -1845,6 +1937,7 @@ class HealEngine:
             allowlist=tuple(store.settings.router(rid).allowlist),
             severity=self._severity(ni, action),
             concurrent_repair=self._concurrent_repair(action),
+            open_security_findings=self.open_security_findings(rid),
         )
         # a deep copy: nothing a decider changes reaches the store (P1)
         return _detached(context)
@@ -2108,6 +2201,7 @@ class HealEngine:
                 if isinstance(self.decider, PolicyDecider)
                 else {}
             ),
+            **({"journal": self.journal.stats()} if self.journal is not None else {}),
         }
 
 
@@ -2185,7 +2279,7 @@ async def _async_engine(hass: HomeAssistant) -> HealEngine | None:
             return None
         # the policy of package D decides (package X); the C1 default stays
         # the fallback when it fails
-        engine = HealEngine(hass, decider=PolicyDecider())
+        engine = HealEngine(hass, decider=PolicyDecider(), journal=HealJournal(hass))
         hass.data[DATA_SELF_HEALING_ENGINE] = engine
         try:
             await engine.async_start()
@@ -2197,7 +2291,36 @@ async def _async_engine(hass: HomeAssistant) -> HealEngine | None:
         from .heal_views import async_register_self_healing_views
 
         async_register_self_healing_views(hass)
+        _sync_entities(hass)
     return engine
+
+
+def _sync_entities(hass: HomeAssistant) -> None:
+    """Create the read-only entities of package K1 (never raises)."""
+    try:
+        from .heal_entities import async_sync_heal_entities
+
+        async_sync_heal_entities(hass)
+    except Exception as err:  # noqa: BLE001 - the engine runs without them
+        _LOGGER.warning("Self-Healing sensors not created (%s)", type(err).__name__)
+
+
+def _entry_unloaded(hass: HomeAssistant, entry_id: str, *, last: bool) -> None:
+    try:
+        from .heal_entities import async_entry_unloaded
+
+        async_entry_unloaded(hass, entry_id, last=last)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("Self-Healing sensors not moved (%s)", type(err).__name__)
+
+
+def _remove_entities(hass: HomeAssistant) -> None:
+    try:
+        from .heal_entities import async_remove_heal_entities
+
+        async_remove_heal_entities(hass)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Self-Healing sensors not removed (%s)", type(err).__name__)
 
 
 async def async_setup_self_healing(hass: HomeAssistant, entry: Any) -> None:
@@ -2230,12 +2353,15 @@ async def async_release_self_healing(hass: HomeAssistant, entry_id: str) -> None
     async with _lock(hass):
         engine = async_get_self_healing(hass)
         if engine is None:
+            _entry_unloaded(hass, entry_id, last=not _loaded_entry_ids(hass))
             return
         engine.remove_entry(entry_id)
         if engine.entries:
+            _entry_unloaded(hass, entry_id, last=False)
             return
         hass.data.pop(DATA_SELF_HEALING_ENGINE, None)
         await engine.async_stop()
+        _entry_unloaded(hass, entry_id, last=True)
 
 
 async def async_apply_self_healing_option(hass: HomeAssistant, *, on: bool) -> None:
@@ -2247,6 +2373,8 @@ async def async_apply_self_healing_option(hass: HomeAssistant, *, on: bool) -> N
                 if engine is not None:
                     hass.data.pop(DATA_SELF_HEALING_ENGINE, None)
                     await engine.async_stop()
+                # nothing is left behind (package K1)
+                _remove_entities(hass)
                 return
             loaded = _loaded_entry_ids(hass)
             if not loaded:

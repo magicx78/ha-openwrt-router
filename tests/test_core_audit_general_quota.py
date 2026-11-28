@@ -5,9 +5,10 @@ loud module (traffic, WiFi RF, ...) pushed every older entry of the core and
 of the other modules out of it.
 
 Now (pattern of the security ring, review M2): entries are counted per owner
-(by type: core types belong to the core). The ring stays hard at 1000; when
+(by type: core types belong to the core). The ring stays hard at its limit
+(1000; 1100 since 1.53.0, when Self-Healing became the seventh module); when
 it is full, the oldest entry of an owner above its share goes
-(``AUDIT_CORE_SHARE`` 400, ``AUDIT_MODULE_SHARE`` 100 per module, six
+(``AUDIT_CORE_SHARE`` 400, ``AUDIT_MODULE_SHARE`` 100 per module, seven
 modules). An owner at or below its share never loses an entry to another.
 Dropped entries are counted (``evicted_general``, per owner in
 ``summary()["general_evicted"]``). The stored layout is unchanged.
@@ -104,9 +105,10 @@ async def test_loud_module_keeps_other_owners_entries(disks) -> None:
 
 
 def test_shares_add_up_to_the_hard_limit() -> None:
-    assert AUDIT_MAX_EVENTS == 1000
+    # 1.53.0 (Self-Healing, package K1): one more module share, none smaller
+    assert AUDIT_MAX_EVENTS == 1100
     assert AUDIT_MODULE_SHARE == 100
-    assert AUDIT_SHARED_MODULES == 6
+    assert AUDIT_SHARED_MODULES == 7
     assert AUDIT_CORE_SHARE == 400
     assert AUDIT_CORE_SHARE + AUDIT_SHARED_MODULES * AUDIT_MODULE_SHARE == (
         AUDIT_MAX_EVENTS
@@ -141,14 +143,15 @@ async def test_module_flood_cuts_the_core_down_to_its_share_only(disks) -> None:
     assert log.stats["evicted_general"] == 50 + AUDIT_MAX_EVENTS - kept
 
 
-def _six_modules(log: AuditLog) -> list[str]:
+def _seven_modules(log: AuditLog) -> list[str]:
     modules = [
         "config_manager",
         "net_diagnostics",
         "security_center",
         "wifi_rf",
         "traffic_analytics",
-        "extra_module",
+        "time_machine",
+        "self_healing",
     ]
     for module in modules:
         _register(log, module)
@@ -157,7 +160,7 @@ def _six_modules(log: AuditLog) -> list[str]:
 
 async def test_all_at_share_ring_exactly_full(disks) -> None:
     log = await _log()
-    modules = _six_modules(log)
+    modules = _seven_modules(log)
     core_ids = set(_core(log, AUDIT_CORE_SHARE))
     ids = {m: _module(log, m, AUDIT_MODULE_SHARE) for m in modules}
     assert log.ring_size(AuditRing.GENERAL) == AUDIT_MAX_EVENTS
@@ -181,7 +184,7 @@ async def test_all_at_share_ring_exactly_full(disks) -> None:
 
 async def test_all_below_share_nobody_loses(disks) -> None:
     log = await _log()
-    modules = _six_modules(log)
+    modules = _seven_modules(log)
     core_ids = set(_core(log, 10))
     ids = {m: set(_module(log, m, 20)) for m in modules}
     assert log.stats["evicted_general"] == 0
@@ -192,20 +195,20 @@ async def test_all_below_share_nobody_loses(disks) -> None:
 
 async def test_more_modules_than_shares_never_cost_core_entries(disks) -> None:
     log = await _log()
-    modules = [*_six_modules(log), "seventh_module"]
-    _register(log, "seventh_module")
+    modules = [*_seven_modules(log), "eighth_module"]
+    _register(log, "eighth_module")
     core_ids = set(_core(log, AUDIT_CORE_SHARE))
     for module in modules[:-1]:
         _module(log, module, AUDIT_MODULE_SHARE)
     # ring full, nobody above his share: the newcomer takes from the module
     # with the most entries (fallback of the security ring), never the core
-    seventh = _module(log, "seventh_module", 3)
-    assert set(seventh) <= _general_ids(log)
+    eighth = _module(log, "eighth_module", 3)
+    assert set(eighth) <= _general_ids(log)
     assert core_ids <= _general_ids(log)
     assert log.ring_size(AuditRing.GENERAL) == AUDIT_MAX_EVENTS
     entries = log.summary()["general_module_entries"]
-    assert entries["seventh_module"] == 3
-    assert sorted(entries.values()) == [3, 99, 99, 99, 100, 100, 100]
+    assert entries["eighth_module"] == 3
+    assert sorted(entries.values()) == [3, 99, 99, 99, 100, 100, 100, 100]
     assert log.summary()["general_core_entries"] == AUDIT_CORE_SHARE
     assert "core" not in log.summary()["general_evicted"]
     assert log.stats["evicted_general"] == 3
@@ -219,24 +222,24 @@ async def test_old_store_over_share_is_not_cut_on_load(disks) -> None:
     loud_template = log.emit(f"{LOUD}.sample", source=LOUD).event.to_dict()
     quiet_template = log.emit(f"{QUIET}.sample", source=QUIET).event.to_dict()
     core_template = log.emit(CoreEventType.ROUTER_REGISTERED).event.to_dict()
-    # a store written before the shares: the loud module holds 900 entries
+    # a store written before the shares: the loud module holds 1000 entries
     stored = {
         "general": [{**core_template, "event_id": f"evt_{i:032x}"} for i in range(50)]
         + [{**quiet_template, "event_id": f"evt_{i:032x}"} for i in range(50, 100)]
-        + [{**loud_template, "event_id": f"evt_{i:032x}"} for i in range(100, 1000)],
+        + [{**loud_template, "event_id": f"evt_{i:032x}"} for i in range(100, 1100)],
         "security": [],
     }
     again = AuditLog(hass)
     again._restore(stored)
     assert again.ring_size(AuditRing.GENERAL) == AUDIT_MAX_EVENTS
     assert again.stats["evicted_general"] == 0  # nothing dropped on load
-    assert again.summary()["general_module_entries"] == {LOUD: 900, QUIET: 50}
+    assert again.summary()["general_module_entries"] == {LOUD: 1000, QUIET: 50}
     assert again.summary()["general_core_entries"] == 50
     assert set(again._data_to_save()) == {"general", "security"}
     # the next entry (from the quiet module) takes from the loud one only
     again.register_event_prefix(f"{QUIET}.", module=QUIET)
     _module(again, QUIET, 1)
-    assert again.summary()["general_module_entries"] == {LOUD: 899, QUIET: 51}
+    assert again.summary()["general_module_entries"] == {LOUD: 999, QUIET: 51}
     assert again.summary()["general_evicted"] == {LOUD: 1}
     assert again.summary()["general_core_entries"] == 50
 
@@ -249,7 +252,7 @@ async def test_old_store_over_the_limit_is_cut_by_share(disks) -> None:
     core_template = log.emit(CoreEventType.ROUTER_REGISTERED).event.to_dict()
     stored = {
         "general": [{**core_template, "event_id": f"evt_{i:032x}"} for i in range(100)]
-        + [{**loud_template, "event_id": f"evt_{i:032x}"} for i in range(100, 1050)],
+        + [{**loud_template, "event_id": f"evt_{i:032x}"} for i in range(100, 1150)],
         "security": [],
     }
     again = AuditLog(hass)

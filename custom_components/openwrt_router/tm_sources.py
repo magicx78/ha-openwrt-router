@@ -646,6 +646,11 @@ _MODULE_KINDS: Final = (
     ("router.", "registry_event"),
     ("security.", "security_event"),
     ("core.", "core_event"),
+    # Self-Healing (Phase 7): the records' transitions
+    # (``self_healing.action_<state>``, package K1) and the manual button
+    # and switch presses (``self_healing.manual.action``, package K2) are
+    # audit entries of the administration group, at their audit time.
+    ("self_healing.", "audit_event"),
 )
 _AUDIT_PARAMS: Final = (
     "changes",

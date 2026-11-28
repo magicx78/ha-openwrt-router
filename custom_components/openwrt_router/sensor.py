@@ -1580,15 +1580,40 @@ async def async_setup_entry(
     entry: OpenWrtConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the sensors, then offer to host the Security Center's sensors."""
+    """Set up the sensors, then offer to host the Security Center's sensors
+    and the Self-Healing sensors."""
     await _async_setup_entry_sensor_base(hass, entry, async_add_entities)
-    if _security_entities is None:
-        return
-    try:
-        _security_entities.async_setup_security_sensors(hass, entry, async_add_entities)
-    except Exception as err:
-        _LOGGER.warning("Security Center sensors not set up (%s)", type(err).__name__)
-        _LOGGER.debug("Security Center sensor error", exc_info=err)
+    if _security_entities is not None:
+        try:
+            _security_entities.async_setup_security_sensors(
+                hass, entry, async_add_entities
+            )
+        except Exception as err:
+            _LOGGER.warning(
+                "Security Center sensors not set up (%s)", type(err).__name__
+            )
+            _LOGGER.debug("Security Center sensor error", exc_info=err)
+    _setup_heal_sensors(hass, entry, async_add_entities)
 
 
 # --- end Security Center
+
+
+# --- Self-Healing (Phase 7, package K1) ---
+# Read-only fleet sensors and one mode sensor per router (heal_entities.py),
+# offered from the same wrapper as the Security Center's. The sensors exist
+# only while the engine runs. A failure here never fails the platform setup.
+def _setup_heal_sensors(
+    hass: HomeAssistant,
+    entry: OpenWrtConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    try:
+        from .heal_entities import async_setup_heal_sensors
+
+        async_setup_heal_sensors(hass, entry, async_add_entities)
+    except Exception as err:  # noqa: BLE001 - by type only
+        _LOGGER.warning("Self-Healing sensors not set up (%s)", type(err).__name__)
+
+
+# --- end Self-Healing
