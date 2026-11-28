@@ -1,4 +1,4 @@
-# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine; Paket G: Anbindung Configuration Manager)
+# Self-Healing (Phase 7; Paket B: Zustandsmaschine, Datenmodell, Speicher; Paket C1: Engine-Gerüst, nur Observe; Paket D: Katalog, Richtlinie; Paket E: Vorabprüfungen; Paket F: Playbooks; Paket X: Richtlinie in der Engine; Paket G: Anbindung Configuration Manager; Paket K2: Knöpfe und Schalter mit Sperre und Audit)
 
 <!-- Entwicklerdoku zu Phase 7 „Enterprise Self-Healing & Automated Remediation“, Stand
      Paket X (Branch feature/self-healing-x, 2026-11-27, auf B, C1, D, E und F). Gebaut sind heal_model.py
@@ -9,8 +9,10 @@
      (Vorabprüfungen und Sammler, nicht angebunden), seit Paket F heal_playbooks.py (reine
      Logik, noch nicht aufgerufen), seit Paket X (Branch feature/self-healing-x) entscheidet
      die Engine über heal_policy.gate (PolicyDecider), seit Paket G (Branch
-     feature/self-healing-g) liest heal_config_link.py den Configuration Manager (nicht angebunden).
-     Aussagen zu B, C1, D, E, F, X und G sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
+     feature/self-healing-g) liest heal_config_link.py den Configuration Manager (nicht angebunden),
+     seit Paket K2 (Branch feature/self-healing-k2) laufen die vorhandenen Knöpfe und Schalter über
+     heal_guard.py (Router-Sperre und Audit, Abschnitt 10.3).
+     Aussagen zu B, C1, D, E, F, X, G und K2 sind am Code gelesen und mit tests/test_heal_*_v1530.py geprüft
      (FakeDisks, ein Test schreibt eine echte Datei mit HAs Store; die C1-Tests mit dem echten
      Network-Intelligence-Motor der P6-Tests und dem echten api/Coordinator aus
      tests/full_router_kit.py); nicht auf Routern,
@@ -1953,7 +1955,8 @@ die Sperre hat, wird abgelehnt (`router_locked`). Knöpfe und Schalter (später)
 mit `try_external_lock(router_id, source, ts)` (gibt die `lock_id` zurück oder `None`), geben sie
 mit `release_external_lock(router_id, lock_id)` frei und halten ihren Schreibzugriff mit
 `record_external_write()` fest (Router, Quelle, Ziel, Zeitpunkt, Audit-Kennung; die letzten
-200). Eine hängende Fremd-Sperre entfernt nur ein Administrator (Abschnitt 5.1).
+200). Eine hängende Fremd-Sperre entfernt nur ein Administrator (Abschnitt 5.1). Seit Paket K2
+tun die Knöpfe und Schalter genau das, über `heal_guard.py` (Abschnitt 10.3).
 
 ### 10.1 Richtlinie: Modus, Freigabe, Auto-Heal (`gate`, Paket D)
 
@@ -2102,7 +2105,92 @@ nur bis PROPOSED; Anbindung als eigenes Paket, Ausgänge mit I). Am Speicher aus
 Abklingzeit und das offene Ergebnis beim Buchen geändert (Review PR #77, Punkte 6–8, Minor 2).
 Paket X: der dauerhafte Schritt des Speichers lehnt während einer Flotten-Pause ab
 (`fleet_paused`, für jedes Risiko, wie `loop_verdict`), und eine Buchung über die Grenze
-verkürzt die Wartezeit nicht. Knöpfe und Schalter benutzen die Sperre noch nicht.
+verkürzt die Wartezeit nicht. Seit Paket K2 benutzen Knöpfe und Schalter die Sperre
+(Abschnitt 10.3).
+
+### 10.3 Knöpfe und Schalter: Sperre und Audit (Paket K2)
+
+Entscheidung des Eigentümers zu Q4: **„Sperre und Audit“**. Die vorhandenen Knöpfe und Schalter
+beachten die Router-Sperre und schreiben einen Audit-Eintrag; sonst arbeiten sie genau wie
+vorher. Code: `heal_guard.async_manual_action` (asynchroner Kontextmanager), benutzt in
+`button.py` und `switch.py`. `heal_store.py` und `heal_engine.py` sind unverändert; der Wächter
+nimmt nur ihre öffentliche Oberfläche (`async_get_self_healing`, `HealEngine.loaded`,
+`module_enabled()`, `router_id_for_entry()`, `store.loop.repair_active()`,
+`store.loop.lock_holder()`, `store.router_hold()`, `try_external_lock()`,
+`release_external_lock()`, `record_external_write()`, `store.clock`). Er ruft keinen Router auf.
+
+**Welche Knöpfe und Schalter** (die Liste der Analyse, am Code geprüft, keine weiteren gefunden):
+
+| Entität | unique_id | Router-Aufruf (unverändert) | Aktion im Audit | Ziel | Quelle der Sperre |
+|---|---|---|---|---|---|
+| Knopf WLAN neu laden | `{entry}_reload_wifi` | `network reload` | `wifi.reload` | `wifi` | `button.reload_wifi` |
+| Knopf Neustart | `{entry}_reboot` | `system reboot` (SSH-Ausweg wie bisher) | `router.reboot` | `system` | `button.reboot` |
+| Knopf Dienst neu starten (dnsmasq, dropbear, firewall, network, uhttpd, wpad) | `{entry}_service_{name}_restart` | `rc init {name, restart}` | `service.restart` | Dienstname | `button.service_restart` |
+| Schalter Dienst an/aus (dieselben sechs) | `{entry}_service_{name}` | `rc init {name, start/stop}` | `service.start` / `service.stop` | Dienstname | `switch.service` |
+| Schalter WLAN je SSID an/aus | `{entry}_wifi_ssid_{section}` | `uci set` → `uci commit` → `network reload` (Auswege wie bisher) | `wifi.enable` / `wifi.disable` | `wifi` (nie SSID oder UCI-Abschnitt) | `switch.wifi` |
+
+Nicht dabei: der Knopf „Nach Updates suchen“ (er startet, stoppt und lädt nichts, schreibt aber
+über SSH den Paketindex; offene Frage an den Eigentümer) und der Wartungsschalter von Network
+Intelligence (kein Router-Aufruf). Ein WLAN-Schalter ohne bekannten UCI-Abschnitt ruft den Router
+nicht auf (Warnung wie bisher) und läuft daher nicht über den Wächter.
+
+**Die fünf Fälle:**
+
+1. **Eine Aktion der Engine hält die Sperre** des Routers (`repair_active`): der Druck wird
+   abgelehnt mit `HomeAssistantError` (`translation_key` `repair_running`, Text in
+   `strings.json`, `en.json`, `de.json`), die Oberfläche zeigt ihn. Kein Router-Aufruf, auch kein
+   Nachladen der Daten danach. Ein Audit-Eintrag mit Ergebnis `refused_busy`. Die Sperre der
+   Engine bleibt unberührt. **In 1.53.0 führt die Engine nie aus; dieser Fall kann im Betrieb
+   noch nicht eintreten.** Die Tests erreichen ihn mit einem Stellvertreter: einem echten
+   Speicher, dessen Aktion in EXECUTING steht.
+2. **Router im Hold** (Abschnitt 5.1, etwa `outcome_unknown`): kein Hindernis, der Administrator
+   muss eingreifen können. Der Audit-Eintrag sagt `on_hold: true` und den Grund.
+3. **Sonst** läuft der Druck wie vorher und hält für seine Dauer die Router-Sperre
+   (`try_external_lock`, Halter `external`), damit die Engine nicht mittendrin beginnt (ihr
+   dauerhafter Schritt wird dann mit `router_locked` abgelehnt). Gleichzeitige Drücke auf
+   demselben Router teilen sich **eine** Sperre (Zähler im Arbeitsspeicher, `lock: joined`); der
+   letzte gibt sie frei. Freigegeben wird bei jedem Ausgang: Erfolg, abgelehnter Aufruf,
+   Ausnahme, Zeitüberschreitung, abgebrochene Aufgabe. Hat ein Administrator die Sperre
+   inzwischen entfernt (`admin_force_release_lock`), gibt der alte Druck nichts frei, was ihm
+   nicht gehört. Hält ein anderer externer Halter die Sperre, läuft der Druck ohne eigene Sperre
+   (`lock: none`); die Engine bleibt trotzdem draußen. Danach hält der Speicher den Schreibzugriff
+   fest (`record_external_write`: Router, Quelle, Ziel, Zeit, Audit-Kennung).
+4. **Ein Audit-Eintrag je Druck** über das Audit des Core: Typ `self_healing.manual.action`,
+   Quelle `self_healing`, `actor` aus dem Kontext des Dienstaufrufs (Benutzerkennung, Kontext-
+   und Eltern-Kennung; eine Automation ohne Benutzer heißt `automation`), `router_id` des Core,
+   `entry_id`, `result` `success`/`denied`/`failure`, `severity` `info`/`warning`. `data` enthält
+   genau: `action` (geschlossene Menge oben), `target` (Dienst aus `DEFAULT_SERVICES`, `wifi`,
+   `system`, sonst `other`), `result` (`ok`, `refused_busy`, `failed`), `on_hold`,
+   `hold_reason`, `lock` (`taken`, `joined`, `none`). Nie Adressen, Hostnamen, SSIDs,
+   UCI-Abschnitte, Client-Namen oder Geheimnisse. `failed` heißt: der Aufruf warf, oder die api
+   meldete `False` (etwa `rc init` abgelehnt). Ohne `dedup_key`, also nie zusammengefasst; allgemeiner
+   Ring (Anteil des Moduls `self_healing`).
+5. **Modul aus** (kein laufendes Engine-Objekt, Engine nicht geladen, Schalter in den
+   Einstellungen aus, Engine geschlossen) oder Router dem Core unbekannt: keine Sperre, keine
+   Ablehnung, wie vorher. Das Audit wird geschrieben, wenn der Core läuft, sonst still
+   übersprungen. Ein Fehler im Audit (Core nicht da, langsam, `emit` wirft, Präfix abgelehnt)
+   lässt den Druck nie scheitern; Core und Akteur werden **vor** dem Router-Aufruf höchstens 2 s
+   lang gesucht (`AUDIT_LOOKUP_TIMEOUT_S`), geschrieben wird synchron danach. Ein Fehler im
+   Wächter selbst fällt auf das Verhalten von vorher zurück (keine Sperre, keine Ablehnung,
+   Warnung im Log); abgelehnt wird nur, wenn eine Sperre der Engine wirklich gesehen wurde.
+
+Prüfung und Sperre sind **ein Schritt ohne `await`** dazwischen: die Engine kann die Sperre nicht
+zwischen „frei?“ und „nehmen“ greifen. Die Reihenfolge der Router-Aufrufe ändert sich nicht;
+der Test `tests/test_heal_guard_buttons_v1530.py` hält sie für jeden Knopf und Schalter gegen die
+aufgezeichnete Liste von main (1.52.3) fest, ohne `hass`, mit Core und mit Core und Engine.
+Keine unique_id, kein Name und keine Verfügbarkeit einer Entität ändert sich.
+
+**Audit-Präfix:** `self_healing.manual.` wird beim ersten Eintrag eines Core von `heal_guard`
+registriert (Modul `self_healing`), weil die Präfix-Konstanten des Core in `core_models.py`
+liegen und Paket K sie dort anlegt. **DECIDED (K2):** eigener, engerer Präfix, damit er sich mit
+einem späteren `self_healing.` desselben Moduls verträgt (eigener Entferner, keine
+Überschneidung; ein Test registriert `self_healing.` vorher). Paket K muss die Konstanten
+`AUDIT_MODULE`, `AUDIT_PREFIX`, `EVENT_MANUAL_ACTION` aus `heal_guard.py` übernehmen oder
+angleichen, und Time Machine ordnet `self_healing.` noch keinem Reiter zu.
+
+**Stand heute:** gebaut und getestet (Paket K2). Nicht geprüft: in einer laufenden HA-Instanz
+(der Kontext kommt dort von `entity_service_call`, der `Entity.async_set_context` aufruft; am
+Quelltext von HA 2026.2 und 2026.11 gelesen), auf Routern.
 
 ## 11. HTTP-API, Entitäten, Ereignisse, Dienste
 
@@ -2197,7 +2285,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab; der Katalog (Paket D) nimmt nur genaue `str` aus geschlossenen Mengen, keine Unterklassen, keine Zusatzschlüssel, und wiederholt abgelehnte Werte nie; nie-Familien (Client, Firewall, VLAN, Management, Routing, Firmware, `network`, `wpad`, UCI, Shell) stehen nicht im Katalog. Kein Schreibweg vorhanden |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
-| Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | Sperre und Fremd-Schreibzugriff als Daten vorhanden, noch nicht benutzt |
+| Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | **gebaut** (Paket K2, Abschnitt 10.3): abgelehnt, solange die Engine die Sperre hält; sonst Sperre für die Dauer des Drucks und ein Audit-Eintrag; nur-Administrator bleibt offen (Q4 c) |
 | Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für den Speicher; Test mit der Maskierung des Core |
 | Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers, ohne Ende, wenn er noch eine Ausführung zeigt; Holds aus beendeten Datensätzen werden bei jedem Laden neu gesetzt | **gebaut** |
 
@@ -2215,6 +2303,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | H | Prüfung und die fünf Ergebnisklassen | offen |
 | I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
+| **K2** | vorhandene Knöpfe und Schalter beachten die Router-Sperre und schreiben ein Audit (`heal_guard.py`, Abschnitt 10.3) | **dieser Stand** |
 | J | Tab im Dashboard | offen |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
 
@@ -2246,7 +2335,7 @@ Hold.
 | Q1 | Schreibweg in Phase 7? | **entschieden:** 1.53.0 nur Observe, schreiben ab 1.54.0 |
 | Q2 | Standard nach dem Update | **entschieden:** an, jeder Router in Observe; Auto-Heal nie voreingestellt, Allowlist leer |
 | Q3 | Router-Rechte für `rc init` | offen (Empfehlung des Entwurfs: Root-Anmeldung dokumentieren, später ein eigener rpcd-Benutzer) |
-| Q4 | vorhandene Knöpfe und Schalter | **teilweise:** Sperre je Router und Erfassen von Schreibzugriffen außerhalb der Engine sind im Modell; ob Knöpfe und Schalter sie benutzen und ob sie nur für Administratoren werden, ist offen |
+| Q4 | vorhandene Knöpfe und Schalter | **entschieden (b), gebaut mit K2:** „Sperre und Audit“ (Abschnitt 10.3); ob sie nur für Administratoren werden (c), ist offen |
 | Q5 | Funk-Neustart | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): modelliert und gesperrt; nur `service.restart` (dnsmasq, odhcpd, Risiko 2, nur mit Freigabe) ist für das erste Schreib-Release vorgesehen |
 | Q6 | Router-Neustart als Aktion | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): modelliert und gesperrt, ebenso Wiederherstellen und Schnittstelle ab/an; der vorhandene Knopf bleibt |
 | Q7 | Was Auto-Heal enthalten darf | **offen, vorläufig streng** (Voreinstellung aus dem Auftrag zu Paket D, der Eigentümer hat noch nicht geantwortet): nur Risiko ≤ 1; Risiko 3 erlaubt kein allgemeiner Schalter; unbewertetes Risiko zählt als HOCH |
@@ -2681,6 +2770,17 @@ Nicht geprüft (Paket G): der Versionsindex einer echten Flotte (die Tests nehme
 Core mit dem Test-Anbieter und Attrappen der Versionen mit denselben Attributen); die Wahl des
 Paars nach einem echten Sprung der Wanduhr (Grenze oben in 7.2); eine Faktenquelle, die die
 Anbindung wirklich benutzt (gibt es noch nicht); Laufzeit des Vergleichs bei großen Archiven.
+
+- `tests/test_heal_guard_buttons_v1530.py` (Paket K2, 65 Tests): aufgezeichnete Router-Aufrufe
+  jedes Knopfes und Schalters gleich denen von main (ohne `hass`, mit Core, mit Core und Engine,
+  ohne Core mit Engine, Modul aus in vier Formen, Audit kaputt); Ablehnung je Knopf und Schalter
+  (19 Fälle) mit Stellvertreter-Halter, kein Aufruf, ein Eintrag `refused_busy`; Hold blockiert
+  nicht; Sperre während des Aufrufs (die Engine bekommt `router_locked`), geteilte Sperre, letzte
+  Freigabe, von einem Administrator entfernte Sperre (ein alter Druck tritt nie einer fremden Sperre bei und löscht nie den Anteil der aktuellen); Ziel außerhalb der geschlossenen Menge wird `other`; Freigabe nach Ausnahme,
+  Zeitüberschreitung, `False` und Abbruch; Felder des Eintrags ohne Adresse, Name, SSID,
+  UCI-Abschnitt, MAC, Passwort; langsamer Core und langsame Benutzersuche; Quelltext-Prüfung, dass
+  jeder Schreibaufruf in `button.py` und `switch.py` im Wächter steht. Mutationsprüfung auf
+  grünem Stand (CHANGELOG, Paket K2).
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (die C1-Tests laufen mit einem nachgebildeten `hass`, dem echten Network-Intelligence-Motor
