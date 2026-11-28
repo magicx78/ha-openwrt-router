@@ -617,6 +617,101 @@ Abschnitt 7.2.
   grünem Stand: 115 Mutationen (je eine für jede in den beiden Reviews geänderte Regel, auch
   die, die `no_change_seen` wieder zu „nein“ macht), alle scheitern.
 
+### Self-Healing, Paket H
+
+Die Prüfung nach einer Reparatur (`heal_verify.py`): Sie entscheidet aus gemessenen Fakten
+vor und nach einer Aktion, ob es besser wurde. Reine Logik ohne HA-Import, ohne Uhr und
+**ohne Router-Aufruf**; die Engine ruft sie noch nicht auf, Modell und Speicher sind
+unverändert. Für Benutzer ändert sich nichts, 1.53.0 bleibt nur Observe. Entwicklerdoku:
+`docs/self-healing.md`, Abschnitt 7.3.
+
+- **Fünf Klassen** (die des Modells): behoben, teilweise, nicht behoben, unbekannt, neue
+  Störung. **Unbekannt ist nie Erfolg:** fehlt ein Fakt oder ist er veraltet, ist das
+  Ergebnis „unbekannt“. **Jede gemessene Verschlechterung gewinnt** („neue Störung“, zur
+  Eskalation markiert): Verwaltungsweg verloren, mehr Clients weg als erlaubt (30 %,
+  mindestens 2), ein Dienst oder eine Schnittstelle aus, WAN verloren, weniger
+  AP-Schnittstellen, mehr abhängige Router gestört, ein neuer Vorfall, ein ungeplanter
+  Neustart des Routers.
+- **„Behoben“** nur, wenn Network Intelligence den Vorfall nach dem Start gemessen gelöst hat
+  (`quiet` nur mit Log-Abdeckung), die Wirkung der Aktion gesehen ist (beim Dienst-Neustart
+  eine neue PID; Funk-Neustart, Schnittstelle ab/an und Wiederherstellen sind nicht messbar
+  und werden deshalb nie „behoben“) und nichts schlechter oder unbekannt ist.
+- **„Von selbst behoben“:** ohne ausgeführtes Schreiben (lesende Aktion, kein Aufruf,
+  abgelehnt) wird nie eine Aktion gutgeschrieben; in 1.53.0 ist das das einzige gute Ergebnis.
+  Ein Aufruf mit unklarem Ausgang wird nie gutgeschrieben.
+- **Zeit auf der Sicherheitsuhr:** Wartezeit 600 s, Höchstwartezeit 3600 s; Momentaufnahme
+  davor höchstens 300 s, danach höchstens 180 s alt. Ein Sprung der Wanduhr ändert das nicht.
+- **Bindung:** das Ergebnis ist an Aktion, Typ, Parameter und beide Momentaufnahmen gebunden;
+  eine spätere Änderung wird erkannt. Eine in sich stimmige Fälschung aller Felder wird nicht
+  erkannt (wie bei den Vorabprüfungen, dokumentiert).
+- **Keine Namen im Ergebnis:** nur Kennungen, Codes und Zähler.
+- **Sammler** für die Momentaufnahme nur aus dem Speicher (letzter Poll, Network
+  Intelligence); wirft nie, nennt für jedes Unbekannte einen Grund.
+- Tests: 253 neue (Auftragstests 15, 16, 17, 21, 23; jede Klasse; unbekannt bei jedem
+  Kriterium; jeder Wächter; alle Zeitgrenzen; 10 000 Zufallsfälle gegen ein eigenes Orakel;
+  null Router-Aufrufe mit dem echten api und Coordinator). Mutationsprüfung: 78 Lockerungen;
+  77 lassen einen Test scheitern, eine ist gleichwertig.
+- **Für ein späteres Paket (I/C2):** das Modell hat keine Felder für Zuordnung, Endgültigkeit,
+  Eskalation, Bindung, die Sicherheitszeiten und die Momentaufnahme davor; der Ablauf der
+  Anbindung steht in Abschnitt 7.3.
+- **Nach dem Review von PR #83** (strenger, nichts davon kann einen Erfolg erzeugen):
+  - **Alter jedes Fakts:** ein Fakt zählt nur mit bekanntem Alter und passender Messzeit (davor
+    in den 300 s vor dem Start, danach erst nach der Wartezeit); eine frische Momentaufnahme
+    alter Daten ist unbekannt. Dienste, die der Coordinator nach einem Lesefehler aus dem
+    letzten Poll weiterreicht, gelten als unbekannt.
+  - **Eine unlesbare Zeile macht den ganzen Fakt unbekannt**, nie wird sie übersprungen.
+    Schnittstellennamen wie `IoT` oder `4g` werden gelesen.
+  - **Haltezeit:** eine Lösung zählt erst, wenn sie 300 s gehalten hat.
+  - **Wanduhrsprung** zwischen den Momentaufnahmen: das Lösungsalter zählt dann nicht.
+  - **Clients:** von einer Zahl über 0 auf 0 ist immer schlechter, unter 7 Clients schon ein
+    Verlust von mehr als 1; dieselbe Regel je Funkschnittstelle (neuer Wächter).
+  - **Früher Verlust:** ein frisch gemessener Verlust des Verwaltungswegs oder des WAN ist
+    sofort „neue Störung“, ohne die 600 s Wartezeit.
+  - Ein Wächter, der vorher und nachher schlecht ist (Verwaltungsweg, WAN, abhängige Router,
+    andere Vorfälle), verhindert „behoben“; quittierte Vorfälle zählen als offen.
+  - Eine schreibende Aktion ohne Aufrufergebnis wird abgelehnt; abgeleitete Felder werden mit
+    genauem Typ geprüft.
+  - `planned_end` gibt den Zielzustand nach `verdict_key` (nur `repaired_by_action` wird
+    RESOLVED), geprüft gegen die echte Übergangstabelle.
+  - Tests: 424 (vorher 253); 32 000 Zufallsfälle gegen ein eigenes Orakel für jede der acht
+    Aktionen. Mutationsprüfung: die acht Überlebenden des Reviewers und je eine neue Mutation
+    pro geänderter Regel scheitern; zwei gleichwertige sind in Abschnitt 17 begründet.
+- **Nach dem zweiten Review von PR #83** (Fehlalarme; ein Fehlalarm zählt nie als
+  Fehlschlag, ein falscher Erfolg bleibt unmöglich, im Zweifel „nicht zu sagen“):
+  - **Clients:** ohne ausgeführtes Schreiben sind beide Client-Wächter nur Auskunft (nie neue
+    Störung, nie Eskalation, sie verhindern „von selbst behoben“ nicht). Nach einem Schreiben
+    zählt der Funkwächter nur, wenn auch die Gesamtzahl über ihre Toleranz fiel (ein Wechsel
+    von 2,4 auf 5 GHz oder eine umbenannte AP-Schnittstelle ist kein Verlust); eine fehlende
+    Schnittstelle ist dann unbekannt. Auf 0 ist erst ab 3 Clients schlechter, 1 oder 2 auf 0
+    ist „nicht zu sagen“.
+  - **Früher Verlust:** zählt erst nach 120 s Dauer, belegt im Gedächtnis (ein einzelner
+    fehlgeschlagener Poll ist unbekannt), und nicht im angekündigten Ausfall der ausgeführten
+    Aktion (`est_outage_s` aus dem Katalog + 120 s). Neuer Fakt `wan_down_s`; der Sammler
+    kennt ihn noch nicht (unbekannt), ein früher WAN-Verlust wird deshalb noch nicht erkannt.
+  - **Andere Vorfälle und abhängige Router:** nur neue oder in der Stufe gestiegene Vorfälle
+    und mehr gestörte Router zählen; gleich gebliebene sind gehalten, verschwundene besser.
+    Eine richtige Reparatur neben einer fremden, offenen Störung ist „durch die Aktion
+    behoben“.
+  - **Lesende Aktionen** zählen nie für den Schutzschalter; sie enden RESOLVED ohne
+    Gutschrift (der einzige Endzustand ohne Fehlschlag) oder ESCALATED mit Hold. Ein
+    abgelehnter Aufruf einer schreibenden Aktion bleibt ein Fehlschlag.
+  - **Speicherform:** `VerifySnapshot.to_storable()` / `from_storable()` ersetzt Namen
+    außerhalb der festen Katalogmengen durch einen festen, schlüssellosen Hash; nur diese Form
+    wird gespeichert, das wiederhergestellte Paar gibt dasselbe Ergebnis.
+  - **Späte Lösung:** eine Lösung aus den letzten 300 s vor der Höchstwartezeit verlängert
+    die Wartezeit einmal, höchstens um 480 s.
+  - Doku der Anbindung: Prüfung in jedem Takt ab dem Aufrufende, Ergebnisse vor der
+    Wartezeit nicht endgültig (außer einem frühen Verlust), Sicherheits- und Wandzeit aus
+    derselben Beobachtung; die Grenze beim Lesefehler der AP-Schnittstellen.
+  - **Gleiche Form im Vergleich:** die Prüfung vergleicht beide Momentaufnahmen gehasht; eine
+    gespeicherte Momentaufnahme davor und eine frisch gebaute danach lasen sich sonst als
+    verlorener Dienst (falscher Alarm, beim Test der Speicherform gefunden).
+  - Tests: 465 (vorher 424); das Orakel ist aus den Regeln neu geschrieben, mit den 18
+    Fehlalarmen des Reviews als feste Fälle, und hält „unbekannt oder veraltet ist nie
+    behoben“ und „ohne ausgeführtes Schreiben ist nichts ein Fehlschlag der Reparatur,
+    Client-Änderungen eskalieren nie“. Mutationsprüfung: 158 Mutationen, 155 scheitern; von
+    den drei Überlebenden ist eine gleichwertig, die zwei anderen bekamen je einen Test.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
