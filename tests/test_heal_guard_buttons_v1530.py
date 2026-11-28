@@ -930,3 +930,83 @@ def test_the_guard_calls_no_router() -> None:
     source = inspect.getsource(hg)
     assert "_api." not in source
     assert "from .api" not in source and "import api" not in source
+
+
+async def _blocked_presses(
+    gw: Gateway,
+) -> tuple[dict[str, asyncio.Event], list[str]]:
+    """control_service waits for a gate per service (dnsmasq, firewall,
+    dropbear); the names whose call has started."""
+    gates = {n: asyncio.Event() for n in ("dnsmasq", "firewall", "dropbear")}
+    started: list[str] = []
+    real = gw.api.control_service
+
+    async def slow(name: str, action: str) -> bool:
+        started.append(name)
+        await gates[name].wait()
+        return await real(name, action)
+
+    gw.api.control_service = slow
+    return gates, started
+
+
+async def test_a_stale_share_never_joins_a_foreign_lock(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    gates, started = await _blocked_presses(gw)
+    first = asyncio.create_task(gw.entities["service_dnsmasq_restart"].async_press())
+    await until(lambda: "dnsmasq" in started, "first call")
+    assert world.store.admin_force_release_lock(world.rid, actor="admin", ts=T0 + 1)
+    foreign = world.store.try_external_lock(world.rid, "button.other", T0 + 2)
+    assert foreign is not None
+    second = asyncio.create_task(gw.entities["service_firewall"].async_turn_off())
+    await until(lambda: "firewall" in started, "second call")
+    gates["firewall"].set()
+    await second
+    gates["dnsmasq"].set()
+    await first
+    # neither press freed the foreign holder's lock
+    assert world.store.loop.lock_holder(world.rid).lock_id == foreign
+    assert [_data(e)["lock"] for e in world.audits()] == ["none", "taken"]
+
+
+async def test_an_old_press_never_drops_the_share_of_the_current_lock(
+    disks: Any,
+) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    gates, started = await _blocked_presses(gw)
+    first = asyncio.create_task(gw.entities["service_dnsmasq_restart"].async_press())
+    await until(lambda: "dnsmasq" in started, "first call")
+    assert world.store.admin_force_release_lock(world.rid, actor="admin", ts=T0 + 1)
+    second = asyncio.create_task(gw.entities["service_firewall"].async_turn_off())
+    await until(lambda: "firewall" in started, "second call")
+    current = world.store.loop.lock_holder(world.rid)
+    assert current is not None
+    gates["dnsmasq"].set()
+    await first
+    # a third press joins the second's lock, not a new or no lock
+    third = asyncio.create_task(gw.entities["service_dropbear"].async_turn_off())
+    await until(lambda: "dropbear" in started, "third call")
+    gates["firewall"].set()
+    await second
+    await until(lambda: len(world.audits()) == 2, "second audited")
+    assert world.store.loop.lock_holder(world.rid) is current
+    gates["dropbear"].set()
+    await third
+    assert world.store.loop.lock_holder(world.rid) is None
+    assert [_data(e)["lock"] for e in world.audits()] == ["taken", "taken", "joined"]
+
+
+async def test_a_target_outside_the_closed_set_is_audited_as_other(
+    disks: Any,
+) -> None:
+    world = await World().start()
+    async with hg.async_manual_action(
+        world.hass, ENTRY, hg.ManualAction.SERVICE_RESTART, "Wohnzimmer-AP"
+    ) as outcome:
+        outcome.report(True)
+    [event] = world.audits()
+    assert _data(event)["target"] == "other"
+    assert [w.target for w in world.store.loop.external_writes] == ["other"]
+    assert "Wohnzimmer" not in json.dumps(event.to_dict())
