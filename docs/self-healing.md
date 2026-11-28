@@ -1478,8 +1478,10 @@ Reihenfolge (`_decide`):
 3. **`not_resolved`**: die Wirkung einer ausgeführten Aktion ist nicht gesehen und der Vorfall
    nicht gelöst; oder weder der Vorfall noch ein Zielzustand hat sich verbessert. Ebenso, wenn
    der Vorfall gelöst ist, ein Wächter aber **auf beiden Seiten schlecht** ist (`not_improved`:
-   Verwaltungsweg weg, WAN `down`, abhängige Router gestört, andere Vorfälle offen) und ein
-   Schreiben ausgeführt wurde; ohne Schreiben ist das `unknown` (Review PR #83, P3-10).
+   Verwaltungsweg weg oder WAN `down`, vorher wie nachher) und ein Schreiben ausgeführt wurde;
+   ohne Schreiben ist das `unknown` (Review PR #83, P3-10). Ein anderer Vorfall oder ein
+   gestörter abhängiger Router, die schon vorher da waren und gleich geblieben sind, sind
+   `held` und hindern nichts (Review 2, NEW-3).
 4. **`resolved`**: der Vorfall ist **gemessen** gelöst (`incident_cleared` = `improved`) und hat
    300 s gehalten, jeder Zielzustand ist verbessert oder gehalten, jede Wirkung gesehen, kein
    Wächter schlechter oder auf beiden Seiten schlecht, nichts unbekannt.
@@ -1499,7 +1501,10 @@ das **einzige** gute Ergebnis ohne ausgeführtes Schreiben, und in 1.53.0 (nur
 
 **Kriterien** (`criteria_for`). Jedes hat eine Rolle: das Hauptkriterium, Zielzustände,
 Wirkungen und Wächter. Ohne ausgeführtes Schreiben (oder bei einer lesenden Aktion) gelten nur
-das Hauptkriterium und alle zehn Wächter.
+das Hauptkriterium und alle zehn Wächter, und die beiden Client-Wächter
+(`CLIENT_CRITERIA`: `clients_within_tolerance`, `radio_clients_within_tolerance`) sind dann
+**nur Auskunft** (Review 2, NEW-1a): sie stehen im Vergleich, machen aber nie `new_fault`,
+nie `escalate` und verhindern nie „von selbst behoben“. Clients kommen und gehen von selbst.
 
 | Aktion (ausgeführt) | Zielzustand | Wirkung | Wächter |
 |---|---|---|---|
@@ -1530,22 +1535,24 @@ und verhindert `resolved`):
 
 | Wächter | schlechter, wenn |
 |---|---|
-| `management_path` | vorher erreichbar (frischer, erfolgreicher Poll), nachher nicht (Auftragstest 21); beide Seiten schlecht: vorher und nachher nicht erreichbar |
-| `clients_within_tolerance` | Regel `client_loss_worse` (Review P2-6): von einer positiven Zahl auf 0 immer; unter 7 Clients ein Verlust von mehr als 1; sonst mehr als `max(2, vorher × 30 // 100)` |
-| `radio_clients_within_tolerance` | dieselbe Regel **je Funkschnittstelle** (AP-Schnittstelle des Clients, `radio`); eine Schnittstelle, die nachher fehlt, hat 0 Clients. Das Ergebnis trägt nur Zähler (Schnittstellen vorher, davon schlechter), keine Namen |
+| `management_path` | vorher erreichbar (frischer, erfolgreicher Poll), nachher nicht, **und der Ausfall dauert schon mindestens `EARLY_LOSS_PERSIST_S` = 120 s** (Alter des fehlgeschlagenen Polls = Zeit seit dem Beginn der Störung; Auftragstest 21). Kürzer, etwa ein einzelner fehlgeschlagener Poll: `unknown` (`management_path_loss_too_short`, Review 2, NEW-2a). Beide Seiten schlecht: vorher und nachher nicht erreichbar |
+| `clients_within_tolerance` | Regel `client_loss_worse` (Review P2-6, Review 2 NEW-1b): auf 0 erst ab `CLIENT_ZERO_WORSE_FROM` = 3 Clients vorher; von 1 oder 2 auf 0 ist **nicht zu sagen** (`unknown`, `clients_gone_cannot_tell`: ein Telefon ging oder schläft); unter 7 Clients ein Verlust von mehr als 1; sonst mehr als `max(2, vorher × 30 // 100)` |
+| `radio_clients_within_tolerance` | dieselbe Regel **je Funkschnittstelle** (AP-Schnittstelle des Clients, `radio`), aber **nur, wenn auch die Gesamtzahl über ihre Toleranz fiel** (Review 2, NEW-1b): ein Wechsel von 2,4 auf 5 GHz oder eine umbenannte AP-Schnittstelle ist kein Verlust. Fiel die Gesamtzahl darüber, ist eine Schnittstelle, die nachher fehlt, `unknown` (nicht 0). Das Ergebnis trägt nur Zähler (Schnittstellen vorher, davon schlechter bzw. unklar), keine Namen |
 | `services_still_running` | ein vorher laufender Dienst (außer dem Ziel) läuft nicht mehr oder fehlt |
 | `interfaces_still_up` | eine vorher aktive Schnittstelle (außer dem Ziel) ist ab oder fehlt |
 | `wan_not_lost` | WAN vorher `up`, nachher `down` oder `absent`; `down` ↔ `absent` ist unbekannt; beide Seiten schlecht: beide Male `down` |
 | `ap_interfaces_kept` | weniger AP-Schnittstellen |
-| `dependants_not_degraded` | mehr abhängige Router (hinter diesem in der Topologie) mit offenem Wurzelvorfall (`active` oder `acknowledged`); beide Seiten schlecht: nachher noch mindestens einer |
-| `no_new_incidents` | eine neue Kennung unter den offenen Wurzelvorfällen (`active` oder `acknowledged`) `warning`/`critical` dieses Routers (ohne den Ziel-Vorfall); beide Seiten schlecht: nachher noch mindestens einer offen |
+| `dependants_not_degraded` | mehr abhängige Router (hinter diesem in der Topologie) mit offenem Wurzelvorfall (`active` oder `acknowledged`) als vorher; gleich viele: `held`; weniger: `improved` (Review 2, NEW-3). Nur ein Zähler: tauscht ein gestörter gegen einen anderen, wird das nicht gesehen (Grenze; Einträge-Kennungen kommen nie in einen Fakt) |
+| `no_new_incidents` | eine neue Kennung **oder eine gestiegene Stufe** (`warning` → `critical`) unter den offenen Wurzelvorfällen (`active` oder `acknowledged`) `warning`/`critical` dieses Routers (ohne den Ziel-Vorfall); der Fakt hält (Kennung, Stufe). Vorher schon offen und gleich: `held` (`other_incidents_unchanged`); weg oder niedriger: `improved` (Review 2, NEW-3) |
 | `no_unplanned_reboot` | Laufzeit nachher kleiner als vorher (Auftragstest 23; schon 1 s weniger) |
 
 **DECIDED: ein Wächter, der auf beiden Seiten schlecht ist, verhindert `resolved`** —
 ausgeführtes Schreiben: `not_resolved` (`action_did_not_help`), ohne Schreiben: `unknown`
 (`cannot_tell`), weil nicht zu sagen ist, ob der Router wieder gesund ist (Review P3-10; vorher
-ließ Paket H `resolved` zu). Nur die vier Wächter mit einem solchen Zustand haben ihn
-(Verwaltungsweg, WAN, abhängige Router, andere Vorfälle); bei den Zählern heißt gleich `held`.
+ließ Paket H `resolved` zu). Nur zwei Wächter haben einen solchen Zustand (Verwaltungsweg,
+WAN); seit Review 2 (NEW-3) sind ein schon vorher offener, gleich gebliebener anderer Vorfall
+und gleich viele gestörte abhängige Router `held`: eine richtige Reparatur neben einer
+fremden, offenen Störung ist `repaired_by_action` (Test). Bei den Zählern heißt gleich `held`.
 `no_new_incidents` vergleicht zwei Momentaufnahmen: ein Vorfall, der **zwischen** ihnen auf-
 und wieder zugeht, wird nicht gesehen (Grenze).
 
@@ -1564,14 +1571,31 @@ Daten. Ein fehlgeschlagener Poll ist nur dann gemessen, wenn der Coordinator den
 Störung kennt (`_failure_since`, nur gelesen): sein Alter ist die Zeit seitdem, sonst
 unbekannt.
 
-**Früher Verlust** (`EARLY_LOSS`, Review P2-7). Ein **frischer, gemessener** Verlust des
-Verwaltungswegs oder des WAN nach dem Start (Messzeit ab `started_at`) ist sofort `new_fault`
-mit `escalate`: er wartet nicht auf die Wartezeit, und die Torprüfungen „Wartezeit nicht
-erreicht“ und „Momentaufnahme zu früh“ gelten dann nicht. Eine Momentaufnahme danach muss
-trotzdem brauchbar sein (nicht in der Zukunft, nicht nach der Höchstwartezeit, höchstens 180 s
-alt); eine zu alte, die den Verlust zeigt, bleibt `unknown`. Ein Verlust, der vor dem Start
-gemessen wurde, oder ein fehlgeschlagener Poll ohne bekannten Beginn ist kein früher Verlust.
-Alle anderen Verschlechterungen (etwa weniger Clients) warten die 600 s ab.
+**Früher Verlust** (`EARLY_LOSS`, Review P2-7, Review 2 NEW-2). Ein Verlust des
+Verwaltungswegs oder des WAN ist vor der Wartezeit `new_fault` mit `escalate`, wenn er
+**alle** diese Bedingungen erfüllt; dann gelten die Torprüfungen „Wartezeit nicht erreicht“ und
+„Momentaufnahme zu früh“ nicht:
+
+- er begann **nach dem Start** (Messzeit ab `started_at`);
+- er dauert **mindestens `EARLY_LOSS_PERSIST_S` = 120 s**, belegt im Gedächtnis: für den
+  Verwaltungsweg der Beginn der Störung aus dem Coordinator (`_failure_since`; das Alter des
+  fehlgeschlagenen Polls), für WAN der Fakt `wan_down_s` (wie lange WAN schon weg ist; Beginn
+  `taken_at − Alter − wan_down_s` ab dem Start). Ein einzelner fehlgeschlagener Poll ist
+  `unknown`;
+- bei einem **ausgeführten** Schreiben, dessen Katalogeintrag einen Ausfall ankündigt
+  (`heal_catalog` `est_outage_s`, nur gelesen: `service.restart` 5 s, `wifi.radio_restart`
+  30 s, `interface.cycle` 30 s, `router.reboot` und `config.restore` 120 s), erst ab
+  Aufrufende + `est_outage_s` + 120 s. Ein abgelehnter Aufruf kündigt nichts an.
+
+Ohne ausgeführtes Schreiben wird ein solcher Verlust als `worse_without_action` gemeldet, mit
+derselben Dauerregel (eine Zwangstrennung des Providers von 100 s ist `cannot_tell`, nicht
+endgültig; nach 130 s `worse_without_action`; Test). Die Momentaufnahme danach muss trotzdem
+brauchbar sein (nicht in der Zukunft, nicht nach der Höchstwartezeit, höchstens 180 s alt);
+eine zu alte, die den Verlust zeigt, bleibt `unknown`. **Grenze heute:** der Coordinator hält
+keinen Zeitpunkt „WAN weg seit“; der Sammler setzt `wan_down_s` deshalb immer unbekannt
+(`wan_down_time_not_in_memory`): ein früher WAN-Verlust wird aus dem Gedächtnis nicht erkannt,
+ein WAN-Verlust zählt erst nach der Wartezeit (dort wie bisher ohne Dauerregel, siehe
+QUESTION unten). Alle anderen Verschlechterungen (etwa weniger Clients) warten die 600 s ab.
 
 **Zeit** (Sicherheitsuhr, Abschnitt 5.2; das Modul liest keine Uhr). `started_at` ist die
 Sicherheitszeit des Endes der Aktion (beim Beobachten: der Beginn).
@@ -1579,7 +1603,9 @@ Sicherheitszeit des Endes der Aktion (beim Beobachten: der Beginn).
 | Konstante | Wert | Bedeutung |
 |---|---|---|
 | `VERIFY_SETTLE_S` | 600 s | vor `started_at + 600` gibt es kein Urteil (`settle_time_not_reached`, auch nicht bei einer Verschlechterung, außer einem frühen Verlust); eine Momentaufnahme davor ist `after_snapshot_too_early`; ein Fakt danach muss nach diesem Zeitpunkt gemessen sein |
-| `VERIFY_MAX_WAIT_S` | 3600 s | ab `started_at + 3600` wird `unknown`, `not_resolved` und `partial` **endgültig**; eine Momentaufnahme danach ist `after_snapshot_beyond_max_wait` |
+| `VERIFY_MAX_WAIT_S` | 3600 s | ab `started_at + 3600` wird `unknown`, `not_resolved` und `partial` **endgültig**; eine Momentaufnahme danach ist `after_snapshot_beyond_max_wait` (außer in der einmaligen Verlängerung unten) |
+| `VERIFY_LATE_CLEAR_EXTRA_S` | 480 s | eine Lösung mit Beweis aus den letzten 300 s vor der Höchstwartezeit (noch nicht gehalten) verlängert die Wartezeit **einmal** bis Lösung + 480 s (Haltezeit 300 s + ein Alter der Momentaufnahme 180 s), also höchstens 480 s darüber; `max_wait_until` im Ergebnis zeigt das Ende. Eine Lösung nach der Höchstwartezeit verlängert nie (Review 2, NEW-7) |
+| `EARLY_LOSS_PERSIST_S` | 120 s | so lange muss ein Verlust des Verwaltungswegs (immer) oder des WAN (früh) schon dauern, bevor er zählt |
 | `BEFORE_MAX_AGE_S` | 300 s | die Momentaufnahme davor und jeder ihrer Fakten ist höchstens so alt (bei Start), nie nach dem Start |
 | `AFTER_MAX_AGE_S` | 180 s | die Momentaufnahme danach ist beim Urteil höchstens so alt, nie in der Zukunft (in der Zukunft: `after_snapshot_in_future`, **nicht** endgültig, eine spätere kann noch passen) |
 | `VERIFY_CLEAR_HOLD_S` | 300 s | so lange muss die Lösung gehalten haben, bevor sie zählt |
@@ -1614,6 +1640,17 @@ stimmig zusammen ändert, wird nicht erkannt (Test
 Codes, keine Adressen) für den Vergleich; ein Ergebnis (`to_dict`, `to_verification`) trägt
 nur Kennungen (`rem_`, `rtr_`, Vorfall), Codes, Zähler und Wahrheitswerte. Adressen,
 Hostnamen, Client-Namen und Geheimnisse kommen nie hinein (Test mit Daten, die sie enthalten).
+**Gespeichert wird eine Momentaufnahme nur in der Form `to_storable()`** (Review 2, NEW-6),
+nie über `to_dict()`: jeder Dienst-, Schnittstellen- und AP-Schnittstellenname außerhalb der
+festen Namensmengen des Katalogs (`SERVICE_NAMES`, `INTERFACE_NAMES`, `RADIO_NAMES`) wird
+durch einen festen, schlüssellosen Kurz-Hash ersetzt (`h_` + 16 Hex-Zeichen von sha256 des
+Namens); derselbe Name gibt dasselbe Zeichen, das Alter bleibt genau. `from_storable()` baut
+die Momentaufnahme wieder (lehnt jeden Namen ab, der weder in den festen Mengen noch ein
+solches Zeichen ist); `verify()` gibt für das wiederhergestellte Paar dasselbe Ergebnis
+(Test mit Namen in der Form von Hostnamen und Personen). Ziele einer Aktion sind immer aus
+den festen Mengen und bleiben lesbar. Schlüssellos heißt: ein bekannter Name lässt sich durch
+Ausprobieren wiederfinden; der Hash verhindert nur, dass Namen im Klartext gespeichert werden.
+Ein Zusammenstoß zweier Zeichen in einem Fakt macht ihn unbekannt (`storable_name_clash`).
 
 **Sammler** `snapshot_from_sources(src, router_id, incident_id, *, safe_now, wall_now)` (Stil
 von `heal_preflight.facts_from_sources`, dieselben `FactSources`): wirft nie, gibt `None` nur
@@ -1643,8 +1680,12 @@ Strenge beim Lesen (Review P1-1, P1-2):
   **immer** unbekannt, also kann dort nichts `resolved` werden, das Dienste liest (streng).
 - **Grenzen, die das Gedächtnis nicht unterscheiden kann:** schlägt das Lesen der
   AP-Schnittstellen fehl, setzt der Coordinator `[]` (nicht von 0 zu unterscheiden; ein
-  scheinbarer Verlust ist dann `new_fault`, nie ein falscher Erfolg); beim allerersten Poll
-  setzt eine ACL-Sperre die Clients ebenso auf `[]`. Die Client-Zahl je Funkschnittstelle
+  scheinbarer Verlust ist dann `new_fault`, nie ein falscher Erfolg, Review 2 NEW-7). Ohne
+  ausgeführtes Schreiben kann das nicht vorkommen, wo es um Clients geht (Auskunft, NEW-1a);
+  `ap_interfaces_kept` ist aber ein Wächter für jede Aktion: ein Lesefehler der
+  AP-Schnittstellen kann auch beim Beobachten `worse_without_action` mit Hold ergeben (sichere
+  Seite, kein Fehlschlag). Beim allerersten Poll setzt eine ACL-Sperre die Clients ebenso auf
+  `[]`. Die Client-Zahl je Funkschnittstelle
   kommt aus der Client-Liste des Polls (hostapd/iwinfo, jeder Client nennt seine
   AP-Schnittstelle).
 - Offene Vorfälle sind `active` **und** `acknowledged` (ein quittierter Vorfall ist weiter
@@ -1662,26 +1703,48 @@ mitgeben.
 **Anbindung (später, I/C2; `heal_engine.py` bleibt in Paket H unverändert):**
 
 1. Unmittelbar vor dem Aufruf (nach der letzten Vorabprüfung) baut die Engine die
-   Momentaufnahme davor mit `snapshot_from_sources` und speichert sie mit dem Datensatz.
+   Momentaufnahme davor mit `snapshot_from_sources` und speichert **nur** ihre Form
+   `to_storable()` mit dem Datensatz (nie `to_dict()`, Review 2 NEW-6); geladen wird sie mit
+   `VerifySnapshot.from_storable()`.
 2. Nach dem Aufruf: `started_at` = Sicherheitszeit des Aufrufendes, Übergang EXECUTING →
    VERIFYING.
-3. In jedem Takt ab `settle_until`: Momentaufnahme danach, `verify(…)`, dann
-   `check_binding(…)` mit den gespeicherten Eingaben (nur `valid` darf angewandt werden).
-4. Solange `final` falsch ist, bleibt der Datensatz in VERIFYING.
+3. **In jedem Takt ab dem Aufrufende** (nicht erst ab `settle_until`, Review 2 NEW-5):
+   Momentaufnahme danach, `verify(…)`, dann `check_binding(…)` mit den gespeicherten
+   Eingaben (nur `valid` darf angewandt werden). Nur so wird ein früher Verlust gesehen.
+   Ergebnisse vor `settle_until` sind **nicht endgültig**, außer einem frühen Verlust
+   (`new_fault`, `final`); `planned_end` gibt für sie `None`. Sicherheitszeit (`safe_now`)
+   und Wandzeit (`wall_now`) einer Momentaufnahme stammen aus **derselben** Beobachtung
+   (ein `SafetyClock.observe(…)`-Aufruf und die Wandzeit, die er bekam), sonst sieht die
+   Prüfung einen Wanduhrsprung (`wall_clock_jump`).
+4. Solange `final` falsch ist, bleibt der Datensatz in VERIFYING (bis `max_wait_until`, das
+   eine junge Lösung einmal verlängern kann).
 5. Endgültig: `planned_end(result, from_state=…, interrupted=…)` (Review P2-4) gibt den
    Zielzustand **nach `verdict_key`, nie nach Klasse** (getestet gegen die echte
    Übergangstabelle von `heal_model`, Akteur ENGINE). Jeder Ausgang mit `counts_as_failure`
    geht an `heal_policy.record_outcome` (Schutzschalter, Flotten-Pause; Paket D); `hold` setzt
    den Hold (Abschnitt 5.1). Aus VERIFYING:
 
-   | `verdict_key` | Zustand | zählt als Fehlschlag | gutgeschrieben |
-   |---|---|---|---|
-   | `repaired_by_action` | RESOLVED | nein | **ja** (nur hier) |
-   | `repaired_execution_unconfirmed` | MANUAL_RECOVERY_REQUIRED | ja | nein |
-   | `partially_repaired`, `action_did_not_help`, `not_cleared` | FAILED | ja | nein |
-   | `cleared_by_itself` (Aufruf abgelehnt oder lesende Aktion) | FAILED | ja | nein |
-   | `worse_after_action`, `worse_without_action` | ESCALATED, mit Hold | ja | nein |
-   | `cannot_tell` | MANUAL_RECOVERY_REQUIRED | ja | nein |
+   | Aktion | `verdict_key` | Zustand | zählt als Fehlschlag | gutgeschrieben |
+   |---|---|---|---|---|
+   | schreibend | `repaired_by_action` | RESOLVED | nein | **ja** (nur hier) |
+   | schreibend | `repaired_execution_unconfirmed` | MANUAL_RECOVERY_REQUIRED | ja | nein |
+   | schreibend | `partially_repaired`, `action_did_not_help`, `not_cleared` | FAILED | ja | nein |
+   | schreibend, Aufruf abgelehnt | `cleared_by_itself` | FAILED | ja | nein |
+   | schreibend | `worse_after_action`, `worse_without_action` | ESCALATED, mit Hold | ja | nein |
+   | schreibend | `cannot_tell` | MANUAL_RECOVERY_REQUIRED | ja | nein |
+   | **lesend** | `cleared_by_itself`, `not_cleared`, `cannot_tell` | RESOLVED | **nein** | nein |
+   | **lesend** | `worse_without_action` | ESCALATED, mit Hold | **nein** | nein |
+
+   **Eine lesende Aktion** (Katalog: `writes` falsch) zählt **nie** für den Schutzschalter oder
+   die Flotten-Pause, was immer der Vorfall tat (Review 2, NEW-4). Aus VERIFYING ist RESOLVED
+   der **einzige** Endzustand der Übergangstabelle, der kein Fehlschlag ist (die anderen:
+   FAILED, ESCALATED, MANUAL_RECOVERY_REQUIRED; kein CANCELLED aus VERIFYING): eine lesende
+   Aktion endet deshalb RESOLVED mit `credited` falsch, auch wenn der Vorfall **nicht** gelöst
+   ist oder es nicht zu sagen ist. RESOLVED heißt dort „die lesende Aktion ist fertig“, nicht
+   „der Vorfall ist behoben“ (der Vorfall gehört Network Intelligence). **Der Tabelle fehlt ein
+   Endzustand „fertig, nicht gelöst, kein Fehlschlag“** (heal_model unverändert; QUESTION
+   unten). Ein neuer Fehler hält den Router trotzdem (ESCALATED mit Hold, ohne Fehlschlag). Ein
+   **abgelehnter** Aufruf einer **schreibenden** Aktion bleibt ein Fehlschlag (FAILED).
 
    FAILED wird bei einem unterbrochenen Datensatz MANUAL_RECOVERY_REQUIRED (VERIFYING → FAILED
    gilt nur ohne Unterbrechung). Aus PROPOSED (Beobachten, nichts ausgeführt): `cleared_by_itself`
@@ -1700,20 +1763,24 @@ mitgeben.
   für „mindestens zwei Polls im Takt von 60 s bis 300 s“, eine echte Stabilität über zwei Polls
   misst das Modul nicht).
 - Client-Toleranz 30 %, mindestens 2 (Entwurf: Funk-Clients zurück auf ≥ 70 %); nach dem Review
-  (P2-6): von einer positiven Zahl auf 0 immer schlechter, unter 7 Clients mehr als 1, und je
-  Funkschnittstelle derselbe Maßstab.
+  (P2-6): unter 7 Clients mehr als 1, und je Funkschnittstelle derselbe Maßstab; nach Review 2
+  (NEW-1): auf 0 erst ab 3 schlechter (1 oder 2 auf 0: nicht zu sagen), je Funkschnittstelle
+  nur, wenn auch die Gesamtzahl über ihre Toleranz fiel, ohne Schreiben nur Auskunft.
 - Fakten davor müssen in den 300 s vor dem Start gemessen sein (nicht nur „vor dem Start“), wie
   die Momentaufnahme selbst (Review P1-1).
 - Der Beginn eines fehlgeschlagenen Polls kommt aus `coordinator._failure_since` (privat, nur
   gelesen); fehlt er, ist der Ausfall nicht gemessen.
 - Dienste zählen nur mit `service_instances` desselben Polls als frisch (Router mit `rc/list`:
   Dienste unbekannt).
-- Früher Verlust nur für Verwaltungsweg und WAN.
-- „Beide Seiten schlecht“ haben nur Verwaltungsweg, WAN, abhängige Router und andere Vorfälle;
-  mit Schreiben `not_resolved`, ohne `unknown`; geprüft nur, wenn der Vorfall gelöst ist.
+- Früher Verlust nur für Verwaltungsweg und WAN, nur nach 120 s Dauer und nicht im
+  angekündigten Ausfall der ausgeführten Aktion (Review 2, NEW-2).
+- „Beide Seiten schlecht“ haben nur Verwaltungsweg und WAN (seit Review 2; vorher auch
+  abhängige Router und andere Vorfälle); mit Schreiben `not_resolved`, ohne `unknown`; geprüft
+  nur, wenn der Vorfall gelöst ist.
 - Aus PROPOSED: `cleared_by_itself` → CANCELLED, `worse_without_action` → Hold ohne
-  Zustandswechsel. Aus VERIFYING ist `cleared_by_itself` (Aufruf abgelehnt, oder eine lesende
-  Aktion lief) ein Fehlschlag (FAILED).
+  Zustandswechsel. Aus VERIFYING ist `cleared_by_itself` nach einem **abgelehnten Aufruf einer
+  schreibenden Aktion** ein Fehlschlag (FAILED); eine **lesende** Aktion ist nie ein
+  Fehlschlag (Review 2, NEW-4).
 - Ein Wanduhrsprung erfasst auch eine HA-Pause zwischen den Momentaufnahmen (streng).
 - Nur Vorfälle `warning`/`critical` zählen als neue Störung (`info` ist Rauschen).
 - `quiet` zählt nur mit Log-Abdeckung als gemessen gelöst.
@@ -1727,6 +1794,22 @@ mitgeben.
   Routers.
 - „Von selbst behoben“ verlangt bekannte Wächter wie jedes `resolved` (streng; offene Frage
   im Bericht des Pakets) und, seit dem Review, keinen Wächter, der auf beiden Seiten schlecht ist.
+  Die Client-Wächter zählen dabei ohne Schreiben nicht mit (Review 2, NEW-1a).
+- Beleg für die Dauer eines Verlusts ist nur der Beginn der Störung aus dem Gedächtnis, nicht
+  eine Zahl fehlgeschlagener Polls (der Poll-Abstand ist anpassbar, 60–300 s). Für den
+  Verwaltungsweg gilt die Dauerregel im frühen wie im endgültigen Vergleich.
+
+**Offene Fragen (Review 2):**
+
+- QUESTION: Soll der Coordinator einen Zeitpunkt „WAN weg seit“ halten, damit `wan_down_s`
+  gemessen wird (früher WAN-Verlust, Dauerregel auch nach der Wartezeit)? | ja, im Paket der
+  Anbindung / nein, WAN-Verlust erst nach der Wartezeit | Empfehlung: ja, im Paket der Anbindung.
+- QUESTION: Braucht die Übergangstabelle einen Endzustand „fertig, nicht gelöst, kein
+  Fehlschlag“ für lesende Aktionen? | neuer Zustand in heal_model / RESOLVED mit `credited`
+  falsch wie jetzt | Empfehlung: RESOLVED wie jetzt, bis lesende Aktionen verdrahtet werden.
+- QUESTION: Soll `cannot_tell` nach einem ausgeführten Schreiben weiter als Fehlschlag zählen
+  (MANUAL_RECOVERY_REQUIRED)? | ja, sichere Seite / nein, nur Hold ohne Fehlschlag |
+  Empfehlung: ja, weil nach einem Schreiben „nicht zu sagen“ einen Menschen braucht.
 
 ## 8. Playbooks A–G
 
