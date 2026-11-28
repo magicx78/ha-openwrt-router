@@ -3790,6 +3790,24 @@ def test_new2_the_announced_outage_is_no_early_loss() -> None:
     assert build(fake_coordinator()).wan_down_s.reason == "wan_down_time_not_in_memory"
 
 
+@pytest.mark.parametrize("age", [None, -5.0])
+def test_new2_a_wan_down_time_of_no_usable_age_is_no_evidence(
+    age: float | None,
+) -> None:
+    """NEW-2a: ``wan_down_s`` of unknown or future age proves no lasting
+    WAN loss; the loss waits for the settle time (never raises)."""
+    a = after(at=T0 + 300, wan="down", wan_down_s=k(200, age))
+    r = run(a=a, now=T0 + 300)
+    assert (r.result, r.final, r.reasons) == (
+        VR.UNKNOWN,
+        False,
+        ("settle_time_not_reached",),
+    )
+    # the same loss with a usable age is an early loss (the test is live)
+    a = after(at=T0 + 300, wan="down", wan_down_s=k(200, 0.0))
+    assert run(a=a, now=T0 + 300).result is VR.NEW_FAULT
+
+
 def test_new2_an_isp_reconnect_without_a_write() -> None:
     """NEW-2c: reported as worse_without_action, but only once it lasted."""
     obs = {"action": "observe.evaluate", "params": {}, "call": None}
