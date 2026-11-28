@@ -414,7 +414,13 @@ function PolicyBlock({ policy }: { policy: Policy }) {
         </Fact>
       )}
       {policy.recovery && (
-        <Fact name="Wiederherstellung">{reasonText(policy.recovery.statement)} <span className="sh-muted">({reasonText(policy.recovery.rollback)})</span></Fact>
+        <Fact name="Wiederherstellung">
+          {reasonText(policy.recovery.statement)}
+          {/* the rollback kind only when the statement does not already say it (read_only / read_only_nothing_changes) */}
+          {policy.recovery.rollback && !(policy.recovery.statement ?? '').startsWith(policy.recovery.rollback) && (
+            <span className="sh-muted"> ({reasonText(policy.recovery.rollback)})</span>
+          )}
+        </Fact>
       )}
     </>
   );
@@ -451,11 +457,16 @@ export function CandidateBlock({ candidate }: { candidate: Candidate | null }) {
           </Fact>
           <GateBlock gate={candidate.gate} />
           {candidate.facts && candidate.facts.unknown.length > 0 && (
-            <Fact name="Nicht bekannt">{candidate.facts.unknown.map(factText).join(', ')}</Fact>
+            <Fact name="Nicht bekannte Fakten">{candidate.facts.unknown.map(factText).join(', ')}</Fact>
           )}
         </dl>
       )}
-      {candidate.policy && <ScoreLines policy={candidate.policy} />}
+      {candidate.policy && candidate.policy.contributions.length > 0 && (
+        <>
+          <h5 className="sh-sub">Beiträge zur Konfidenz</h5>
+          <ScoreLines policy={candidate.policy} />
+        </>
+      )}
     </div>
   );
 }
@@ -516,7 +527,7 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
       <div className="sh-block">
         <h4 className="sh-block__title">Vorfall und Ursache</h4>
         <dl className="sh-facts">
-          <Fact name="Vorfall">{incidentText(a.incidentType)} <span className="sh-muted">({a.incidentId ?? UNKNOWN}{a.incidentReopen ? `, ${a.incidentReopen}× wieder geöffnet` : ''})</span></Fact>
+          <Fact name="Vorfall">{incidentText(a.incidentType)} <span className="sh-muted">({a.incidentId ?? UNKNOWN}{a.incidentReopen ? `, ${a.incidentReopen}-mal wieder geöffnet` : ''})</span></Fact>
           <Fact name="Router">{routerText(a.routerId)}</Fact>
           <Fact name="Ursache">
             {a.cause ? (
@@ -544,7 +555,7 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
           <Fact name="Aktion">{actionText(a.actionType)}</Fact>
           <Fact name="Ergebnis">{d ? <Badge tone={outcomeView(d.outcome).tone}>{outcomeView(d.outcome).label}</Badge> : <Unknown why="keine Entscheidung gespeichert" />}</Fact>
           {d && <Fact name="Begründung"><Reasons codes={whyCodes(d)} empty="keine genannt" /></Fact>}
-          {d && <Fact name="Konfidenz">{scoreText(d.score)}</Fact>}
+          {d && <Fact name="Konfidenz bei der Entscheidung">{scoreText(d.score)}</Fact>}
           {d && d.factors.length > 0 && (
             <Fact name="Beiträge zur Konfidenz">
               <ul className="sh-score">
@@ -566,7 +577,7 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
       </div>
 
       <div className="sh-block">
-        <h4 className="sh-block__title">Erklärung der Richtlinie</h4>
+        <h4 className="sh-block__title">Erklärung der Richtlinie (mit den Fakten von jetzt)</h4>
         {planError !== null ? <ErrorBox error={planError} of="record" onRetry={onRetry} /> : <ExplanationBlock explanation={explanation} />}
       </div>
 
@@ -599,7 +610,7 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
       <div className="sh-block">
         <h4 className="sh-block__title">Zähler</h4>
         <dl className="sh-facts">
-          <Fact name="Vorfall wieder geöffnet">{a.incidentReopen === null ? <Unknown /> : `${a.incidentReopen}×`}</Fact>
+          <Fact name="Vorfall wieder geöffnet">{a.incidentReopen === null ? <Unknown /> : a.incidentReopen === 0 ? 'nie' : `${a.incidentReopen}-mal`}</Fact>
           <Fact name="Ausführungsversuche">{a.executionAttempt === null ? <Unknown /> : String(a.executionAttempt)}</Fact>
           <Fact name="Frühere Versuche (Richtlinie)">
             {(() => {

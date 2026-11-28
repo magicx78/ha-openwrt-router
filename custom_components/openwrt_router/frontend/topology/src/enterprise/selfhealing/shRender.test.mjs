@@ -231,6 +231,40 @@ test('a failed overview is an error state with retry, never tiles or "all fine"'
   assert.ok(stale.indexOf('konnte nicht geladen werden') < stale.indexOf('Übersicht'));
 });
 
+test('410 (integration unloaded): an error without retry, no off box, no tiles', () => {
+  const s = { ...M.SH_INIT, overviewError: new M.ShApiError(410, 'integration_not_loaded') };
+  const html = screen(s);
+  const t = text(html);
+  assert.ok(t.startsWith(`Self-Healing Aktualisieren ${M.OBSERVE_TITLE}`));
+  assert.match(t, /Die Integration wurde entladen\./);
+  assert.match(body(html), /cfg-notice--error/);
+  assert.deepEqual(buttons(html), ['Aktualisieren']);
+  assert.ok(!t.includes(M.OFF_TITLE));
+  assert.ok(!M.isOff(s));
+  assert.doesNotMatch(body(html), /id="sh-(overview|routers|records|settings)"/);
+  // a 410 after a good answer drops it: nothing from before is shown as current
+  const first = M.applyLoad(M.SH_INIT, { overview: { ok: true, value: M.parseOverview(F.overview.body) }, selected: null });
+  const gone = M.applyLoad(first, { overview: { ok: false, error: new M.ShApiError(410, 'integration_not_loaded') }, selected: null });
+  assert.equal(gone.overview, null);
+  assert.ok(!text(screen(gone)).includes('Übersicht'));
+});
+
+test('the detail reads plainly: labelled scores, no doubled recovery, "nie"', () => {
+  const open = text(screen(state({ ...FULL, detail: 'detail_open', plan: 'plan_open', selected: ID_OPEN }), { selected: ID_OPEN }));
+  assert.match(open, /Konfidenz bei der Entscheidung 17 von 100/);
+  assert.ok(open.includes('Erklärung der Richtlinie (mit den Fakten von jetzt)'));
+  assert.match(open, /Vorfall wieder geöffnet nie/);
+  assert.ok(!open.includes('×'));
+  // read_only_nothing_changes already says read_only: said once
+  const rec = M.reasonText('read_only_nothing_changes');
+  assert.ok(open.includes(`Wiederherstellung ${rec} `), open);
+  assert.ok(!open.includes(`${rec} (${M.reasonText('read_only')})`));
+  // a candidate keeps its rollback kind, and its score lines have a heading
+  const cand = text(screen(state({ ...FULL, detail: 'detail_open', plan: 'plan_candidate', selected: ID_OPEN }), { selected: ID_OPEN }));
+  assert.match(cand, /Beiträge zur Konfidenz Ursachenstufe/);
+  assert.ok(!/Nicht bekannt (?!e)/.test(cand));
+});
+
 test('module off, not running, or no route: the "ausgeschaltet" box', () => {
   for (const s of [state({ overview: 'disabled_overview' }), state({ overview: 'not_running' }),
     { ...M.SH_INIT, overviewError: new M.ShApiError(404, '') }]) {
