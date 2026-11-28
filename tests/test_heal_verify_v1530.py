@@ -3983,6 +3983,55 @@ def test_new6_from_storable_refuses_names_and_bad_forms() -> None:
     }
 
 
+def test_new6_the_storable_form_keeps_every_age_exactly() -> None:
+    """A loss of 119.96 s is too short; rounded it would last 120 s. The
+    restored snapshot has the exact age and gives the same result."""
+    a = after(at=T0 + 800, management_path=k(False, 119.96))
+    b = before()
+    back_a = hv.VerifySnapshot.from_storable(copy_dict(a.to_storable()))
+    back_b = hv.VerifySnapshot.from_storable(copy_dict(b.to_storable()))
+    assert back_a.management_path.age_s == 119.96
+    for b_, a_ in ((b, a), (back_b, back_a)):
+        r = run(b=b_, a=a_, now=T0 + 800)
+        assert r.criterion("management_path").reason == (
+            "management_path_loss_too_short"
+        )
+        assert (r.result, r.reasons) == (VR.UNKNOWN, ("management_path.unknown",))
+
+
+def test_new6_a_stored_before_and_a_live_after_compare_alike() -> None:
+    """The wiring stores the before-snapshot hashed and builds the after
+    one live each tick: names outside the closed sets (``dropbear``,
+    ``phy0-ap0``) differ in form, and that must never read as a lost
+    service or radio (a false new fault). Every mix gives the same
+    result as the plain pair; the binding still sees the inputs."""
+    b, a = before(), after()
+    sb = hv.VerifySnapshot.from_storable(copy_dict(b.to_storable()))
+    sa = hv.VerifySnapshot.from_storable(copy_dict(a.to_storable()))
+    assert dict(sb.services.value).keys() != dict(b.services.value).keys()
+    for action, params, call in (
+        ("service.restart", DNSMASQ, CallResult.OK),
+        ("wifi.radio_restart", {"radio": "radio0"}, CallResult.OK),
+        ("observe.evaluate", {}, None),
+    ):
+        plain = run(action, params=params, call=call, b=b, a=a)
+        for b_, a_ in ((sb, a), (b, sa), (sb, sa)):
+            r = run(action, params=params, call=call, b=b_, a=a_)
+            assert (r.result, r.verdict_key, r.reasons) == (
+                plain.result,
+                plain.verdict_key,
+                plain.reasons,
+            ), (action, b_ is sb, a_ is sa)
+            assert r.before == b_ and r.after == a_  # the inputs, unhashed
+            bind = {"action_id": ACT, "action_type": action, "params": params}
+            assert r.check_binding(**bind, before=b_, after=a_) is hv.Binding.VALID
+            if b_ is not b:
+                assert r.check_binding(**bind, before=b, after=a_) is not (
+                    hv.Binding.VALID
+                )
+    assert plain.result is VR.RESOLVED
+
+
 def copy_dict(d: Any) -> Any:
     import json
 

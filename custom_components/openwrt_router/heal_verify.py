@@ -561,15 +561,7 @@ class VerifySnapshot:
         the original; ages are kept exactly. A fact whose tokens would
         clash becomes unknown (``storable_name_clash``)."""
         facts: dict[str, Any] = {}
-        for name, fact in self.fact_items():
-            if fact.value is not None and name in _CLOSED_NAMES:
-                rows = tuple(
-                    sorted((_storable_name(name, r[0]), r[1]) for r in fact.value)
-                )
-                if len({r[0] for r in fact.value}) != len({r[0] for r in rows}):
-                    fact = unknown("storable_name_clash", fact.source)
-                else:
-                    fact = replace(fact, value=rows)
+        for name, fact in self.hashed().fact_items():
             value = fact.value
             if type(value) is tuple:
                 value = [list(v) if type(v) is tuple else v for v in value]
@@ -587,6 +579,28 @@ class VerifySnapshot:
             "wall_at": self.wall_at,
             "facts": facts,
         }
+
+    def hashed(self) -> VerifySnapshot:
+        """This snapshot with the names of :meth:`to_storable` (a stored
+        snapshot comes back unchanged). :func:`verify` compares both
+        snapshots in this form, so a stored before-snapshot and an
+        after-snapshot built live compare like two of the same form."""
+        over: dict[str, Fact] = {}
+        for name in _CLOSED_NAMES:
+            fact = getattr(self, name)
+            if fact.value is None:
+                continue
+            rows = tuple(
+                sorted(
+                    ((_storable_name(name, r[0]), r[1]) for r in fact.value),
+                    key=lambda r: r[0],
+                )
+            )
+            if len({r[0] for r in fact.value}) != len({r[0] for r in rows}):
+                over[name] = unknown("storable_name_clash", fact.source)
+            elif rows != fact.value:
+                over[name] = replace(fact, value=rows)
+        return replace(self, **over) if over else self
 
     @classmethod
     def from_storable(cls, data: Any) -> VerifySnapshot:
@@ -1505,6 +1519,9 @@ def _derive(
     settle_until = started + VERIFY_SETTLE_S
     criteria: tuple[Criterion, ...] = ()
     if before is not None and after is not None:
+        # both in the stored form of names: a stored before-snapshot and a
+        # live after-snapshot must not differ by form (review 2, NEW-6)
+        before, after = before.hashed(), after.hashed()
         # before-facts measured in the 300 s before the start; after-facts
         # measured after the settle time; for EARLY_LOSS also any after-fact
         # measured after the start, but only to see a loss (P1-1, P2-7)
