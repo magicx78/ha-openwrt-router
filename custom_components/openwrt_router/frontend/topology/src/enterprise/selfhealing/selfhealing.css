@@ -1,0 +1,151 @@
+/* "Self-Healing" tab (enterprise/selfhealing). Builds on config.css and
+   wifi.css (both injected next to this one) and follows the Time Machine
+   look; only what they lack is here. The panel is dark only (no light
+   theme). No own colour scheme: states use the panel's status colours; an
+   unknown value is muted text, never green.
+   Narrow layout down to 360 px: tiles, cards and filters wrap (never scroll
+   sideways); below the width a record row needs, the row becomes a card
+   (container query, the Time Machine pattern). Long codes without spaces
+   break between letters (.sh overflow-wrap). Controls are 40 px tall at
+   phone width. In the wide row a pill never wraps inside itself: its
+   column fits the longest label (measured in Chrome at 12.5 px: state
+   17.45em "Wiederherstellung von Hand nötig", risk 10.87em "Risiko 0 – nur
+   lesend"); below the row's width the row is a card and pills wrap between
+   words again. */
+
+.sh { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.sh .cfg-badge { white-space: normal; }
+/* a badge breaks between words only (the tab's anywhere-wrap would split "Vorgeschlagen") */
+.sh .sh-badge { overflow-wrap: break-word; }
+.sh-stand { color: var(--text-muted); }
+.sh-loading { padding: 4px 0; }
+.sh-observe, .sh-off, .sh-error { flex-direction: column; align-items: flex-start; }
+.sh-observe strong { font-size: 13px; }
+.sh-observe__other { color: #fcd34d; }
+.sh-unknown { color: var(--text-muted); font-style: italic; }
+.sh-muted { color: var(--text-secondary); }
+.sh-warn { color: var(--amber); }
+.sh-p { margin: 0; font-size: 12.5px; }
+.sh-section { min-width: 0; }
+.sh-empty { align-items: flex-start; text-align: left; }
+.sh-empty strong { color: var(--text-primary); }
+.sh-note { color: var(--text-secondary); }
+.sh-note--line { display: block; margin-top: 2px; }
+
+/* An answer kept from before a failed refresh: framed and labelled as outdated, never shown as current */
+.sh-stale {
+  display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 8px;
+  border: 1px dashed rgba(245, 158, 11, 0.7); border-radius: var(--radius-xs);
+}
+.sh-stale__label { color: var(--amber); text-transform: uppercase; letter-spacing: 0.04em; font-size: 11.5px; }
+
+/* Overview tiles */
+.sh-tiles {
+  list-style: none; display: grid; gap: 8px; padding: 0; margin: 0; min-width: 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+}
+.sh-tile {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 10px 12px;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); font-size: 12px;
+}
+.sh-tile__value { font-size: 20px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.sh-tile--unknown .sh-tile__value { font-size: 14px; font-weight: 600; color: var(--text-muted); font-style: italic; }
+.sh-tile__label { color: var(--text-primary); font-weight: 600; }
+.sh-tile__note { color: var(--text-secondary); }
+
+/* Facts (name: value) */
+.sh-facts { display: flex; flex-direction: column; gap: 4px; margin: 0; min-width: 0; font-size: 12.5px; }
+.sh-fact { display: grid; grid-template-columns: 11em minmax(0, 1fr); gap: 2px 10px; min-width: 0; }
+.sh-fact dt { color: var(--text-secondary); }
+.sh-fact dd { margin: 0; min-width: 0; color: var(--text-primary); }
+.sh-fleet { margin-bottom: 8px; }
+.sh-rollback, .sh-masked { margin-top: 8px; }
+
+/* Router cards */
+.sh-cards {
+  list-style: none; display: grid; gap: 8px; padding: 0; margin: 0; min-width: 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+}
+.sh-card {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px;
+  border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03);
+}
+.sh-card .sh-fact { grid-template-columns: 8.5em minmax(0, 1fr); }
+.sh-card__title { margin: 0; font-size: 13px; font-weight: 700; color: var(--text-primary); }
+
+/* Filters */
+.sh-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; margin-bottom: 8px; }
+.sh-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.sh-chip { max-width: 100%; white-space: normal; }
+.sh-field { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.sh-field__name { font-size: 11.5px; color: var(--text-secondary); }
+.sh-field select {
+  max-width: 100%; min-width: 0; min-height: 32px; padding: 4px 8px; font: inherit; font-size: 13px;
+  color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-xs);
+}
+/* Focus inside this tab (the Time Machine colour: 7.3:1 on the chips). */
+.sh .sh-chip:focus-visible,
+.sh .sh-field select:focus-visible,
+.sh .cfg-btn:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+
+/* Records */
+.sh-records { list-style: none; display: flex; flex-direction: column; gap: 6px; padding: 0; margin: 0; min-width: 0; container: shlist / inline-size; }
+.sh-record { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-xs); background: rgba(255, 255, 255, 0.03); }
+.sh-record--open { outline: 1px solid var(--border-strong); }
+.sh-row {
+  display: grid; align-items: center; gap: 4px 12px; padding: 8px 10px; min-width: 0; font-size: 12.5px;
+  grid-template-columns: 10.5em 18em minmax(0, 1fr) 13em 11.5em auto;
+}
+/* wide row: a pill stays on one line (its column fits the longest label) */
+.sh-row .sh-badge { white-space: nowrap; }
+.sh-row > * { min-width: 0; }
+.sh-row__time { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.sh-row__main { display: flex; flex-direction: column; gap: 1px; }
+.sh-row__title { color: var(--text-primary); font-weight: 600; }
+.sh-row__meta { color: var(--text-secondary); font-size: 12px; }
+.sh-row__open { justify-self: end; }
+
+/* Detail of one record */
+.sh-detail { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 4px 10px 12px; border-top: 1px solid var(--border-strong); }
+.sh-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--text-primary); }
+.sh-block__title { margin: 6px 0 0; font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.sh-sub { margin: 4px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.sh-reasons { margin: 2px 0 0; padding-left: 18px; min-width: 0; }
+.sh-reasons li { margin: 1px 0; }
+.sh-candidate {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 8px 10px;
+  border: 1px dashed rgba(245, 158, 11, 0.45); border-radius: var(--radius-xs);
+}
+.sh-candidate--none { border-color: var(--border-strong); }
+.sh-score { list-style: none; display: flex; flex-direction: column; gap: 2px; padding: 0; margin: 0; font-size: 12px; min-width: 0; }
+.sh-score li { display: grid; grid-template-columns: minmax(0, 1fr) 3.5em minmax(0, 1.4fr); gap: 2px 8px; }
+.sh-score__points { font-variant-numeric: tabular-nums; text-align: right; color: var(--text-primary); }
+.sh-score__reason { color: var(--text-secondary); }
+.sh-history { list-style: none; display: flex; flex-direction: column; gap: 3px; padding: 0; margin: 0; min-width: 0; font-size: 12px; }
+.sh-history__item { display: grid; grid-template-columns: 10.5em 13em 9em minmax(0, 1fr); gap: 2px 10px; min-width: 0; }
+.sh-history__item > * { min-width: 0; }
+.sh-history__time { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.sh-history__step { color: var(--text-primary); }
+.sh-history__actor { color: var(--text-secondary); }
+
+@container shlist (max-width: 1060px) {
+  .sh-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+  .sh-row .sh-badge { white-space: normal; }
+  .sh-row__main { flex: 1 1 100%; order: -1; }
+  .sh-row__open { flex: 1 1 100%; justify-self: auto; }
+  .sh-history__item { display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 4px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+  .sh-history__reason { flex: 1 1 100%; }
+}
+
+@media (max-width: 600px) {
+  .sh-fact, .sh-card .sh-fact { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .sh-fact { padding: 2px 0; }
+  .sh-chip { min-height: 40px; flex: 1 1 auto; text-align: center; }
+  .sh-chips { flex: 1 1 100%; }
+  .sh-field { flex: 1 1 100%; }
+  .sh-field select { min-height: 40px; width: 100%; }
+  .sh .cfg-btn { min-height: 40px; }
+  .sh-toggle { width: 100%; }
+  .sh-score li { grid-template-columns: minmax(0, 1fr) 3.5em; }
+  .sh-score__reason { grid-column: 1 / -1; }
+}

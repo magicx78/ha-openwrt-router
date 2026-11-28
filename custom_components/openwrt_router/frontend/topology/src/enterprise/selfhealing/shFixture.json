@@ -1,0 +1,2466 @@
+{
+ "actions": {
+  "body": {
+   "actions": [
+    {
+     "action_id": "rem_00000000000000000000000000000002",
+     "action_type": "observe.evaluate",
+     "cause_code": "dns_resolution",
+     "cause_level": "likely",
+     "created_at": 1790001800.0,
+     "decision": "recommended",
+     "flags": {
+      "acknowledged_by_admin": false,
+      "hold_released": false,
+      "in_maintenance": false,
+      "interrupted": false
+     },
+     "incident_id": "inc-1",
+     "incident_reopen": 0,
+     "incident_type": "system_service_restart",
+     "risk_class": 0,
+     "router_id": "rtr_11111111111111111111111111111111",
+     "state": "proposed",
+     "terminal": false,
+     "updated_at": 1790001800.0
+    },
+    {
+     "action_id": "rem_00000000000000000000000000000001",
+     "action_type": "observe.evaluate",
+     "cause_code": "wan_down",
+     "cause_level": "likely",
+     "created_at": 1790000000.0,
+     "decision": "recommended",
+     "flags": {
+      "acknowledged_by_admin": false,
+      "hold_released": false,
+      "in_maintenance": false,
+      "interrupted": false
+     },
+     "incident_id": "inc-2",
+     "incident_reopen": 0,
+     "incident_type": "wan_down",
+     "risk_class": 0,
+     "router_id": "rtr_22222222222222222222222222222222",
+     "state": "cancelled",
+     "terminal": true,
+     "updated_at": 1790000600.0
+    }
+   ],
+   "generated_at": 1790001920.0,
+   "limit": 200,
+   "offset": 0,
+   "total": 2,
+   "v": 1
+  },
+  "status": 200
+ },
+ "detail_closed": {
+  "body": {
+   "action": {
+    "action_id": "rem_00000000000000000000000000000001",
+    "action_type": "observe.evaluate",
+    "approval": {
+     "binding_hash": null,
+     "decided_by": null,
+     "expires_at": null,
+     "guard_approval_id": null,
+     "requested_by": null,
+     "status": "not_requested"
+    },
+    "audit_refs": [],
+    "backup_ref": {
+     "reason": null,
+     "version_id": null
+    },
+    "cause": {
+     "code": "wan_down",
+     "confidence": 0.7,
+     "level": "likely",
+     "source_families": [
+      "log",
+      "poll"
+     ],
+     "status": "confirmed"
+    },
+    "components": [],
+    "created_at": 1790000000.0,
+    "decision": {
+     "factors": [
+      {
+       "factor": "cause_level",
+       "reason": "cause_level_likely",
+       "value": 0.3
+      },
+      {
+       "factor": "cause_status",
+       "reason": "cause_status_confirmed",
+       "value": 0.1
+      },
+      {
+       "factor": "incident_confidence",
+       "reason": "incident_confidence_scaled",
+       "value": 0.07
+      },
+      {
+       "factor": "source_families",
+       "reason": "two_or_more_source_families",
+       "value": 0.1
+      },
+      {
+       "factor": "target_fact",
+       "reason": "target_fact_none",
+       "value": 0.0
+      },
+      {
+       "factor": "prior_attempts",
+       "reason": "no_prior_attempts",
+       "value": 0.0
+      },
+      {
+       "factor": "config_change",
+       "reason": "config_change_unknown",
+       "value": -0.2
+      },
+      {
+       "factor": "severity",
+       "reason": "severity_unknown",
+       "value": -0.1
+      },
+      {
+       "factor": "clamp",
+       "reason": "within_range",
+       "value": 0.0
+      }
+     ],
+     "outcome": "recommended",
+     "score": 0.27,
+     "why": "all_rules_passed",
+     "why_not": null
+    },
+    "execution": {
+     "attempt_no": 0,
+     "call_finished_at": null,
+     "call_result": null,
+     "call_started_at": null,
+     "intent_written_at": null
+    },
+    "expected_impact": {
+     "clients_on_component": null,
+     "clients_on_router": null,
+     "dependants": [],
+     "est_outage_s": null
+    },
+    "flags": {
+     "acknowledged_by_admin": false,
+     "hold_released": false,
+     "in_maintenance": false,
+     "interrupted": false
+    },
+    "history": [
+     {
+      "actor": "engine",
+      "from_state": null,
+      "reason": "incident_opened",
+      "to_state": "detected",
+      "ts": 1790000000.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "detected",
+      "reason": "cause_from_incident",
+      "to_state": "analyzed",
+      "ts": 1790000000.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "analyzed",
+      "reason": "decision_recommended",
+      "to_state": "proposed",
+      "ts": 1790000000.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "proposed",
+      "reason": "incident_cleared",
+      "to_state": "cancelled",
+      "ts": 1790000600.0
+     }
+    ],
+    "idempotency_id": null,
+    "incident_id": "inc-2",
+    "incident_reopen": 0,
+    "incident_type": "wan_down",
+    "params": {
+     "incident": "inc-2"
+    },
+    "planned_changes": [],
+    "playbook_id": null,
+    "playbook_version": null,
+    "preflight": [],
+    "prerequisites": [],
+    "risk": {
+     "reasons": [],
+     "risk_class": 0
+    },
+    "rollback": {
+     "mechanism": "none",
+     "statement": null,
+     "status": "not_available"
+    },
+    "router_id": "rtr_22222222222222222222222222222222",
+    "state": "cancelled",
+    "state_fingerprint": null,
+    "updated_at": 1790000600.0,
+    "verification": {
+     "after": {},
+     "before": {},
+     "checks": [],
+     "result": null
+    }
+   },
+   "effective_mode": "observe",
+   "generated_at": 1790001920.0,
+   "router_hold": null,
+   "v": 1
+  },
+  "status": 200
+ },
+ "detail_open": {
+  "body": {
+   "action": {
+    "action_id": "rem_00000000000000000000000000000002",
+    "action_type": "observe.evaluate",
+    "approval": {
+     "binding_hash": null,
+     "decided_by": null,
+     "expires_at": null,
+     "guard_approval_id": null,
+     "requested_by": null,
+     "status": "not_requested"
+    },
+    "audit_refs": [],
+    "backup_ref": {
+     "reason": null,
+     "version_id": null
+    },
+    "cause": {
+     "code": "dns_resolution",
+     "confidence": 0.7,
+     "level": "likely",
+     "source_families": [
+      "log",
+      "poll"
+     ],
+     "status": "hypothesis"
+    },
+    "components": [],
+    "created_at": 1790001800.0,
+    "decision": {
+     "factors": [
+      {
+       "factor": "cause_level",
+       "reason": "cause_level_likely",
+       "value": 0.3
+      },
+      {
+       "factor": "cause_status",
+       "reason": "cause_status_hypothesis",
+       "value": 0.0
+      },
+      {
+       "factor": "incident_confidence",
+       "reason": "incident_confidence_scaled",
+       "value": 0.07
+      },
+      {
+       "factor": "source_families",
+       "reason": "two_or_more_source_families",
+       "value": 0.1
+      },
+      {
+       "factor": "target_fact",
+       "reason": "target_fact_none",
+       "value": 0.0
+      },
+      {
+       "factor": "prior_attempts",
+       "reason": "no_prior_attempts",
+       "value": 0.0
+      },
+      {
+       "factor": "config_change",
+       "reason": "config_change_unknown",
+       "value": -0.2
+      },
+      {
+       "factor": "severity",
+       "reason": "severity_unknown",
+       "value": -0.1
+      },
+      {
+       "factor": "clamp",
+       "reason": "within_range",
+       "value": 0.0
+      }
+     ],
+     "outcome": "recommended",
+     "score": 0.17,
+     "why": "all_rules_passed",
+     "why_not": null
+    },
+    "execution": {
+     "attempt_no": 0,
+     "call_finished_at": null,
+     "call_result": null,
+     "call_started_at": null,
+     "intent_written_at": null
+    },
+    "expected_impact": {
+     "clients_on_component": null,
+     "clients_on_router": null,
+     "dependants": [],
+     "est_outage_s": null
+    },
+    "flags": {
+     "acknowledged_by_admin": false,
+     "hold_released": false,
+     "in_maintenance": false,
+     "interrupted": false
+    },
+    "history": [
+     {
+      "actor": "engine",
+      "from_state": null,
+      "reason": "incident_opened",
+      "to_state": "detected",
+      "ts": 1790001800.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "detected",
+      "reason": "cause_from_incident",
+      "to_state": "analyzed",
+      "ts": 1790001800.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "analyzed",
+      "reason": "decision_recommended",
+      "to_state": "proposed",
+      "ts": 1790001800.0
+     }
+    ],
+    "idempotency_id": null,
+    "incident_id": "inc-1",
+    "incident_reopen": 0,
+    "incident_type": "system_service_restart",
+    "params": {
+     "incident": "inc-1"
+    },
+    "planned_changes": [],
+    "playbook_id": null,
+    "playbook_version": null,
+    "preflight": [],
+    "prerequisites": [],
+    "risk": {
+     "reasons": [],
+     "risk_class": 0
+    },
+    "rollback": {
+     "mechanism": "none",
+     "statement": null,
+     "status": "not_available"
+    },
+    "router_id": "rtr_11111111111111111111111111111111",
+    "state": "proposed",
+    "state_fingerprint": null,
+    "updated_at": 1790001800.0,
+    "verification": {
+     "after": {},
+     "before": {},
+     "checks": [],
+     "result": null
+    }
+   },
+   "effective_mode": "observe",
+   "generated_at": 1790001920.0,
+   "router_hold": null,
+   "v": 1
+  },
+  "status": 200
+ },
+ "disabled_overview": {
+  "body": {
+   "automatic_rollback": "not_available",
+   "counts": {
+    "by_state": {
+     "analyzed": 0,
+     "approved": 0,
+     "cancelled": 1,
+     "detected": 0,
+     "escalated": 0,
+     "executing": 0,
+     "failed": 0,
+     "manual_recovery_required": 0,
+     "preflight": 0,
+     "proposed": 1,
+     "rejected": 0,
+     "resolved": 0,
+     "rollback_pending": 0,
+     "rolled_back": 0,
+     "rolling_back": 0,
+     "verifying": 0,
+     "waiting_approval": 0
+    },
+    "open": 1,
+    "routers": 2,
+    "routers_held": 0,
+    "total": 2
+   },
+   "fleet": {
+    "held": false,
+    "hold": null,
+    "pause_reason": null,
+    "pause_remaining_s": null,
+    "paused": false
+   },
+   "generated_at": 1790001920.0,
+   "last_activity": 1790001800.0,
+   "pending_incidents": 1,
+   "release_mode": "observe_only",
+   "routers": [
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 1,
+     "router_id": "rtr_11111111111111111111111111111111"
+    },
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 0,
+     "router_id": "rtr_22222222222222222222222222222222"
+    }
+   ],
+   "status": "module_disabled",
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "empty_actions": {
+  "body": {
+   "actions": [],
+   "generated_at": 1790000000.0,
+   "limit": 200,
+   "offset": 0,
+   "total": 0,
+   "v": 1
+  },
+  "status": 200
+ },
+ "empty_overview": {
+  "body": {
+   "automatic_rollback": "not_available",
+   "counts": {
+    "by_state": {
+     "analyzed": 0,
+     "approved": 0,
+     "cancelled": 0,
+     "detected": 0,
+     "escalated": 0,
+     "executing": 0,
+     "failed": 0,
+     "manual_recovery_required": 0,
+     "preflight": 0,
+     "proposed": 0,
+     "rejected": 0,
+     "resolved": 0,
+     "rollback_pending": 0,
+     "rolled_back": 0,
+     "rolling_back": 0,
+     "verifying": 0,
+     "waiting_approval": 0
+    },
+    "open": 0,
+    "routers": 2,
+    "routers_held": 0,
+    "total": 0
+   },
+   "fleet": {
+    "held": false,
+    "hold": null,
+    "pause_reason": null,
+    "pause_remaining_s": null,
+    "paused": false
+   },
+   "generated_at": 1790000000.0,
+   "last_activity": null,
+   "pending_incidents": 0,
+   "release_mode": "observe_only",
+   "routers": [
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 0,
+     "router_id": "rtr_11111111111111111111111111111111"
+    },
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 0,
+     "router_id": "rtr_22222222222222222222222222222222"
+    }
+   ],
+   "status": "on",
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "empty_plans": {
+  "body": {
+   "generated_at": 1790000000.0,
+   "plans": [],
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "held_detail": {
+  "body": {
+   "action": {
+    "action_id": "rem_00000000000000000000000000000002",
+    "action_type": "observe.evaluate",
+    "approval": {
+     "binding_hash": null,
+     "decided_by": null,
+     "expires_at": null,
+     "guard_approval_id": null,
+     "requested_by": null,
+     "status": "not_requested"
+    },
+    "audit_refs": [],
+    "backup_ref": {
+     "reason": null,
+     "version_id": null
+    },
+    "cause": {
+     "code": "dns_resolution",
+     "confidence": 0.7,
+     "level": "likely",
+     "source_families": [
+      "log",
+      "poll"
+     ],
+     "status": "hypothesis"
+    },
+    "components": [],
+    "created_at": 1790001800.0,
+    "decision": {
+     "factors": [
+      {
+       "factor": "cause_level",
+       "reason": "cause_level_likely",
+       "value": 0.3
+      },
+      {
+       "factor": "cause_status",
+       "reason": "cause_status_hypothesis",
+       "value": 0.0
+      },
+      {
+       "factor": "incident_confidence",
+       "reason": "incident_confidence_scaled",
+       "value": 0.07
+      },
+      {
+       "factor": "source_families",
+       "reason": "two_or_more_source_families",
+       "value": 0.1
+      },
+      {
+       "factor": "target_fact",
+       "reason": "target_fact_none",
+       "value": 0.0
+      },
+      {
+       "factor": "prior_attempts",
+       "reason": "no_prior_attempts",
+       "value": 0.0
+      },
+      {
+       "factor": "config_change",
+       "reason": "config_change_unknown",
+       "value": -0.2
+      },
+      {
+       "factor": "severity",
+       "reason": "severity_unknown",
+       "value": -0.1
+      },
+      {
+       "factor": "clamp",
+       "reason": "within_range",
+       "value": 0.0
+      }
+     ],
+     "outcome": "recommended",
+     "score": 0.17,
+     "why": "all_rules_passed",
+     "why_not": null
+    },
+    "execution": {
+     "attempt_no": 0,
+     "call_finished_at": null,
+     "call_result": null,
+     "call_started_at": null,
+     "intent_written_at": null
+    },
+    "expected_impact": {
+     "clients_on_component": null,
+     "clients_on_router": null,
+     "dependants": [],
+     "est_outage_s": null
+    },
+    "flags": {
+     "acknowledged_by_admin": false,
+     "hold_released": false,
+     "in_maintenance": false,
+     "interrupted": false
+    },
+    "history": [
+     {
+      "actor": "engine",
+      "from_state": null,
+      "reason": "incident_opened",
+      "to_state": "detected",
+      "ts": 1790001800.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "detected",
+      "reason": "cause_from_incident",
+      "to_state": "analyzed",
+      "ts": 1790001800.0
+     },
+     {
+      "actor": "engine",
+      "from_state": "analyzed",
+      "reason": "decision_recommended",
+      "to_state": "proposed",
+      "ts": 1790001800.0
+     }
+    ],
+    "idempotency_id": null,
+    "incident_id": "inc-1",
+    "incident_reopen": 0,
+    "incident_type": "system_service_restart",
+    "params": {
+     "incident": "inc-1"
+    },
+    "planned_changes": [],
+    "playbook_id": null,
+    "playbook_version": null,
+    "preflight": [],
+    "prerequisites": [],
+    "risk": {
+     "reasons": [],
+     "risk_class": 0
+    },
+    "rollback": {
+     "mechanism": "none",
+     "statement": null,
+     "status": "not_available"
+    },
+    "router_id": "rtr_11111111111111111111111111111111",
+    "state": "proposed",
+    "state_fingerprint": null,
+    "updated_at": 1790001800.0,
+    "verification": {
+     "after": {},
+     "before": {},
+     "checks": [],
+     "result": null
+    }
+   },
+   "effective_mode": "observe",
+   "generated_at": 1790001920.0,
+   "router_hold": {
+    "action_id": null,
+    "fleet": false,
+    "no_end": true,
+    "reason": "outcome_unknown",
+    "remaining_s": null
+   },
+   "v": 1
+  },
+  "status": 200
+ },
+ "held_overview": {
+  "body": {
+   "automatic_rollback": "not_available",
+   "counts": {
+    "by_state": {
+     "analyzed": 0,
+     "approved": 0,
+     "cancelled": 1,
+     "detected": 0,
+     "escalated": 0,
+     "executing": 0,
+     "failed": 0,
+     "manual_recovery_required": 0,
+     "preflight": 0,
+     "proposed": 1,
+     "rejected": 0,
+     "resolved": 0,
+     "rollback_pending": 0,
+     "rolled_back": 0,
+     "rolling_back": 0,
+     "verifying": 0,
+     "waiting_approval": 0
+    },
+    "open": 1,
+    "routers": 2,
+    "routers_held": 1,
+    "total": 2
+   },
+   "fleet": {
+    "held": false,
+    "hold": null,
+    "pause_reason": "store_lost",
+    "pause_remaining_s": 3600,
+    "paused": true
+   },
+   "generated_at": 1790001920.0,
+   "last_activity": 1790001800.0,
+   "pending_incidents": 1,
+   "release_mode": "observe_only",
+   "routers": [
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": true,
+     "hold": {
+      "action_id": null,
+      "fleet": false,
+      "no_end": true,
+      "reason": "outcome_unknown",
+      "remaining_s": null
+     },
+     "loaded": true,
+     "open": 1,
+     "router_id": "rtr_11111111111111111111111111111111"
+    },
+    {
+     "configured_mode": "auto_heal",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 0,
+     "router_id": "rtr_22222222222222222222222222222222"
+    }
+   ],
+   "status": "on",
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "held_plan": {
+  "body": {
+   "generated_at": 1790001920.0,
+   "plans": [
+    {
+     "action_id": "rem_00000000000000000000000000000002",
+     "action_type": "observe.evaluate",
+     "blockers": [
+      "no_write_path",
+      "mode_observe",
+      "router_held",
+      "fleet_paused",
+      "nothing_executable"
+     ],
+     "decision": {
+      "factors": [
+       {
+        "factor": "cause_level",
+        "reason": "cause_level_likely",
+        "value": 0.3
+       },
+       {
+        "factor": "cause_status",
+        "reason": "cause_status_hypothesis",
+        "value": 0.0
+       },
+       {
+        "factor": "incident_confidence",
+        "reason": "incident_confidence_scaled",
+        "value": 0.07
+       },
+       {
+        "factor": "source_families",
+        "reason": "two_or_more_source_families",
+        "value": 0.1
+       },
+       {
+        "factor": "target_fact",
+        "reason": "target_fact_none",
+        "value": 0.0
+       },
+       {
+        "factor": "prior_attempts",
+        "reason": "no_prior_attempts",
+        "value": 0.0
+       },
+       {
+        "factor": "config_change",
+        "reason": "config_change_unknown",
+        "value": -0.2
+       },
+       {
+        "factor": "severity",
+        "reason": "severity_unknown",
+        "value": -0.1
+       },
+       {
+        "factor": "clamp",
+        "reason": "within_range",
+        "value": 0.0
+       }
+      ],
+      "outcome": "recommended",
+      "score": 0.17,
+      "why": "all_rules_passed",
+      "why_not": null
+     },
+     "executable": false,
+     "explanation": {
+      "facts": {
+       "known": [
+        "role",
+        "identity_confirmed",
+        "in_maintenance",
+        "concurrent_repair",
+        "breaker_open",
+        "incident_type",
+        "cause_level",
+        "cause_status",
+        "confidence",
+        "source_families",
+        "is_root",
+        "prior_failed_attempts"
+       ],
+       "unknown": [
+        "reachable",
+        "dependants",
+        "target_on_mgmt_path",
+        "target_is_wireless_uplink",
+        "target_carries_dependants",
+        "service_enabled",
+        "service_dependant_routers",
+        "service_dependant_clients",
+        "service_config_unapplied",
+        "clients_on_router",
+        "clients_on_target",
+        "open_security_findings",
+        "diag_enabled",
+        "severity",
+        "temporal_only",
+        "evidence_fresh",
+        "target_fact",
+        "cause_outside_router",
+        "config_change_24h"
+       ]
+      },
+      "gate": {
+       "allowlisted": false,
+       "effective_mode": "observe",
+       "executable_now": false,
+       "in_release": true,
+       "permission": "run_read_only",
+       "reasons": []
+      },
+      "policy": {
+       "action_type": "observe.evaluate",
+       "catalog_version": 1,
+       "impact": {
+        "clients_on_router": null,
+        "clients_on_target": null,
+        "dependants": null,
+        "disruption": "none",
+        "est_outage_s": 0,
+        "service_dependant_clients": null,
+        "service_dependant_routers": null
+       },
+       "next_step": null,
+       "outcome": "recommended",
+       "params": {},
+       "refusal": null,
+       "risk": {
+        "assessed": true,
+        "base": 0,
+        "missing": [],
+        "reasons": [],
+        "risk_class": 0
+       },
+       "rules": [
+        {
+         "blocking": false,
+         "code": "temporal_link_diagnose_only",
+         "detail": {},
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "impact_summary",
+         "detail": {
+          "clients_on_router": null,
+          "clients_on_target": null,
+          "dependants": null,
+          "disruption": "none",
+          "est_outage_s": 0,
+          "service_dependant_clients": null,
+          "service_dependant_routers": null
+         },
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "recovery_statement",
+         "detail": {
+          "rollback": "read_only",
+          "statement": "read_only_nothing_changes"
+         },
+         "outcome": null
+        }
+       ],
+       "score": {
+        "contributions": [
+         {
+          "factor": "cause_level",
+          "points": 30,
+          "reason": "cause_level_likely"
+         },
+         {
+          "factor": "cause_status",
+          "points": 0,
+          "reason": "cause_status_hypothesis"
+         },
+         {
+          "factor": "incident_confidence",
+          "points": 7,
+          "reason": "incident_confidence_scaled"
+         },
+         {
+          "factor": "source_families",
+          "points": 10,
+          "reason": "two_or_more_source_families"
+         },
+         {
+          "factor": "target_fact",
+          "points": 0,
+          "reason": "target_fact_none"
+         },
+         {
+          "factor": "prior_attempts",
+          "points": 0,
+          "reason": "no_prior_attempts"
+         },
+         {
+          "factor": "config_change",
+          "points": -20,
+          "reason": "config_change_unknown"
+         },
+         {
+          "factor": "severity",
+          "points": -10,
+          "reason": "severity_unknown"
+         },
+         {
+          "factor": "clamp",
+          "points": 0,
+          "reason": "within_range"
+         }
+        ],
+        "total": 17,
+        "unit": 0.17
+       },
+       "why": "all_rules_passed",
+       "why_not": null,
+       "writes": false
+      },
+      "texts_de": {
+       "all_rules_passed": "Alle Regeln erfüllt.",
+       "cause_level": "Ursachenstufe",
+       "cause_level_likely": "Ursache wahrscheinlich.",
+       "cause_status": "Ursachenstatus",
+       "cause_status_hypothesis": "Ursache ist eine Vermutung.",
+       "clamp": "Begrenzung auf 0 bis 100",
+       "config_change": "Konfigurationsänderung",
+       "config_change_unknown": "Unbekannt, ob sich die Konfiguration geändert hat.",
+       "impact_summary": "Auswirkung: Clients, abhängige Router, geschätzte Unterbrechung.",
+       "incident_confidence": "Konfidenz des Vorfalls",
+       "incident_confidence_scaled": "Konfidenz von Network Intelligence, auf 10 Punkte skaliert.",
+       "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+       "prior_attempts": "Frühere Versuche",
+       "recovery_statement": "Aussage zur Wiederherstellung dieser Aktion.",
+       "severity": "Schweregrad",
+       "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
+       "source_families": "Quellenfamilien",
+       "target_fact": "Befund am Ziel",
+       "target_fact_none": "Kein Befund am Ziel.",
+       "temporal_link_diagnose_only": "Nur zeitlicher Zusammenhang: Diagnose ist der richtige Schritt.",
+       "two_or_more_source_families": "Zwei oder mehr unabhängige Quellenfamilien.",
+       "within_range": "Summe liegt zwischen 0 und 100."
+      }
+     },
+     "incident_id": "inc-1",
+     "incident_type": "system_service_restart",
+     "planned_changes": [],
+     "playbook_id": null,
+     "playbook_version": null,
+     "proposed_action_type": "observe.evaluate",
+     "risk": {
+      "reasons": [],
+      "risk_class": 0
+     },
+     "router_id": "rtr_11111111111111111111111111111111",
+     "state": "proposed"
+    }
+   ],
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "not_running": {
+  "body": {
+   "code": "not_running",
+   "details": {},
+   "message": "Self-Healing is not running"
+  },
+  "status": 503
+ },
+ "overview": {
+  "body": {
+   "automatic_rollback": "not_available",
+   "counts": {
+    "by_state": {
+     "analyzed": 0,
+     "approved": 0,
+     "cancelled": 1,
+     "detected": 0,
+     "escalated": 0,
+     "executing": 0,
+     "failed": 0,
+     "manual_recovery_required": 0,
+     "preflight": 0,
+     "proposed": 1,
+     "rejected": 0,
+     "resolved": 0,
+     "rollback_pending": 0,
+     "rolled_back": 0,
+     "rolling_back": 0,
+     "verifying": 0,
+     "waiting_approval": 0
+    },
+    "open": 1,
+    "routers": 2,
+    "routers_held": 0,
+    "total": 2
+   },
+   "fleet": {
+    "held": false,
+    "hold": null,
+    "pause_reason": null,
+    "pause_remaining_s": null,
+    "paused": false
+   },
+   "generated_at": 1790001920.0,
+   "last_activity": 1790001800.0,
+   "pending_incidents": 1,
+   "release_mode": "observe_only",
+   "routers": [
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 1,
+     "router_id": "rtr_11111111111111111111111111111111"
+    },
+    {
+     "configured_mode": "observe",
+     "effective_mode": "observe",
+     "held": false,
+     "hold": null,
+     "loaded": true,
+     "open": 0,
+     "router_id": "rtr_22222222222222222222222222222222"
+    }
+   ],
+   "status": "on",
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "plan_candidate": {
+  "body": {
+   "generated_at": 1790001920.0,
+   "plans": [
+    {
+     "action_id": "rem_00000000000000000000000000000002",
+     "action_type": "observe.evaluate",
+     "blockers": [
+      "no_write_path",
+      "mode_observe",
+      "nothing_executable"
+     ],
+     "decision": {
+      "factors": [
+       {
+        "factor": "cause_level",
+        "reason": "cause_level_likely",
+        "value": 0.3
+       },
+       {
+        "factor": "cause_status",
+        "reason": "cause_status_hypothesis",
+        "value": 0.0
+       },
+       {
+        "factor": "incident_confidence",
+        "reason": "incident_confidence_scaled",
+        "value": 0.07
+       },
+       {
+        "factor": "source_families",
+        "reason": "two_or_more_source_families",
+        "value": 0.1
+       },
+       {
+        "factor": "target_fact",
+        "reason": "target_fact_direct",
+        "value": 0.3
+       },
+       {
+        "factor": "prior_attempts",
+        "reason": "no_prior_attempts",
+        "value": 0.0
+       },
+       {
+        "factor": "config_change",
+        "reason": "no_config_change_24h",
+        "value": 0.0
+       },
+       {
+        "factor": "severity",
+        "reason": "severity_unknown",
+        "value": -0.1
+       },
+       {
+        "factor": "clamp",
+        "reason": "within_range",
+        "value": 0.0
+       }
+      ],
+      "outcome": "recommended",
+      "score": 0.67,
+      "why": "all_rules_passed",
+      "why_not": null
+     },
+     "executable": false,
+     "explanation": {
+      "candidate": {
+       "action_type": "service.restart",
+       "facts": {
+        "known": [
+         "role",
+         "identity_confirmed",
+         "reachable",
+         "dependants",
+         "service_enabled",
+         "service_dependant_routers",
+         "service_dependant_clients",
+         "service_config_unapplied",
+         "clients_on_router",
+         "open_security_findings",
+         "in_maintenance",
+         "concurrent_repair",
+         "breaker_open",
+         "incident_type",
+         "cause_level",
+         "cause_status",
+         "confidence",
+         "source_families",
+         "is_root",
+         "temporal_only",
+         "evidence_fresh",
+         "target_fact",
+         "cause_outside_router",
+         "prior_failed_attempts",
+         "config_change_24h"
+        ],
+        "unknown": [
+         "target_on_mgmt_path",
+         "target_is_wireless_uplink",
+         "target_carries_dependants",
+         "clients_on_target",
+         "diag_enabled",
+         "severity"
+        ]
+       },
+       "gate": {
+        "allowlisted": false,
+        "effective_mode": "observe",
+        "executable_now": false,
+        "in_release": false,
+        "permission": "recommend",
+        "reasons": [
+         "observe_mode"
+        ]
+       },
+       "label": "candidate",
+       "note": "not_the_record_decision",
+       "outcome": "requires_approval",
+       "planned_changes": [
+        {
+         "effect": "service.restart",
+         "kind": "service",
+         "target": "dnsmasq"
+        }
+       ],
+       "playbook_id": "dns_recovery",
+       "playbook_version": 1,
+       "policy": {
+        "action_type": "service.restart",
+        "catalog_version": 1,
+        "impact": {
+         "clients_on_router": 4,
+         "clients_on_target": null,
+         "dependants": 0,
+         "disruption": "service",
+         "est_outage_s": 5,
+         "service_dependant_clients": 3,
+         "service_dependant_routers": 0
+        },
+        "next_step": null,
+        "outcome": "requires_approval",
+        "params": {
+         "service": "dnsmasq"
+        },
+        "refusal": null,
+        "risk": {
+         "assessed": true,
+         "base": 2,
+         "missing": [],
+         "reasons": [
+          "clients_affected"
+         ],
+         "risk_class": 2
+        },
+        "rules": [
+         {
+          "blocking": false,
+          "code": "impact_summary",
+          "detail": {
+           "clients_on_router": 4,
+           "clients_on_target": null,
+           "dependants": 0,
+           "disruption": "service",
+           "est_outage_s": 5,
+           "service_dependant_clients": 3,
+           "service_dependant_routers": 0
+          },
+          "outcome": null
+         },
+         {
+          "blocking": false,
+          "code": "recovery_statement",
+          "detail": {
+           "rollback": "manual_recovery",
+           "statement": "applies_saved_config_no_undo_manual_if_not_back"
+          },
+          "outcome": null
+         }
+        ],
+        "score": {
+         "contributions": [
+          {
+           "factor": "cause_level",
+           "points": 30,
+           "reason": "cause_level_likely"
+          },
+          {
+           "factor": "cause_status",
+           "points": 0,
+           "reason": "cause_status_hypothesis"
+          },
+          {
+           "factor": "incident_confidence",
+           "points": 7,
+           "reason": "incident_confidence_scaled"
+          },
+          {
+           "factor": "source_families",
+           "points": 10,
+           "reason": "two_or_more_source_families"
+          },
+          {
+           "factor": "target_fact",
+           "points": 30,
+           "reason": "target_fact_direct"
+          },
+          {
+           "factor": "prior_attempts",
+           "points": 0,
+           "reason": "no_prior_attempts"
+          },
+          {
+           "factor": "config_change",
+           "points": 0,
+           "reason": "no_config_change_24h"
+          },
+          {
+           "factor": "severity",
+           "points": -10,
+           "reason": "severity_unknown"
+          },
+          {
+           "factor": "clamp",
+           "points": 0,
+           "reason": "within_range"
+          }
+         ],
+         "total": 67,
+         "unit": 0.67
+        },
+        "why": "risk_needs_approval",
+        "why_not": null,
+        "writes": true
+       },
+       "texts_de": {
+        "cause_level": "Ursachenstufe",
+        "cause_level_likely": "Ursache wahrscheinlich.",
+        "cause_status": "Ursachenstatus",
+        "cause_status_hypothesis": "Ursache ist eine Vermutung.",
+        "clamp": "Begrenzung auf 0 bis 100",
+        "clients_affected": "Verbundene Clients wären betroffen.",
+        "config_change": "Konfigurationsänderung",
+        "impact_summary": "Auswirkung: Clients, abhängige Router, geschätzte Unterbrechung.",
+        "incident_confidence": "Konfidenz des Vorfalls",
+        "incident_confidence_scaled": "Konfidenz von Network Intelligence, auf 10 Punkte skaliert.",
+        "no_config_change_24h": "Keine Konfigurationsänderung in 24 h.",
+        "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+        "observe_mode": "Modus Beobachten: nur Empfehlung.",
+        "prior_attempts": "Frühere Versuche",
+        "recovery_statement": "Aussage zur Wiederherstellung dieser Aktion.",
+        "risk_needs_approval": "Risiko 2 oder höher: nur mit ausdrücklicher Freigabe.",
+        "severity": "Schweregrad",
+        "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
+        "source_families": "Quellenfamilien",
+        "target_fact": "Befund am Ziel",
+        "target_fact_direct": "Direkter Befund am Ziel.",
+        "two_or_more_source_families": "Zwei oder mehr unabhängige Quellenfamilien.",
+        "within_range": "Summe liegt zwischen 0 und 100."
+       }
+      },
+      "facts": {
+       "known": [
+        "role",
+        "identity_confirmed",
+        "reachable",
+        "dependants",
+        "service_enabled",
+        "service_dependant_routers",
+        "service_dependant_clients",
+        "service_config_unapplied",
+        "clients_on_router",
+        "open_security_findings",
+        "in_maintenance",
+        "concurrent_repair",
+        "breaker_open",
+        "incident_type",
+        "cause_level",
+        "cause_status",
+        "confidence",
+        "source_families",
+        "is_root",
+        "temporal_only",
+        "evidence_fresh",
+        "target_fact",
+        "cause_outside_router",
+        "prior_failed_attempts",
+        "config_change_24h"
+       ],
+       "unknown": [
+        "target_on_mgmt_path",
+        "target_is_wireless_uplink",
+        "target_carries_dependants",
+        "clients_on_target",
+        "diag_enabled",
+        "severity"
+       ]
+      },
+      "gate": {
+       "allowlisted": false,
+       "effective_mode": "observe",
+       "executable_now": false,
+       "in_release": true,
+       "permission": "run_read_only",
+       "reasons": []
+      },
+      "policy": {
+       "action_type": "observe.evaluate",
+       "catalog_version": 1,
+       "impact": {
+        "clients_on_router": 4,
+        "clients_on_target": null,
+        "dependants": 0,
+        "disruption": "none",
+        "est_outage_s": 0,
+        "service_dependant_clients": 3,
+        "service_dependant_routers": 0
+       },
+       "next_step": null,
+       "outcome": "recommended",
+       "params": {},
+       "refusal": null,
+       "risk": {
+        "assessed": true,
+        "base": 0,
+        "missing": [],
+        "reasons": [],
+        "risk_class": 0
+       },
+       "rules": [
+        {
+         "blocking": false,
+         "code": "impact_summary",
+         "detail": {
+          "clients_on_router": 4,
+          "clients_on_target": null,
+          "dependants": 0,
+          "disruption": "none",
+          "est_outage_s": 0,
+          "service_dependant_clients": 3,
+          "service_dependant_routers": 0
+         },
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "recovery_statement",
+         "detail": {
+          "rollback": "read_only",
+          "statement": "read_only_nothing_changes"
+         },
+         "outcome": null
+        }
+       ],
+       "score": {
+        "contributions": [
+         {
+          "factor": "cause_level",
+          "points": 30,
+          "reason": "cause_level_likely"
+         },
+         {
+          "factor": "cause_status",
+          "points": 0,
+          "reason": "cause_status_hypothesis"
+         },
+         {
+          "factor": "incident_confidence",
+          "points": 7,
+          "reason": "incident_confidence_scaled"
+         },
+         {
+          "factor": "source_families",
+          "points": 10,
+          "reason": "two_or_more_source_families"
+         },
+         {
+          "factor": "target_fact",
+          "points": 30,
+          "reason": "target_fact_direct"
+         },
+         {
+          "factor": "prior_attempts",
+          "points": 0,
+          "reason": "no_prior_attempts"
+         },
+         {
+          "factor": "config_change",
+          "points": 0,
+          "reason": "no_config_change_24h"
+         },
+         {
+          "factor": "severity",
+          "points": -10,
+          "reason": "severity_unknown"
+         },
+         {
+          "factor": "clamp",
+          "points": 0,
+          "reason": "within_range"
+         }
+        ],
+        "total": 67,
+        "unit": 0.67
+       },
+       "why": "all_rules_passed",
+       "why_not": null,
+       "writes": false
+      },
+      "texts_de": {
+       "all_rules_passed": "Alle Regeln erfüllt.",
+       "cause_level": "Ursachenstufe",
+       "cause_level_likely": "Ursache wahrscheinlich.",
+       "cause_status": "Ursachenstatus",
+       "cause_status_hypothesis": "Ursache ist eine Vermutung.",
+       "clamp": "Begrenzung auf 0 bis 100",
+       "config_change": "Konfigurationsänderung",
+       "impact_summary": "Auswirkung: Clients, abhängige Router, geschätzte Unterbrechung.",
+       "incident_confidence": "Konfidenz des Vorfalls",
+       "incident_confidence_scaled": "Konfidenz von Network Intelligence, auf 10 Punkte skaliert.",
+       "no_config_change_24h": "Keine Konfigurationsänderung in 24 h.",
+       "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+       "prior_attempts": "Frühere Versuche",
+       "recovery_statement": "Aussage zur Wiederherstellung dieser Aktion.",
+       "severity": "Schweregrad",
+       "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
+       "source_families": "Quellenfamilien",
+       "target_fact": "Befund am Ziel",
+       "target_fact_direct": "Direkter Befund am Ziel.",
+       "two_or_more_source_families": "Zwei oder mehr unabhängige Quellenfamilien.",
+       "within_range": "Summe liegt zwischen 0 und 100."
+      }
+     },
+     "incident_id": "inc-1",
+     "incident_type": "system_service_restart",
+     "planned_changes": [],
+     "playbook_id": null,
+     "playbook_version": null,
+     "proposed_action_type": "observe.evaluate",
+     "risk": {
+      "reasons": [],
+      "risk_class": 0
+     },
+     "router_id": "rtr_11111111111111111111111111111111",
+     "state": "proposed"
+    }
+   ],
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "plan_closed": {
+  "body": {
+   "generated_at": 1790001920.0,
+   "plans": [
+    {
+     "action_id": "rem_00000000000000000000000000000001",
+     "action_type": "observe.evaluate",
+     "blockers": [
+      "no_write_path",
+      "not_in_planning",
+      "mode_observe",
+      "nothing_executable"
+     ],
+     "decision": {
+      "factors": [
+       {
+        "factor": "cause_level",
+        "reason": "cause_level_likely",
+        "value": 0.3
+       },
+       {
+        "factor": "cause_status",
+        "reason": "cause_status_confirmed",
+        "value": 0.1
+       },
+       {
+        "factor": "incident_confidence",
+        "reason": "incident_confidence_scaled",
+        "value": 0.07
+       },
+       {
+        "factor": "source_families",
+        "reason": "two_or_more_source_families",
+        "value": 0.1
+       },
+       {
+        "factor": "target_fact",
+        "reason": "target_fact_none",
+        "value": 0.0
+       },
+       {
+        "factor": "prior_attempts",
+        "reason": "no_prior_attempts",
+        "value": 0.0
+       },
+       {
+        "factor": "config_change",
+        "reason": "config_change_unknown",
+        "value": -0.2
+       },
+       {
+        "factor": "severity",
+        "reason": "severity_unknown",
+        "value": -0.1
+       },
+       {
+        "factor": "clamp",
+        "reason": "within_range",
+        "value": 0.0
+       }
+      ],
+      "outcome": "recommended",
+      "score": 0.27,
+      "why": "all_rules_passed",
+      "why_not": null
+     },
+     "executable": false,
+     "explanation": {
+      "facts": {
+       "known": [
+        "role",
+        "identity_confirmed",
+        "in_maintenance",
+        "concurrent_repair",
+        "breaker_open",
+        "incident_type",
+        "cause_level",
+        "cause_status",
+        "confidence",
+        "source_families",
+        "is_root",
+        "prior_failed_attempts"
+       ],
+       "unknown": [
+        "reachable",
+        "dependants",
+        "target_on_mgmt_path",
+        "target_is_wireless_uplink",
+        "target_carries_dependants",
+        "service_enabled",
+        "service_dependant_routers",
+        "service_dependant_clients",
+        "service_config_unapplied",
+        "clients_on_router",
+        "clients_on_target",
+        "open_security_findings",
+        "diag_enabled",
+        "severity",
+        "temporal_only",
+        "evidence_fresh",
+        "target_fact",
+        "cause_outside_router",
+        "config_change_24h"
+       ]
+      },
+      "gate": {
+       "allowlisted": false,
+       "effective_mode": "observe",
+       "executable_now": false,
+       "in_release": true,
+       "permission": "run_read_only",
+       "reasons": []
+      },
+      "policy": {
+       "action_type": "observe.evaluate",
+       "catalog_version": 1,
+       "impact": {
+        "clients_on_router": null,
+        "clients_on_target": null,
+        "dependants": null,
+        "disruption": "none",
+        "est_outage_s": 0,
+        "service_dependant_clients": null,
+        "service_dependant_routers": null
+       },
+       "next_step": null,
+       "outcome": "recommended",
+       "params": {},
+       "refusal": null,
+       "risk": {
+        "assessed": true,
+        "base": 0,
+        "missing": [],
+        "reasons": [],
+        "risk_class": 0
+       },
+       "rules": [
+        {
+         "blocking": false,
+         "code": "temporal_link_diagnose_only",
+         "detail": {},
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "impact_summary",
+         "detail": {
+          "clients_on_router": null,
+          "clients_on_target": null,
+          "dependants": null,
+          "disruption": "none",
+          "est_outage_s": 0,
+          "service_dependant_clients": null,
+          "service_dependant_routers": null
+         },
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "recovery_statement",
+         "detail": {
+          "rollback": "read_only",
+          "statement": "read_only_nothing_changes"
+         },
+         "outcome": null
+        }
+       ],
+       "score": {
+        "contributions": [
+         {
+          "factor": "cause_level",
+          "points": 30,
+          "reason": "cause_level_likely"
+         },
+         {
+          "factor": "cause_status",
+          "points": 10,
+          "reason": "cause_status_confirmed"
+         },
+         {
+          "factor": "incident_confidence",
+          "points": 7,
+          "reason": "incident_confidence_scaled"
+         },
+         {
+          "factor": "source_families",
+          "points": 10,
+          "reason": "two_or_more_source_families"
+         },
+         {
+          "factor": "target_fact",
+          "points": 0,
+          "reason": "target_fact_none"
+         },
+         {
+          "factor": "prior_attempts",
+          "points": 0,
+          "reason": "no_prior_attempts"
+         },
+         {
+          "factor": "config_change",
+          "points": -20,
+          "reason": "config_change_unknown"
+         },
+         {
+          "factor": "severity",
+          "points": -10,
+          "reason": "severity_unknown"
+         },
+         {
+          "factor": "clamp",
+          "points": 0,
+          "reason": "within_range"
+         }
+        ],
+        "total": 27,
+        "unit": 0.27
+       },
+       "why": "all_rules_passed",
+       "why_not": null,
+       "writes": false
+      },
+      "texts_de": {
+       "all_rules_passed": "Alle Regeln erfüllt.",
+       "cause_level": "Ursachenstufe",
+       "cause_level_likely": "Ursache wahrscheinlich.",
+       "cause_status": "Ursachenstatus",
+       "cause_status_confirmed": "Ursache gemessen bestätigt.",
+       "clamp": "Begrenzung auf 0 bis 100",
+       "config_change": "Konfigurationsänderung",
+       "config_change_unknown": "Unbekannt, ob sich die Konfiguration geändert hat.",
+       "impact_summary": "Auswirkung: Clients, abhängige Router, geschätzte Unterbrechung.",
+       "incident_confidence": "Konfidenz des Vorfalls",
+       "incident_confidence_scaled": "Konfidenz von Network Intelligence, auf 10 Punkte skaliert.",
+       "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+       "prior_attempts": "Frühere Versuche",
+       "recovery_statement": "Aussage zur Wiederherstellung dieser Aktion.",
+       "severity": "Schweregrad",
+       "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
+       "source_families": "Quellenfamilien",
+       "target_fact": "Befund am Ziel",
+       "target_fact_none": "Kein Befund am Ziel.",
+       "temporal_link_diagnose_only": "Nur zeitlicher Zusammenhang: Diagnose ist der richtige Schritt.",
+       "two_or_more_source_families": "Zwei oder mehr unabhängige Quellenfamilien.",
+       "within_range": "Summe liegt zwischen 0 und 100."
+      }
+     },
+     "incident_id": "inc-2",
+     "incident_type": "wan_down",
+     "planned_changes": [],
+     "playbook_id": null,
+     "playbook_version": null,
+     "proposed_action_type": "observe.evaluate",
+     "risk": {
+      "reasons": [],
+      "risk_class": 0
+     },
+     "router_id": "rtr_22222222222222222222222222222222",
+     "state": "cancelled"
+    }
+   ],
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "plan_open": {
+  "body": {
+   "generated_at": 1790001920.0,
+   "plans": [
+    {
+     "action_id": "rem_00000000000000000000000000000002",
+     "action_type": "observe.evaluate",
+     "blockers": [
+      "no_write_path",
+      "mode_observe",
+      "nothing_executable"
+     ],
+     "decision": {
+      "factors": [
+       {
+        "factor": "cause_level",
+        "reason": "cause_level_likely",
+        "value": 0.3
+       },
+       {
+        "factor": "cause_status",
+        "reason": "cause_status_hypothesis",
+        "value": 0.0
+       },
+       {
+        "factor": "incident_confidence",
+        "reason": "incident_confidence_scaled",
+        "value": 0.07
+       },
+       {
+        "factor": "source_families",
+        "reason": "two_or_more_source_families",
+        "value": 0.1
+       },
+       {
+        "factor": "target_fact",
+        "reason": "target_fact_none",
+        "value": 0.0
+       },
+       {
+        "factor": "prior_attempts",
+        "reason": "no_prior_attempts",
+        "value": 0.0
+       },
+       {
+        "factor": "config_change",
+        "reason": "config_change_unknown",
+        "value": -0.2
+       },
+       {
+        "factor": "severity",
+        "reason": "severity_unknown",
+        "value": -0.1
+       },
+       {
+        "factor": "clamp",
+        "reason": "within_range",
+        "value": 0.0
+       }
+      ],
+      "outcome": "recommended",
+      "score": 0.17,
+      "why": "all_rules_passed",
+      "why_not": null
+     },
+     "executable": false,
+     "explanation": {
+      "facts": {
+       "known": [
+        "role",
+        "identity_confirmed",
+        "in_maintenance",
+        "concurrent_repair",
+        "breaker_open",
+        "incident_type",
+        "cause_level",
+        "cause_status",
+        "confidence",
+        "source_families",
+        "is_root",
+        "prior_failed_attempts"
+       ],
+       "unknown": [
+        "reachable",
+        "dependants",
+        "target_on_mgmt_path",
+        "target_is_wireless_uplink",
+        "target_carries_dependants",
+        "service_enabled",
+        "service_dependant_routers",
+        "service_dependant_clients",
+        "service_config_unapplied",
+        "clients_on_router",
+        "clients_on_target",
+        "open_security_findings",
+        "diag_enabled",
+        "severity",
+        "temporal_only",
+        "evidence_fresh",
+        "target_fact",
+        "cause_outside_router",
+        "config_change_24h"
+       ]
+      },
+      "gate": {
+       "allowlisted": false,
+       "effective_mode": "observe",
+       "executable_now": false,
+       "in_release": true,
+       "permission": "run_read_only",
+       "reasons": []
+      },
+      "policy": {
+       "action_type": "observe.evaluate",
+       "catalog_version": 1,
+       "impact": {
+        "clients_on_router": null,
+        "clients_on_target": null,
+        "dependants": null,
+        "disruption": "none",
+        "est_outage_s": 0,
+        "service_dependant_clients": null,
+        "service_dependant_routers": null
+       },
+       "next_step": null,
+       "outcome": "recommended",
+       "params": {},
+       "refusal": null,
+       "risk": {
+        "assessed": true,
+        "base": 0,
+        "missing": [],
+        "reasons": [],
+        "risk_class": 0
+       },
+       "rules": [
+        {
+         "blocking": false,
+         "code": "temporal_link_diagnose_only",
+         "detail": {},
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "impact_summary",
+         "detail": {
+          "clients_on_router": null,
+          "clients_on_target": null,
+          "dependants": null,
+          "disruption": "none",
+          "est_outage_s": 0,
+          "service_dependant_clients": null,
+          "service_dependant_routers": null
+         },
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "recovery_statement",
+         "detail": {
+          "rollback": "read_only",
+          "statement": "read_only_nothing_changes"
+         },
+         "outcome": null
+        }
+       ],
+       "score": {
+        "contributions": [
+         {
+          "factor": "cause_level",
+          "points": 30,
+          "reason": "cause_level_likely"
+         },
+         {
+          "factor": "cause_status",
+          "points": 0,
+          "reason": "cause_status_hypothesis"
+         },
+         {
+          "factor": "incident_confidence",
+          "points": 7,
+          "reason": "incident_confidence_scaled"
+         },
+         {
+          "factor": "source_families",
+          "points": 10,
+          "reason": "two_or_more_source_families"
+         },
+         {
+          "factor": "target_fact",
+          "points": 0,
+          "reason": "target_fact_none"
+         },
+         {
+          "factor": "prior_attempts",
+          "points": 0,
+          "reason": "no_prior_attempts"
+         },
+         {
+          "factor": "config_change",
+          "points": -20,
+          "reason": "config_change_unknown"
+         },
+         {
+          "factor": "severity",
+          "points": -10,
+          "reason": "severity_unknown"
+         },
+         {
+          "factor": "clamp",
+          "points": 0,
+          "reason": "within_range"
+         }
+        ],
+        "total": 17,
+        "unit": 0.17
+       },
+       "why": "all_rules_passed",
+       "why_not": null,
+       "writes": false
+      },
+      "texts_de": {
+       "all_rules_passed": "Alle Regeln erfüllt.",
+       "cause_level": "Ursachenstufe",
+       "cause_level_likely": "Ursache wahrscheinlich.",
+       "cause_status": "Ursachenstatus",
+       "cause_status_hypothesis": "Ursache ist eine Vermutung.",
+       "clamp": "Begrenzung auf 0 bis 100",
+       "config_change": "Konfigurationsänderung",
+       "config_change_unknown": "Unbekannt, ob sich die Konfiguration geändert hat.",
+       "impact_summary": "Auswirkung: Clients, abhängige Router, geschätzte Unterbrechung.",
+       "incident_confidence": "Konfidenz des Vorfalls",
+       "incident_confidence_scaled": "Konfidenz von Network Intelligence, auf 10 Punkte skaliert.",
+       "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+       "prior_attempts": "Frühere Versuche",
+       "recovery_statement": "Aussage zur Wiederherstellung dieser Aktion.",
+       "severity": "Schweregrad",
+       "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
+       "source_families": "Quellenfamilien",
+       "target_fact": "Befund am Ziel",
+       "target_fact_none": "Kein Befund am Ziel.",
+       "temporal_link_diagnose_only": "Nur zeitlicher Zusammenhang: Diagnose ist der richtige Schritt.",
+       "two_or_more_source_families": "Zwei oder mehr unabhängige Quellenfamilien.",
+       "within_range": "Summe liegt zwischen 0 und 100."
+      }
+     },
+     "incident_id": "inc-1",
+     "incident_type": "system_service_restart",
+     "planned_changes": [],
+     "playbook_id": null,
+     "playbook_version": null,
+     "proposed_action_type": "observe.evaluate",
+     "risk": {
+      "reasons": [],
+      "risk_class": 0
+     },
+     "router_id": "rtr_11111111111111111111111111111111",
+     "state": "proposed"
+    }
+   ],
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "plans": {
+  "body": {
+   "generated_at": 1790001920.0,
+   "plans": [
+    {
+     "action_id": "rem_00000000000000000000000000000002",
+     "action_type": "observe.evaluate",
+     "blockers": [
+      "no_write_path",
+      "mode_observe",
+      "nothing_executable"
+     ],
+     "decision": {
+      "factors": [
+       {
+        "factor": "cause_level",
+        "reason": "cause_level_likely",
+        "value": 0.3
+       },
+       {
+        "factor": "cause_status",
+        "reason": "cause_status_hypothesis",
+        "value": 0.0
+       },
+       {
+        "factor": "incident_confidence",
+        "reason": "incident_confidence_scaled",
+        "value": 0.07
+       },
+       {
+        "factor": "source_families",
+        "reason": "two_or_more_source_families",
+        "value": 0.1
+       },
+       {
+        "factor": "target_fact",
+        "reason": "target_fact_none",
+        "value": 0.0
+       },
+       {
+        "factor": "prior_attempts",
+        "reason": "no_prior_attempts",
+        "value": 0.0
+       },
+       {
+        "factor": "config_change",
+        "reason": "config_change_unknown",
+        "value": -0.2
+       },
+       {
+        "factor": "severity",
+        "reason": "severity_unknown",
+        "value": -0.1
+       },
+       {
+        "factor": "clamp",
+        "reason": "within_range",
+        "value": 0.0
+       }
+      ],
+      "outcome": "recommended",
+      "score": 0.17,
+      "why": "all_rules_passed",
+      "why_not": null
+     },
+     "executable": false,
+     "explanation": {
+      "facts": {
+       "known": [
+        "role",
+        "identity_confirmed",
+        "in_maintenance",
+        "concurrent_repair",
+        "breaker_open",
+        "incident_type",
+        "cause_level",
+        "cause_status",
+        "confidence",
+        "source_families",
+        "is_root",
+        "prior_failed_attempts"
+       ],
+       "unknown": [
+        "reachable",
+        "dependants",
+        "target_on_mgmt_path",
+        "target_is_wireless_uplink",
+        "target_carries_dependants",
+        "service_enabled",
+        "service_dependant_routers",
+        "service_dependant_clients",
+        "service_config_unapplied",
+        "clients_on_router",
+        "clients_on_target",
+        "open_security_findings",
+        "diag_enabled",
+        "severity",
+        "temporal_only",
+        "evidence_fresh",
+        "target_fact",
+        "cause_outside_router",
+        "config_change_24h"
+       ]
+      },
+      "gate": {
+       "allowlisted": false,
+       "effective_mode": "observe",
+       "executable_now": false,
+       "in_release": true,
+       "permission": "run_read_only",
+       "reasons": []
+      },
+      "policy": {
+       "action_type": "observe.evaluate",
+       "catalog_version": 1,
+       "impact": {
+        "clients_on_router": null,
+        "clients_on_target": null,
+        "dependants": null,
+        "disruption": "none",
+        "est_outage_s": 0,
+        "service_dependant_clients": null,
+        "service_dependant_routers": null
+       },
+       "next_step": null,
+       "outcome": "recommended",
+       "params": {},
+       "refusal": null,
+       "risk": {
+        "assessed": true,
+        "base": 0,
+        "missing": [],
+        "reasons": [],
+        "risk_class": 0
+       },
+       "rules": [
+        {
+         "blocking": false,
+         "code": "temporal_link_diagnose_only",
+         "detail": {},
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "impact_summary",
+         "detail": {
+          "clients_on_router": null,
+          "clients_on_target": null,
+          "dependants": null,
+          "disruption": "none",
+          "est_outage_s": 0,
+          "service_dependant_clients": null,
+          "service_dependant_routers": null
+         },
+         "outcome": null
+        },
+        {
+         "blocking": false,
+         "code": "recovery_statement",
+         "detail": {
+          "rollback": "read_only",
+          "statement": "read_only_nothing_changes"
+         },
+         "outcome": null
+        }
+       ],
+       "score": {
+        "contributions": [
+         {
+          "factor": "cause_level",
+          "points": 30,
+          "reason": "cause_level_likely"
+         },
+         {
+          "factor": "cause_status",
+          "points": 0,
+          "reason": "cause_status_hypothesis"
+         },
+         {
+          "factor": "incident_confidence",
+          "points": 7,
+          "reason": "incident_confidence_scaled"
+         },
+         {
+          "factor": "source_families",
+          "points": 10,
+          "reason": "two_or_more_source_families"
+         },
+         {
+          "factor": "target_fact",
+          "points": 0,
+          "reason": "target_fact_none"
+         },
+         {
+          "factor": "prior_attempts",
+          "points": 0,
+          "reason": "no_prior_attempts"
+         },
+         {
+          "factor": "config_change",
+          "points": -20,
+          "reason": "config_change_unknown"
+         },
+         {
+          "factor": "severity",
+          "points": -10,
+          "reason": "severity_unknown"
+         },
+         {
+          "factor": "clamp",
+          "points": 0,
+          "reason": "within_range"
+         }
+        ],
+        "total": 17,
+        "unit": 0.17
+       },
+       "why": "all_rules_passed",
+       "why_not": null,
+       "writes": false
+      },
+      "texts_de": {
+       "all_rules_passed": "Alle Regeln erfüllt.",
+       "cause_level": "Ursachenstufe",
+       "cause_level_likely": "Ursache wahrscheinlich.",
+       "cause_status": "Ursachenstatus",
+       "cause_status_hypothesis": "Ursache ist eine Vermutung.",
+       "clamp": "Begrenzung auf 0 bis 100",
+       "config_change": "Konfigurationsänderung",
+       "config_change_unknown": "Unbekannt, ob sich die Konfiguration geändert hat.",
+       "impact_summary": "Auswirkung: Clients, abhängige Router, geschätzte Unterbrechung.",
+       "incident_confidence": "Konfidenz des Vorfalls",
+       "incident_confidence_scaled": "Konfidenz von Network Intelligence, auf 10 Punkte skaliert.",
+       "no_prior_attempts": "Keine früheren Versuche in 24 h.",
+       "prior_attempts": "Frühere Versuche",
+       "recovery_statement": "Aussage zur Wiederherstellung dieser Aktion.",
+       "severity": "Schweregrad",
+       "severity_unknown": "Schweregrad unbekannt (zählt wie ein Hinweis).",
+       "source_families": "Quellenfamilien",
+       "target_fact": "Befund am Ziel",
+       "target_fact_none": "Kein Befund am Ziel.",
+       "temporal_link_diagnose_only": "Nur zeitlicher Zusammenhang: Diagnose ist der richtige Schritt.",
+       "two_or_more_source_families": "Zwei oder mehr unabhängige Quellenfamilien.",
+       "within_range": "Summe liegt zwischen 0 und 100."
+      }
+     },
+     "incident_id": "inc-1",
+     "incident_type": "system_service_restart",
+     "planned_changes": [],
+     "playbook_id": null,
+     "playbook_version": null,
+     "proposed_action_type": "observe.evaluate",
+     "risk": {
+      "reasons": [],
+      "risk_class": 0
+     },
+     "router_id": "rtr_11111111111111111111111111111111",
+     "state": "proposed"
+    }
+   ],
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "settings": {
+  "body": {
+   "generated_at": 1790001920.0,
+   "limits": {
+    "max_actions": 500,
+    "max_open_per_router": 20,
+    "store_max_bytes": 1000000,
+    "terminal_retention_s": 7776000
+   },
+   "module_switch": true,
+   "release_mode": "observe_only",
+   "settings": {
+    "enabled": true,
+    "limits": {
+     "backoff_base_s": 1800,
+     "backoff_cap_s": 86400,
+     "cooldown_s": 1800,
+     "fleet_concurrency": 1,
+     "fleet_failure_threshold": 3,
+     "fleet_pause_s": 86400,
+     "max_attempts_24h": 2
+    },
+    "routers": {}
+   },
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "unknown_action": {
+  "body": {
+   "code": "unknown_action",
+   "details": {},
+   "message": "Unknown action"
+  },
+  "status": 404
+ },
+ "user_actions": {
+  "body": {
+   "code": "authorization_denied",
+   "details": {},
+   "message": "This is available to administrators only"
+  },
+  "status": 403
+ },
+ "user_overview": {
+  "body": {
+   "automatic_rollback": "not_available",
+   "counts": {
+    "by_state": {
+     "analyzed": 0,
+     "approved": 0,
+     "cancelled": 1,
+     "detected": 0,
+     "escalated": 0,
+     "executing": 0,
+     "failed": 0,
+     "manual_recovery_required": 0,
+     "preflight": 0,
+     "proposed": 1,
+     "rejected": 0,
+     "resolved": 0,
+     "rollback_pending": 0,
+     "rolled_back": 0,
+     "rolling_back": 0,
+     "verifying": 0,
+     "waiting_approval": 0
+    },
+    "open": 1,
+    "routers": 2,
+    "routers_held": 0,
+    "total": 2
+   },
+   "fleet": {
+    "held": false,
+    "paused": false
+   },
+   "generated_at": 1790001920.0,
+   "last_activity": 1790001780.0,
+   "release_mode": "observe_only",
+   "status": "on",
+   "v": 1,
+   "write_path": false
+  },
+  "status": 200
+ },
+ "user_overview_closed_panel": {
+  "body": {
+   "code": "authorization_denied",
+   "details": {},
+   "message": "This is available to administrators only"
+  },
+  "status": 403
+ }
+}

@@ -133,17 +133,35 @@ def test_the_jump_table_is_the_backend_s_in_both_directions() -> None:
 
 
 def test_every_jump_tab_is_a_registered_panel_tab_and_back() -> None:
+    # Every Enterprise tab the panel registers (``registerEnterpriseTab``),
+    # pinned: a new tab is added here on purpose and then either becomes a
+    # jump target (``tm_sources.TAB_*``) or is named in not_a_jump_target.
+    registered = [
+        "config",
+        "diagnostics",
+        "security",
+        "selfhealing",
+        "timemachine",
+        "traffic",
+        "wifi",
+    ]
+    # Registered tabs no Time Machine jump opens. "selfhealing" (1.53.0,
+    # package J): the read-only Self-Healing Center is not a place a mark
+    # of the Time Machine points to (owner decision on PR #84).
+    not_a_jump_target = {"selfhealing"}
     tabs = registered_tabs()
-    assert len(tabs) == 6, tabs
+    assert sorted(tabs) == registered, tabs
+    assert not_a_jump_target <= set(tabs)
     backend = _consts(tm_sources, "TAB_")
+    assert not backend & not_a_jump_target
     texts = _table("JUMP_TAB_TEXT")
     assert set(texts) == backend
     # each tab a jump names is registered in the panel, under the same title
     for tab in backend:
         assert tab in tabs, tab
         assert texts[tab] == tabs[tab], tab
-    # and each registered tab is one a jump can name
-    assert set(tabs) == backend
+    # and each registered tab is one a jump can name, except the named ones
+    assert set(tabs) - not_a_jump_target == backend
     # every tab of the tables is a known tab (or by_kind / none)
     named = set(_table("JUMP_REF_TAB").values()) | set(_table("JUMP_KIND_TAB").values())
     assert named - {"by_kind", "none"} <= backend

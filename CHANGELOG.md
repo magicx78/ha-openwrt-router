@@ -617,6 +617,56 @@ Abschnitt 7.2.
   grünem Stand: 115 Mutationen (je eine für jede in den beiden Reviews geänderte Regel, auch
   die, die `no_change_seen` wieder zu „nein“ macht), alle scheitern.
 
+### Self-Healing, Paket J (Tab „Self-Healing Center“, nur lesend)
+
+Unter Enterprise gibt es den Tab **„Self-Healing“** (nach Netzwerkdiagnose). Er zeigt nur an,
+was Self-Healing beobachtet, und hat **keinen Knopf, der etwas ändert**: kein Freigeben,
+Ausführen, Aufheben, Pausieren, kein Moduswechsel. Er stellt nur GET-Anfragen an die fünf
+lesenden Routen (`overview`, `actions`, `actions/{id}`, `plans`, `settings`). Kein
+Router-Aufruf, keine neue Route, keine Entität, keine geänderte unique_id; im Backend ändert
+sich nichts. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 13.
+
+- **Oben, in jedem Zustand:** „Nur beobachten – diese Version ändert nie etwas an einem
+  Router.“
+- **Übersicht** (Zahlen je Zustand, letzte Aktivität, wartende Vorfälle, „Automatischer
+  Rollback: auf dieser Plattform nicht verfügbar“), **Router und Modus** (eingestellter und
+  geltender Modus, Sperren und Flotten-Pause mit Grund), **Datensätze** mit Filter und je
+  Datensatz Verlauf, Erklärung, Kandidat mit dem Etikett „Kandidat – nicht ausgeführt“, „Was
+  würde blockieren“ und Zähler, **Einstellungen** nur zur Anzeige.
+- **Wahr oder unbekannt:** Fehlt ein Wert, steht „unbekannt“ mit Grund, nie 0 oder grün. Die
+  Kachel „Blockierte riskante Aktionen“ steht auf „unbekannt“, weil keine Route diese Zahl
+  liefert. Ein fehlgeschlagener Abruf zeigt einen Fehler, „noch nichts beobachtet“ einen
+  eigenen Zustand (nur bei 0 Datensätzen und leerer Liste), ein ausgeschaltetes Modul den
+  Kasten „ausgeschaltet“.
+- **Nie ein ruhiger Zustand aus einer kaputten, unvollständigen oder alten Antwort:** Eine
+  Antwort ohne JSON oder in falscher Form ist ein Fehler („nicht lesbar“); unlesbare Zeilen
+  werden gezählt, eine Gesamtzahl, die nicht zu den Zeilen passt, wird genannt. Nach einem
+  gescheiterten Aktualisieren sind die alten Werte gestrichelt gerahmt und als „Veraltet“ mit
+  ihrem Stand markiert. Ein fehlender Schlüssel heißt „unbekannt“, nur ein ausdrückliches
+  `null` „keine“; ohne Plan steht „kein Plan in der Antwort“ statt „kein Kandidat“. Unbekannte
+  Status- und Zustandscodes stehen roh mit Zahl da; jeder Modus außer Beobachten trägt „In
+  dieser Version wird trotzdem nichts ausgeführt.“
+- **Abruf mit Abbruch:** ein Ladevorgang zur Zeit, ein neuer bricht den alten ab, Verlassen des
+  Tabs bricht ab; jede Anfrage endet nach 30 s.
+- **Nicht-Administratoren** sehen nur die Zahlen (wie die Route sie liefert, solange das Panel
+  für alle offen ist), sonst „Nur für Administratoren“.
+- **Deutsch:** alle Gründe aus einer Tabelle im Frontend; ein unbekannter Code wird roh
+  gezeigt. Router heißen wie in den anderen Tabs „Router xxxxxx“.
+- **Abruf** beim Öffnen und danach höchstens alle 60 s, nur solange die Seite sichtbar und der
+  Tab offen ist. Schmale Ansicht bis 360 px ohne seitliches Scrollen, Bedienelemente 40 px.
+- `_PANEL_VERSION` `20261127-selfhealing1`; das Bundle ist neu gebaut.
+- **Tests:** 84 Frontend-Tests in `src/enterprise/selfhealing/` (Logik, Client, Ladevorgang,
+  Darstellung, schmale Ansicht, gebautes Bundle) auf echten Antworten der Routen; `tests/test_sh_panel_fixture_v1530.py`
+  erzeugt diese Antworten aus den fünf Routen und vergleicht sie mit `shFixture.json`.
+  `tests/test_tm_panel_texts_v1520.py` hält jetzt sieben Tabs fest; Self-Healing ist
+  ausdrücklich kein Sprungziel der Time Machine. Darunter: jede Anfrage ist GET ohne Rumpf,
+  keine Datei des Tabs nennt eine schreibende Methode oder einen schreibenden Pfad, keine
+  Ansicht hat ein anderes anklickbares Element als Aktualisieren, Details, Erneut versuchen und
+  die Filter, die mitgenutzten Module nennen keinen Netzaufruf, und das gebaute Bundle hat
+  keine schreibende Methode mehr als `main`; die Grundtabelle stimmt Text für Text mit `heal_policy.REASON_TEXT_DE`, und jeder
+  Blocker-, Verlaufs-, Hold- und Pausengrund aus `heal_engine.py`, `heal_model.py`,
+  `heal_store.py` und `heal_policy.py` hat einen deutschen Text.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)

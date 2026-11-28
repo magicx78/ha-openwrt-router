@@ -2174,7 +2174,99 @@ Sicherungsverweis oder „nicht nötig: keine Konfigurationsänderung“, Risiko
 nachher, Rollback-Aussage), Freigabe-Ablauf (Knöpfe nur für verfügbare Aktionen) und Verlauf.
 Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 
-**Stand heute:** nichts davon gebaut; Frontend und `_PANEL_VERSION` unverändert.
+**Stand heute (Paket J):** der Tab „Self-Healing“ unter Enterprise (Reihenfolge 35, nach
+Netzwerkdiagnose, vor WiFi Intelligence), **nur lesend**. Er ruft ausschließlich die fünf
+GET-Routen aus Abschnitt 11 auf und hat keinen Knopf, der etwas ändert (kein Freigeben,
+Ausführen, Aufheben, Pausieren, kein Moduswechsel); Freigabe-Ablauf und Warteschlange mit
+Knöpfen kommen erst mit einem Schreibweg. Code in
+`frontend/topology/src/enterprise/selfhealing/`, `_PANEL_VERSION` `20261127-selfhealing1`.
+
+Von oben nach unten:
+
+- **Hinweis, immer oben** (auch beim Laden, bei Fehlern und ausgeschaltet): „Nur beobachten –
+  diese Version ändert nie etwas an einem Router.“ Meldet der Server je etwas anderes als
+  `observe_only` und `write_path: false`, steht das darunter.
+- **Übersicht:** Kacheln aus `counts.by_state` (offen, laufend, wartende Freigaben, erfolgreich,
+  fehlgeschlagen, ohne Aktion abgeschlossen), letzte Aktivität, Zahl der Datensätze und Router,
+  wartende Vorfälle, die Zeile zum automatischen Rollback. Die Kachel „Blockierte riskante
+  Aktionen“ steht auf „unbekannt“ mit Grund: keine Route liefert diese Zahl.
+- **Router und Modus:** Flotten-Pause und Flotten-Hold mit Grund und Restzeit; je Router
+  eingestellter und geltender Modus (mit dem Grund, den der Server erkennen lässt), Hold mit
+  Grund und Ende, geladen, offene Datensätze. Router heißen wie in den anderen Tabs „Router
+  xxxxxx“ (die Routen senden nur `rtr_`-Kennungen).
+- **Datensätze:** alle Datensätze (höchstens 200, neueste zuerst; Hinweis, wenn es mehr gibt),
+  Filter Alle/Offen/Abgeschlossen und Router im Browser. Je Zeile Zeit, Zustand, Vorfallart,
+  Router, Ursache, Entscheidung, Aktion und Risikoklasse.
+- **Ein Datensatz** (aufgeklappt unter seiner Zeile, lädt `actions/{id}` und
+  `plans?action_id=`): Vorfall und Ursache, Entscheidung mit Beiträgen zur Konfidenz,
+  Erklärung der Richtlinie (Ergebnis, Gründe, Risiko, Auswirkung, Wiederherstellung, Erlaubnis
+  des Gates, unbekannte Fakten), der Kandidat mit dem Etikett **„Kandidat – nicht ausgeführt“**
+  (oder der Satz, dass der Server keinen nennt – im Live-Betrieb von 1.53.0 der Normalfall),
+  „Was würde blockieren“ (Blocker des Plans und gespeicherte Vorabprüfungen), Zähler
+  (Wiederöffnungen, Ausführungsversuche, frühere Versuche laut Richtlinie, Schritte im
+  Verlauf), der Verlauf und die übrigen Felder (Freigabe, Sicherung, Rollback, Nachprüfung,
+  Bauteile).
+- **Einstellungen (nur Anzeige):** Schalter, Modul im Speicher, Grenzen und Aufbewahrung.
+
+Regeln: Was der Server nicht oder nicht als Code sendet, steht als „unbekannt“ (nie 0, „nein“
+oder grün). Ein fehlgeschlagener Abruf zeigt einen Fehler mit „Erneut versuchen“. Scheitert ein
+späteres Aktualisieren, bleibt die frühere Antwort sichtbar, aber gestrichelt gerahmt und mit
+„Veraltet – Aktualisieren fehlgeschlagen (Grund). Die Werte unten sind vom <Stand> und können
+veraltet sein.“ – je Teil (Übersicht mit Routern, Liste, Einstellungen, offener Datensatz).
+„Noch nichts beobachtet“ ist ein eigener, freundlicher Zustand, aber nur bei `total: 0` und
+leerer Liste.
+
+Nie ein ruhiger Zustand aus einer kaputten, unvollständigen oder alten Antwort:
+
+- Eine 2xx-Antwort ohne JSON oder in falscher Form (Übersicht ohne `status`/`counts`, `actions`
+  oder `plans` keine Liste, `settings` kein Objekt, ein Datensatz ohne gültige `action_id` oder
+  mit fremder Kennung) ist ein Fehler `invalid_body` („Die Antwort … war nicht lesbar“), keine
+  leere Antwort.
+- Zeilen der Liste ohne gültige Kennung zählt der Tab („n Datensätze nicht lesbar“); passt
+  `total` nicht zu den gelieferten Zeilen oder fehlt es, steht das da.
+- Fehlt ein Schlüssel ganz (Sperre des Routers, Playbook, Sicherung, Nachprüfung, geplante
+  Änderung, Bauteile), heißt es „unbekannt“; „keine“ nur, wenn der Server ausdrücklich `null`
+  oder eine leere Liste sendet.
+- Liefert `plans` für den Datensatz keinen Plan, heißt es „kein Plan in der Antwort“ (nicht
+  „kein Kandidat“); „kein Kandidat“ nur, wenn ein Plan mit Erklärung keinen nennt.
+- Ein unbekannter `status` der Übersicht und unbekannte Zustände in `counts.by_state` stehen roh
+  mit ihrer Zahl da. Fehlt einem Administrator die Router-Liste, steht genau das da (nicht „nur
+  für Administratoren“).
+- Jeder Modus außer Beobachten trägt den Zusatz „In dieser Version wird trotzdem nichts
+  ausgeführt.“; eine Sperre mit Grund „Ausgang einer Aktion unbekannt“ oder „eskaliert“ den
+  Satz, dass diese Version keine Aktion ausgeführt hat und die Sperre aus dem gespeicherten
+  Zustand stammt.
+
+Abruf: ein Ladevorgang zur Zeit mit einem `AbortController` (`shLoader.ts`); ein Abruf alle
+60 s startet nicht, solange einer läuft; „Aktualisieren“ oder ein neuer Datensatz bricht den
+laufenden ab, Verlassen des Tabs bricht ab und meldet nichts mehr. Jede Anfrage endet nach
+30 s (`timeout`) – kein anderer Tab hat eine Frist, 30 s ist eine eigene Entscheidung. Modul aus (`module_disabled`), 503 `not_running` und 404 ohne
+Route zeigen den Kasten „ausgeschaltet“ mit dem Weg zum Schalter. Nicht-Administratoren sehen
+nur die Übersicht der Zahlen (der Tab fragt für sie keine andere Route an); 403 heißt „Nur für
+Administratoren“. Alle Gründe kommen aus **einer** Tabelle im Frontend (`shTexts.ts`, Kopie
+von `heal_policy.REASON_TEXT_DE` plus Blocker-, Verlaufs-, Hold- und Pausengründe; ein Test
+vergleicht sie mit den Python-Quellen); ein unbekannter Code wird roh gezeigt. Die Texte
+`texts_de` des Servers nutzt der Tab nicht. Abruf beim Öffnen, mit „Aktualisieren“ und danach
+höchstens alle 60 s, nur solange die Seite sichtbar ist; ein anderer Tab ist nicht eingehängt
+und fragt nichts. Das Panel ist nur dunkel; ein helles Design gibt es nicht.
+
+**Bekannte Lücken der lesenden Routen** (der Tab zeigt sie als „unbekannt“ oder gar nicht;
+geplant für ein späteres Paket): Anzeigenamen der Router, Zahl blockierter riskanter
+Aktionen, Versuche je Router in 24 h, Restzeit der Abklingzeit, ein Verlauf mit eigenen
+Filtern über alle Datensätze.
+
+Nur lesend ist dreifach geprüft: jede Anfrage ist GET ohne Rumpf; jedes anklickbare Element
+aller gerenderten Zustände steht auf einer festen Liste (Aktualisieren, Erneut versuchen,
+Details anzeigen/schließen, die drei Filter und die Router-Auswahl); die mitgenutzten Module
+(`wifiLogic.ts`, `utils/format.ts`, `registry.ts`) nennen keine schreibende Methode und keinen
+Netzaufruf; im gebauten Bundle stehen genau so viele `"POST"`/`"PUT"`/`"DELETE"`/`"PATCH"` wie
+auf `main` vor dem Tab (12/0/0/0), dazu zwei `"GET"` des Tabs (`shBundle.test.mjs`).
+
+Die Beispielantworten der Frontend-Tests (`shFixture.json`) erzeugt und prüft
+`tests/test_sh_panel_fixture_v1530.py` aus den echten Routen gegen eine Test-Engine
+(`SH_WRITE_FIXTURE=1` erzeugt sie neu). Die Konfidenz eines Datensatzes ist die seiner
+Entscheidung; die Erklärung in `plans` bewertet mit den Fakten von jetzt und kann davon
+abweichen – der Tab beschriftet beides so.
 
 ## 14. Bedrohungsmodell
 
@@ -2211,11 +2303,11 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | **E** | Vorabprüfungen (`heal_preflight.py`, Abschnitt 7.1): dreizehn Prüfungen, Fingerabdruck, Bindung an Router/Aktion/Parameter und Sicherheitszeit, Sammler nur aus dem Speicher, Fakten für `RiskContext`/`IncidentFacts`; nicht angebunden (Adapter-Paket: Engine und Faktenquelle; C2: letzte Vorabprüfung vor dem Ausführen) | **gebaut** (PR #80) |
 | **F** | Playbooks A–G als Daten (`heal_playbooks.py`): Register, Matcher, Analyse je Playbook, Nie-Regeln, deutsche Texte; **füllt `IncidentFacts.cause_outside_router`** (True/False/None je Playbook, Abschnitt 8.4; Playbook A: kein DNS-Neustart, wenn die Ursache klar außerhalb des Routers liegt). Reine Logik; die Engine ruft es noch nicht auf (Anbindung über die Faktenquelle `HealFactsProvider`, Abschnitt 2.1), die Beweisdaten füllt die Anbindung | **gebaut** (PR #79) |
 | **X** | Richtlinie in der Engine: `PolicyDecider` über `gate`, Fakten der Engine, Naht `HealFactsProvider` für E/F, Modus der Richtlinie in Engine, Routen und Diagnose, Klammer nur noch für Schreibendes, Erklärung in `plans`; Flotten-Pause im dauerhaften Schritt; Review-Punkte a–k | **gebaut** (PR #81) |
-| **G** | Anbindung Configuration Manager (`heal_config_link.py`, Abschnitt 7.2): Versionsindex und Vergleich gespeicherter Versionen → Fakten für Playbook F (Sicherungsverweis, Drift-Plan) und Vorabprüfungen; kein Probelauf (er spricht mit dem Router), keine Verdrahtung in die Engine | **dieser Stand** |
+| **G** | Anbindung Configuration Manager (`heal_config_link.py`, Abschnitt 7.2): Versionsindex und Vergleich gespeicherter Versionen → Fakten für Playbook F (Sicherungsverweis, Drift-Plan) und Vorabprüfungen; kein Probelauf (er spricht mit dem Router), keine Verdrahtung in die Engine | **gebaut** (PR #82) |
 | H | Prüfung und die fünf Ergebnisklassen | offen |
 | I | Eskalation, Schutzschalter, Flotten-Pause, Rollback-Zustände (nur Modell); die Entscheidungen dazu liefert Paket D (`record_outcome`, `outcome_event_for`), I muss sie nach jedem Ausgang aufrufen und das Ergebnis speichern; **der Schutzschalter muss bei ROLLED_BACK öffnen** – die Kante ROLLED_BACK → ESCALATED des Entwurfs gibt es nicht mehr (Abschnitt 4), über sie geht es also nicht; **der Schutzschalter muss auch öffnen, wenn ein Ausgang unbekannt ist** (`outcome_unknown`, `outcome_escalated`, `stuck_released`): hebt ein Administrator heute den Hold auf (`release_hold`), kann dieselbe Aktion noch einmal laufen, sobald ihre Abklingzeit vorbei ist (Review 2, im Test des Reviewers belegt) | offen |
 | K | Entitäten, Ereignis, Audit-Präfix und -Anteil, Time Machine, Security-Veto, unique_id-Snapshot | offen |
-| J | Tab im Dashboard | offen |
+| **J** | Tab „Self-Healing“ im Panel (Abschnitt 13): nur lesend, nur die fünf GET-Routen, kein Knopf, der etwas ändert; Freigabe-Ablauf erst mit C2 | **dieser Stand** |
 | C2 | Schreibweg (`restart_service_typed`, Executor, Freigabe-Routen, Ausführen mit Idempotenz) | **1.54.0** |
 
 | L | Gesamttests, Leistung, Sicherheitsprüfung, Doku | offen |

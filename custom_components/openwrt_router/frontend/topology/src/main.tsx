@@ -21,6 +21,7 @@ import { bindDiagnosticsHass } from './enterprise/diagnostics/register';
 import { bindWifiHass } from './enterprise/wifi/register';
 import { bindTrafficHass } from './enterprise/traffic/register';
 import { bindTimeMachineHass } from './enterprise/timemachine/register';
+import { bindSelfHealingHass, installSelfHealingMock } from './enterprise/selfhealing/register';
 
 // ── HA Webcomponent ──────────────────────────────────────────────────────
 
@@ -76,6 +77,8 @@ class OpenWrtTopologyPanel extends HTMLElement {
     bindTrafficHass(() => this._hass);
     // Network Time Machine tab (Enterprise): same hass; reads only.
     bindTimeMachineHass(() => this._hass);
+    // Self-Healing Center tab (Enterprise): same hass; reads only (observe only in 1.53.0).
+    bindSelfHealingHass(() => this._hass);
   }
 
   connectedCallback() {
@@ -314,6 +317,14 @@ if (rootEl) {
     void import('./enterprise/security/securityMock').then(m => {
       const scenario = devParams.get('securitymock') || 'default';
       installSecurityMock(() => m.mockHass(scenario), m.createMockSecurityApi(scenario));
+    });
+  }
+  // DEV ONLY — ?selfhealingmock[=scenario] runs the Self-Healing tab on
+  // recorded route answers (shFixture.json); dropped from the production build.
+  if (import.meta.env.DEV && devParams.has('selfhealingmock')) {
+    void import('./enterprise/selfhealing/shMock').then(m => {
+      const scenario = devParams.get('selfhealingmock') || 'default';
+      installSelfHealingMock(() => m.mockHass(scenario), m.createMockShApi(scenario));
     });
   }
   createRoot(devContainer).render(
