@@ -636,7 +636,18 @@ sich nichts. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 13.
 - **Wahr oder unbekannt:** Fehlt ein Wert, steht „unbekannt“ mit Grund, nie 0 oder grün. Die
   Kachel „Blockierte riskante Aktionen“ steht auf „unbekannt“, weil keine Route diese Zahl
   liefert. Ein fehlgeschlagener Abruf zeigt einen Fehler, „noch nichts beobachtet“ einen
-  eigenen Zustand, ein ausgeschaltetes Modul den Kasten „ausgeschaltet“.
+  eigenen Zustand (nur bei 0 Datensätzen und leerer Liste), ein ausgeschaltetes Modul den
+  Kasten „ausgeschaltet“.
+- **Nie ein ruhiger Zustand aus einer kaputten, unvollständigen oder alten Antwort:** Eine
+  Antwort ohne JSON oder in falscher Form ist ein Fehler („nicht lesbar“); unlesbare Zeilen
+  werden gezählt, eine Gesamtzahl, die nicht zu den Zeilen passt, wird genannt. Nach einem
+  gescheiterten Aktualisieren sind die alten Werte gestrichelt gerahmt und als „Veraltet“ mit
+  ihrem Stand markiert. Ein fehlender Schlüssel heißt „unbekannt“, nur ein ausdrückliches
+  `null` „keine“; ohne Plan steht „kein Plan in der Antwort“ statt „kein Kandidat“. Unbekannte
+  Status- und Zustandscodes stehen roh mit Zahl da; jeder Modus außer Beobachten trägt „In
+  dieser Version wird trotzdem nichts ausgeführt.“
+- **Abruf mit Abbruch:** ein Ladevorgang zur Zeit, ein neuer bricht den alten ab, Verlassen des
+  Tabs bricht ab; jede Anfrage endet nach 30 s.
 - **Nicht-Administratoren** sehen nur die Zahlen (wie die Route sie liefert, solange das Panel
   für alle offen ist), sonst „Nur für Administratoren“.
 - **Deutsch:** alle Gründe aus einer Tabelle im Frontend; ein unbekannter Code wird roh
@@ -644,14 +655,15 @@ sich nichts. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 13.
 - **Abruf** beim Öffnen und danach höchstens alle 60 s, nur solange die Seite sichtbar und der
   Tab offen ist. Schmale Ansicht bis 360 px ohne seitliches Scrollen, Bedienelemente 40 px.
 - `_PANEL_VERSION` `20261127-selfhealing1`; das Bundle ist neu gebaut.
-- **Tests:** 52 Frontend-Tests in `src/enterprise/selfhealing/` (Logik, Client, Darstellung,
-  schmale Ansicht) auf echten Antworten der Routen; `tests/test_sh_panel_fixture_v1530.py`
+- **Tests:** 84 Frontend-Tests in `src/enterprise/selfhealing/` (Logik, Client, Ladevorgang,
+  Darstellung, schmale Ansicht, gebautes Bundle) auf echten Antworten der Routen; `tests/test_sh_panel_fixture_v1530.py`
   erzeugt diese Antworten aus den fünf Routen und vergleicht sie mit `shFixture.json`.
   `tests/test_tm_panel_texts_v1520.py` hält jetzt sieben Tabs fest; Self-Healing ist
   ausdrücklich kein Sprungziel der Time Machine. Darunter: jede Anfrage ist GET ohne Rumpf,
   keine Datei des Tabs nennt eine schreibende Methode oder einen schreibenden Pfad, keine
-  Ansicht hat einen anderen Knopf als Aktualisieren, Details, Erneut versuchen und die
-  Filter; die Grundtabelle stimmt Text für Text mit `heal_policy.REASON_TEXT_DE`, und jeder
+  Ansicht hat ein anderes anklickbares Element als Aktualisieren, Details, Erneut versuchen und
+  die Filter, die mitgenutzten Module nennen keinen Netzaufruf, und das gebaute Bundle hat
+  keine schreibende Methode mehr als `main`; die Grundtabelle stimmt Text für Text mit `heal_policy.REASON_TEXT_DE`, und jeder
   Blocker-, Verlaufs-, Hold- und Pausengrund aus `heal_engine.py`, `heal_model.py`,
   `heal_store.py` und `heal_policy.py` hat einen deutschen Text.
 

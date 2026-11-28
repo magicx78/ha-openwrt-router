@@ -2209,9 +2209,38 @@ Von oben nach unten:
 - **Einstellungen (nur Anzeige):** Schalter, Modul im Speicher, Grenzen und Aufbewahrung.
 
 Regeln: Was der Server nicht oder nicht als Code sendet, steht als „unbekannt“ (nie 0, „nein“
-oder grün). Ein fehlgeschlagener Abruf zeigt einen Fehler mit „Erneut versuchen“; eine frühere
-Antwort bleibt dann sichtbar und der Fehler steht darüber. „Noch nichts beobachtet“ ist ein
-eigener, freundlicher Zustand. Modul aus (`module_disabled`), 503 `not_running` und 404 ohne
+oder grün). Ein fehlgeschlagener Abruf zeigt einen Fehler mit „Erneut versuchen“. Scheitert ein
+späteres Aktualisieren, bleibt die frühere Antwort sichtbar, aber gestrichelt gerahmt und mit
+„Veraltet – Aktualisieren fehlgeschlagen (Grund). Die Werte unten sind vom <Stand> und können
+veraltet sein.“ – je Teil (Übersicht mit Routern, Liste, Einstellungen, offener Datensatz).
+„Noch nichts beobachtet“ ist ein eigener, freundlicher Zustand, aber nur bei `total: 0` und
+leerer Liste.
+
+Nie ein ruhiger Zustand aus einer kaputten, unvollständigen oder alten Antwort:
+
+- Eine 2xx-Antwort ohne JSON oder in falscher Form (Übersicht ohne `status`/`counts`, `actions`
+  oder `plans` keine Liste, `settings` kein Objekt, ein Datensatz ohne gültige `action_id` oder
+  mit fremder Kennung) ist ein Fehler `invalid_body` („Die Antwort … war nicht lesbar“), keine
+  leere Antwort.
+- Zeilen der Liste ohne gültige Kennung zählt der Tab („n Datensätze nicht lesbar“); passt
+  `total` nicht zu den gelieferten Zeilen oder fehlt es, steht das da.
+- Fehlt ein Schlüssel ganz (Sperre des Routers, Playbook, Sicherung, Nachprüfung, geplante
+  Änderung, Bauteile), heißt es „unbekannt“; „keine“ nur, wenn der Server ausdrücklich `null`
+  oder eine leere Liste sendet.
+- Liefert `plans` für den Datensatz keinen Plan, heißt es „kein Plan in der Antwort“ (nicht
+  „kein Kandidat“); „kein Kandidat“ nur, wenn ein Plan mit Erklärung keinen nennt.
+- Ein unbekannter `status` der Übersicht und unbekannte Zustände in `counts.by_state` stehen roh
+  mit ihrer Zahl da. Fehlt einem Administrator die Router-Liste, steht genau das da (nicht „nur
+  für Administratoren“).
+- Jeder Modus außer Beobachten trägt den Zusatz „In dieser Version wird trotzdem nichts
+  ausgeführt.“; eine Sperre mit Grund „Ausgang einer Aktion unbekannt“ oder „eskaliert“ den
+  Satz, dass diese Version keine Aktion ausgeführt hat und die Sperre aus dem gespeicherten
+  Zustand stammt.
+
+Abruf: ein Ladevorgang zur Zeit mit einem `AbortController` (`shLoader.ts`); ein Abruf alle
+60 s startet nicht, solange einer läuft; „Aktualisieren“ oder ein neuer Datensatz bricht den
+laufenden ab, Verlassen des Tabs bricht ab und meldet nichts mehr. Jede Anfrage endet nach
+30 s (`timeout`) – kein anderer Tab hat eine Frist, 30 s ist eine eigene Entscheidung. Modul aus (`module_disabled`), 503 `not_running` und 404 ohne
 Route zeigen den Kasten „ausgeschaltet“ mit dem Weg zum Schalter. Nicht-Administratoren sehen
 nur die Übersicht der Zahlen (der Tab fragt für sie keine andere Route an); 403 heißt „Nur für
 Administratoren“. Alle Gründe kommen aus **einer** Tabelle im Frontend (`shTexts.ts`, Kopie
@@ -2225,6 +2254,13 @@ und fragt nichts. Das Panel ist nur dunkel; ein helles Design gibt es nicht.
 geplant für ein späteres Paket): Anzeigenamen der Router, Zahl blockierter riskanter
 Aktionen, Versuche je Router in 24 h, Restzeit der Abklingzeit, ein Verlauf mit eigenen
 Filtern über alle Datensätze.
+
+Nur lesend ist dreifach geprüft: jede Anfrage ist GET ohne Rumpf; jedes anklickbare Element
+aller gerenderten Zustände steht auf einer festen Liste (Aktualisieren, Erneut versuchen,
+Details anzeigen/schließen, die drei Filter und die Router-Auswahl); die mitgenutzten Module
+(`wifiLogic.ts`, `utils/format.ts`, `registry.ts`) nennen keine schreibende Methode und keinen
+Netzaufruf; im gebauten Bundle stehen genau so viele `"POST"`/`"PUT"`/`"DELETE"`/`"PATCH"` wie
+auf `main` vor dem Tab (12/0/0/0), dazu zwei `"GET"` des Tabs (`shBundle.test.mjs`).
 
 Die Beispielantworten der Frontend-Tests (`shFixture.json`) erzeugt und prüft
 `tests/test_sh_panel_fixture_v1530.py` aus den echten Routen gegen eine Test-Engine
