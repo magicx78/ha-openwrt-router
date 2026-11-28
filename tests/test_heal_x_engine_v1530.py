@@ -101,6 +101,22 @@ GOOD_INCIDENT = hp.IncidentFacts(
 
 
 @pytest.fixture
+def quiet_security() -> Iterator[None]:
+    """A running, ready Security Center without findings (package K1).
+
+    The open findings are the engine's own fact since K1: a provider's 0
+    no longer counts, so a test of favourable facts needs the center to
+    say it."""
+    from custom_components.openwrt_router import security_center
+
+    center = SimpleNamespace(loaded=True, enabled=True, ready=True, incidents={})
+    with patch.object(
+        security_center, "async_get_security_center", lambda hass: center
+    ):
+        yield
+
+
+@pytest.fixture
 def measured() -> Iterator[None]:
     """NI reports a measured cause: level confirmed, two source families
     (what its rules give for a confirmed cause with log and state evidence;
@@ -347,6 +363,7 @@ async def test_maintenance_is_unknown_without_network_intelligence(
     assert context.maintenance_known is True and context.in_maintenance is True
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_a_favourable_provider_gives_at_most_requires_approval(
     world: World,
     measured: None,
@@ -394,6 +411,7 @@ async def test_a_favourable_provider_gives_at_most_requires_approval(
     assert store.loop.locks == {} and store.loop.attempts == {}
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_engine_facts_win_over_the_provider(world: World, measured: None) -> None:
     """A provider cannot overwrite what the engine knows (role, identity,
     maintenance, breaker, root, cause, history)."""
@@ -561,6 +579,7 @@ async def test_a_hostile_provider_changes_nothing_that_is_allowed(
     world.hass.services.async_call.assert_not_called()
 
 
+@pytest.mark.usefixtures("quiet_security")
 @pytest.mark.parametrize(
     ("action", "params", "outcome"),
     [
@@ -758,6 +777,7 @@ async def test_a_gate_without_a_decision_falls_back(world: World) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_a_held_router_and_a_paused_fleet_show_observe(
     world: World, measured: None
 ) -> None:
@@ -909,6 +929,7 @@ async def test_a_real_read_only_claim_passes(world: World) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_the_plan_explains_the_policy_decision(
     world: World, measured: None
 ) -> None:
@@ -952,6 +973,7 @@ async def test_the_plan_explains_the_policy_decision(
     assert body["planned_changes"] == []
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_the_plans_route_reads_only(world: World, measured: None) -> None:
     from custom_components.openwrt_router import heal_views
 
@@ -1033,6 +1055,7 @@ async def test_real_network_intelligence_with_the_real_policy(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_zero_extra_router_calls_with_the_policy(
     world: World, measured: None
 ) -> None:
@@ -1539,6 +1562,7 @@ async def test_an_unusable_maintenance_answer_stays_unknown(
 # P2b: the record keeps its own decision; the candidate is only explained
 
 
+@pytest.mark.usefixtures("quiet_security")
 async def test_the_record_keeps_its_own_decision_not_the_candidates(
     world: World, measured: None
 ) -> None:
