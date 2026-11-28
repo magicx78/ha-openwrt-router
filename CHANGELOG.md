@@ -617,6 +617,63 @@ Abschnitt 7.2.
   grünem Stand: 115 Mutationen (je eine für jede in den beiden Reviews geänderte Regel, auch
   die, die `no_change_seen` wieder zu „nein“ macht), alle scheitern.
 
+### Self-Healing, Paket K1
+
+Self-Healing wird sichtbar und nachvollziehbar, weiter **nur Observe**: kein Router-Aufruf
+dazu, kein Knopf, kein Schalter, kein Dienst, keine Freigabe, keine Ausführung. Das Modul ist
+nach dem Update an (Schalter `self_healing_enabled`, Standard an), jeder Router im Modus
+Observe. Entwicklerdoku: `docs/self-healing.md`, Abschnitte 11.1, 11.2 und 12.
+
+- **Neue Entitäten, nur lesend** (`heal_entities.py`), nur solange das Modul an ist:
+  - einmal je HA-Instanz, ohne Gerät: „Self-Healing-Modus (alle Router)“
+    (`observe`/`approval`/`auto_heal`/`mixed`), „Aktive Reparaturvorgänge“,
+    „Reparaturvorgänge mit offener Freigabe“, „Erfolgreiche Reparaturen, 30 Tage“,
+    „Fehlgeschlagene Reparaturen, 30 Tage“, „Letztes Reparaturergebnis“ (jeweils mit dem
+    Zusatz „(alle Router)“) und der Binärsensor „Auto-Heal aktiv (mindestens ein Router)“;
+  - je Router am Gerät, als Diagnose: „Self-Healing-Modus“.
+  - unique_ids: `openwrt_router_fleet_self_healing_mode`,
+    `openwrt_router_fleet_remediation_active`, `…_remediation_pending`,
+    `…_remediation_succeeded_30d`, `…_remediation_failed_30d`, `…_remediation_last_result`,
+    `openwrt_router_fleet_auto_heal_enabled` und `<entry_id>_self_healing_mode`. Keine
+    vorhandene unique_id ändert sich.
+  - Die Werte kommen nur aus dem Speicher der Engine; unbekannt bleibt unbekannt (etwa die
+    30-Tage-Zähler, wenn der Speicher einen Datensatz im Fenster verdrängt haben könnte).
+  - Schaltet man das Modul aus, werden die Entitäten aus dem Entitätsregister entfernt; mit
+    dem Modul aus entsteht keine.
+- **Ein Bus-Ereignis** `openwrt_router_remediation_event` je Zustandswechsel mit `state`
+  `proposed`, `approval_required`, `started`, `succeeded`, `failed`, `rollback_started`,
+  `rollback_failed`, `manual_recovery_required` oder `escalated` (in 1.53.0 kommt nur
+  `proposed` vor). Nutzdaten nur Kennungen, Codes, Zustände, Risikoklasse, Router-Kennung des
+  Core und `device_id`, nie Adressen, Namen, Geheimnisse oder Konfiguration. Höchstens 30
+  Ereignisse in 60 s; nur von HA selbst, nie ein Ereignis von außen weiter.
+- **Audit:** ein Eintrag je Zustandswechsel im Audit des Core, Typ
+  `self_healing.action_<zustand>`, Präfix `self_healing.`; kein Eintrag je Takt und keiner
+  für eine Entscheidung ohne Änderung. Ab der Freigabe sind die Typen Pflicht, Ausführung und
+  Rollback sicherheitsrelevant. Ohne Core warten bis zu 100 Einträge und werden später mit
+  `delayed` geschrieben. Modulname `self_healing`; das engere Präfix `self_healing.manual.`
+  (vorhandene Knöpfe und Schalter) gehört Paket K2, beide bestehen nebeneinander.
+- **Audit-Log größer:** Self-Healing ist das siebte Modul im allgemeinen Ring. Damit jeder
+  seinen garantierten Anteil behält (je Modul 100, Core 400), hält der Ring jetzt **1100
+  statt 1000 Einträge** (`AUDIT_MAX_EVENTS`, `AUDIT_SHARED_MODULES` = 7). Kein Anteil wird
+  kleiner; der Sicherheitsring bleibt unverändert.
+- **Time Machine:** die Einträge erscheinen über die vorhandene Quelle „Audit“ mit ihrer
+  echten Zeit (nur für Administratoren), auch `self_healing.manual.action` aus Paket K2;
+  keine eigene Quelle, keine erfundenen Zeiten.
+- **Security-Veto:** offene Erkennungen des Security Centers (offen oder bestätigt, jede
+  Schwere, am Router oder für die ganze Flotte) sind ein Fakt der Engine und heißen **Not
+  Safe**. Ist das Security Center aus oder nicht bereit, gilt der Fakt als unbekannt; das
+  sperrt jedes Schreiben. Eine Faktenquelle kann den Fakt nicht überschreiben.
+- **Bekannte Grenzen:** der Zähler verdrängter Datensätze wird nicht gespeichert, nach einem
+  Neustart können die 30-Tage-Zähler deshalb zu klein sein.
+- **Tests:** `tests/test_heal_events_audit_v1530.py` (95), `tests/test_heal_entities_v1530.py`
+  (33), zwei neue Tests im unique_id-Snapshot (8 neue Kennungen, die 130 vorhandenen
+  unverändert); ein Test mit `full_router_kit` belegt **null zusätzliche Router-Aufrufe** in
+  zwei Polls mit dem Modul an gegenüber aus. Acht vorhandene Tests in
+  `tests/test_heal_x_engine_v1530.py` bekommen ein ruhiges Security Center, weil ihre
+  Faktenquelle „0 Erkennungen“ nicht mehr gilt. Sechs Tests des Audit-Logs
+  (`tests/test_core_audit.py`, `tests/test_core_audit_general_quota.py`) rechnen jetzt mit
+  1100 Einträgen und sieben Modulen. Mutationsprüfung auf grünem Stand: 92 Mutationen an Journal, Entitäten, Engine, den zwei Plattformen, den Anteilen des Audit-Logs und der Time-Machine-Zuordnung; im ersten Lauf überlebten 13, für 12 kam ein Test dazu (Signal je Durchgang, abgelehnte Vorfall-Kennung, ein unbekannter Router im Flotten-Modus, Freigabe gilt nicht als offen, unlesbare Zähler, ladende Engine, Neuladen des Gastgebers ohne Engine, sofortiges Journal bei Start, hinzugekommenen Routern, Stopp und Takt, ausdrückliche Time-Machine-Zuordnung); jetzt scheitern 91. Eine bleibt, weil sie nichts ändert: das Modell lehnt einen Datensatz ab, dessen letzter Verlaufseintrag nicht sein Zustand ist.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)
