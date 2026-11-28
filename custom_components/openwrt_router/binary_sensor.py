@@ -115,6 +115,15 @@ async def async_setup_entry(
     async_setup_intel_binary_sensors(hass, entry.entry_id, async_add_entities)
     # Configuration manager: drift problem sensor, read from its runtime only.
     async_setup_config_binary_sensors(hass, entry, async_add_entities)
+    # Self-Healing (Phase 7, K1): one read-only fleet binary sensor.
+    try:
+        from .heal_entities import async_setup_heal_binary_sensors
+
+        async_setup_heal_binary_sensors(hass, entry, async_add_entities)
+    except Exception as err:  # noqa: BLE001 - never fails the platform setup
+        _LOGGER.warning(
+            "Self-Healing binary sensor not set up (%s)", type(err).__name__
+        )
 
 
 class OpenWrtBinarySensorEntity(
