@@ -1651,6 +1651,12 @@ solches Zeichen ist); `verify()` gibt für das wiederhergestellte Paar dasselbe 
 den festen Mengen und bleiben lesbar. Schlüssellos heißt: ein bekannter Name lässt sich durch
 Ausprobieren wiederfinden; der Hash verhindert nur, dass Namen im Klartext gespeichert werden.
 Ein Zusammenstoß zweier Zeichen in einem Fakt macht ihn unbekannt (`storable_name_clash`).
+**`verify()` vergleicht beide Momentaufnahmen in der gehashten Form** (`VerifySnapshot.hashed()`,
+dieselbe Ersetzung wie `to_storable()`): die Anbindung speichert die Momentaufnahme davor
+gehasht und baut die danach in jedem Takt frisch; ohne das läse sich ein Dienst `dropbear` oder
+eine AP-Schnittstelle `phy0-ap0`, die auf einer Seite gehasht ist, als verloren (ein falscher
+Alarm; gefunden beim Test der Speicherform). Jede Mischung der Formen gibt dasselbe Ergebnis wie
+das ungehashte Paar (Test); die Bindung prüft weiter die Eingaben, wie sie übergeben wurden.
 
 **Sammler** `snapshot_from_sources(src, router_id, incident_id, *, safe_now, wall_now)` (Stil
 von `heal_preflight.facts_from_sources`, dieselben `FactSources`): wirft nie, gibt `None` nur
@@ -3026,7 +3032,7 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   angepasst, darunter die, die `no_change_seen` wieder zu `false` macht – im Fakt und beim
   leeren Vergleich –, und vier neue: Grund, Anzeige-Flag, `to_dict`, `missing` im Docstring),
   alle scheitern.
-- `tests/test_heal_verify_v1530.py` (Paket H, 424 Tests nach dem Review von PR #83): Auftragstests 15 (fehlgeschlagene
+- `tests/test_heal_verify_v1530.py` (Paket H, 465 Tests nach dem zweiten Review von PR #83): Auftragstests 15 (fehlgeschlagene
   Reparatur: `partial` und `not_resolved`), 16 (erfolgreiche Prüfung), 17 (fehlgeschlagene
   Prüfung), 21 (Verwaltungsweg verloren: `new_fault`, auch ohne Aktion) und 23 (Neustart des
   Routers während der Aktion: `new_fault`; beim geplanten Neustart die Wirkung); jede der fünf
@@ -3071,6 +3077,27 @@ so funktionieren, wie der Katalog sie benennt; die deutschen Texte in einer Ober
   Mutationen, angepasst: 72 von 74 scheitern; `held_counts_as_primary` ist gleichwertig wie
   zuvor, `dependants_worse_off` traf toten Code (entfernt; dieselbe Mutation an der neuen Regel
   scheitert).
+- **Nach dem zweiten Review von PR #83:** das Orakel ist aus den Regeln neu geschrieben (es
+  kennt die Dauerregel, den angekündigten Ausfall, die Client-Regeln ohne und mit Schreiben, die
+  Stufen der anderen Vorfälle und die einmalige Verlängerung), mit den 18 Fehlalarmen des
+  Reviews als feste Fälle (Wechsel 2,4 → 5 GHz, das einzige Telefon geht, umbenannte
+  AP-Schnittstelle, je auch nach einem erfolgreichen Neustart; fremder offener Vorfall;
+  einzelner fehlgeschlagener Poll; Neustart bei +30 s; `interface.cycle` auf wan bei +10 s;
+  Zwangstrennung 100 s und 130 s). Zwei Eigenschaften über alle Zufallsfälle: unbekannt oder
+  veraltet ist nie `resolved`; ohne ausgeführtes Schreiben ist nichts ein Fehlschlag der
+  Reparatur, und andere Client-Zahlen ändern das Ergebnis nie. Je ein Test pro Punkt NEW-1 bis
+  NEW-8 scheitert auf dem Stand vor dem Review (außer den Grenztests N36 und N43, die auf dem
+  alten Stand schon gelten und Mutationen töten); NEW-5 ist nur Doku.
+- **Mutationsprüfung nach dem zweiten Review** (grüne Grundlinie, 461 Tests): 158 Mutationen,
+  100 aus den Proben beider Reviews (angepasst, wo sich der Code geändert hat) und 58 neue,
+  mindestens eine je neuer Regel (Client-Auskunft, Funkregel nur bei Gesamtverlust, 0 erst ab
+  3, Dauer 120 s, angekündigter Ausfall, `wan_down_s`, Stufen der Vorfälle, gehaltene
+  abhängige Router, lesende Aktionen in `planned_end`, Speicherform, Verlängerung). 155
+  scheitern. Überlebt haben drei: N9 ist gleichwertig (der Zweig „Lösung ohne bekannte
+  Bestätigungszeit“ ist unerreichbar, weil die Altersregel ihn vorher abfängt); R2l
+  (`wan_down_s` ohne Alter oder mit negativem Alter) und R6f (gerundetes Alter in der
+  Speicherform) bekamen je einen Test, der sie tötet. Danach kam die gehashte Form im Vergleich
+  dazu (oben); ihr Mutant (die Zeile entfernt) scheitert an zwei Tests.
 - Der unique_id-Snapshot (`tests/test_unique_ids_snapshot_v1494.py`) ist unverändert grün:
   C1 bringt keine Entität.
 

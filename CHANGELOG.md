@@ -676,6 +676,41 @@ unverändert. Für Benutzer ändert sich nichts, 1.53.0 bleibt nur Observe. Entw
   - Tests: 424 (vorher 253); 32 000 Zufallsfälle gegen ein eigenes Orakel für jede der acht
     Aktionen. Mutationsprüfung: die acht Überlebenden des Reviewers und je eine neue Mutation
     pro geänderter Regel scheitern; zwei gleichwertige sind in Abschnitt 17 begründet.
+- **Nach dem zweiten Review von PR #83** (Fehlalarme; ein Fehlalarm zählt nie als
+  Fehlschlag, ein falscher Erfolg bleibt unmöglich, im Zweifel „nicht zu sagen“):
+  - **Clients:** ohne ausgeführtes Schreiben sind beide Client-Wächter nur Auskunft (nie neue
+    Störung, nie Eskalation, sie verhindern „von selbst behoben“ nicht). Nach einem Schreiben
+    zählt der Funkwächter nur, wenn auch die Gesamtzahl über ihre Toleranz fiel (ein Wechsel
+    von 2,4 auf 5 GHz oder eine umbenannte AP-Schnittstelle ist kein Verlust); eine fehlende
+    Schnittstelle ist dann unbekannt. Auf 0 ist erst ab 3 Clients schlechter, 1 oder 2 auf 0
+    ist „nicht zu sagen“.
+  - **Früher Verlust:** zählt erst nach 120 s Dauer, belegt im Gedächtnis (ein einzelner
+    fehlgeschlagener Poll ist unbekannt), und nicht im angekündigten Ausfall der ausgeführten
+    Aktion (`est_outage_s` aus dem Katalog + 120 s). Neuer Fakt `wan_down_s`; der Sammler
+    kennt ihn noch nicht (unbekannt), ein früher WAN-Verlust wird deshalb noch nicht erkannt.
+  - **Andere Vorfälle und abhängige Router:** nur neue oder in der Stufe gestiegene Vorfälle
+    und mehr gestörte Router zählen; gleich gebliebene sind gehalten, verschwundene besser.
+    Eine richtige Reparatur neben einer fremden, offenen Störung ist „durch die Aktion
+    behoben“.
+  - **Lesende Aktionen** zählen nie für den Schutzschalter; sie enden RESOLVED ohne
+    Gutschrift (der einzige Endzustand ohne Fehlschlag) oder ESCALATED mit Hold. Ein
+    abgelehnter Aufruf einer schreibenden Aktion bleibt ein Fehlschlag.
+  - **Speicherform:** `VerifySnapshot.to_storable()` / `from_storable()` ersetzt Namen
+    außerhalb der festen Katalogmengen durch einen festen, schlüssellosen Hash; nur diese Form
+    wird gespeichert, das wiederhergestellte Paar gibt dasselbe Ergebnis.
+  - **Späte Lösung:** eine Lösung aus den letzten 300 s vor der Höchstwartezeit verlängert
+    die Wartezeit einmal, höchstens um 480 s.
+  - Doku der Anbindung: Prüfung in jedem Takt ab dem Aufrufende, Ergebnisse vor der
+    Wartezeit nicht endgültig (außer einem frühen Verlust), Sicherheits- und Wandzeit aus
+    derselben Beobachtung; die Grenze beim Lesefehler der AP-Schnittstellen.
+  - **Gleiche Form im Vergleich:** die Prüfung vergleicht beide Momentaufnahmen gehasht; eine
+    gespeicherte Momentaufnahme davor und eine frisch gebaute danach lasen sich sonst als
+    verlorener Dienst (falscher Alarm, beim Test der Speicherform gefunden).
+  - Tests: 465 (vorher 424); das Orakel ist aus den Regeln neu geschrieben, mit den 18
+    Fehlalarmen des Reviews als feste Fälle, und hält „unbekannt oder veraltet ist nie
+    behoben“ und „ohne ausgeführtes Schreiben ist nichts ein Fehlschlag der Reparatur,
+    Client-Änderungen eskalieren nie“. Mutationsprüfung: 158 Mutationen, 155 scheitern; von
+    den drei Überlebenden ist eine gleichwertig, die zwei anderen bekamen je einen Test.
 
 ## [1.52.3] - 2026-11-27
 
