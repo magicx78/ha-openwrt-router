@@ -186,16 +186,16 @@ test('plans: blockers and the explanation; a candidate only when the server labe
 });
 
 test('a missing or malformed value stays unknown (null), never 0 or false', () => {
-  const ov = L.parseOverview({ counts: { by_state: { proposed: 'x' } }, fleet: { paused: 'yes' } });
+  const ov = L.parseOverview({ status: 'on', counts: { by_state: { proposed: 'x' } }, fleet: { paused: 'yes' } });
   assert.equal(ov.fleet.paused, null);
   assert.equal(ov.counts.open, null);
-  assert.equal(ov.status, null);
   assert.deepEqual(ov.counts.byState, {});
   const tiles = L.tiles(ov);
   assert.ok(tiles.every(t => t.value === null), 'every tile unknown');
   assert.ok(tiles.every(t => t.note.length > 0));
-  // a free text where a code belongs is dropped
-  assert.equal(L.parseOverview({ status: '<b>on</b> now' }).status, null);
+  // the status is never dropped: an odd one stays raw (rendered as text), cut to 64 characters
+  assert.equal(L.parseOverview({ status: '<b>on</b> now', counts: {} }).status, '<b>on</b> now');
+  assert.equal(L.parseOverview({ status: 'x'.repeat(100), counts: {} }).status.length, 64);
   assert.equal(L.yesNo(null), 'unbekannt');
   assert.equal(L.countText(undefined), 'unbekannt');
   assert.equal(L.durationText(null), 'unbekannt');
@@ -244,8 +244,9 @@ test('filters: open, closed and per router', () => {
   assert.equal(L.filterRows(rows, { show: 'open', routerId: null }).length, 1);
   assert.equal(L.filterRows(rows, { show: 'closed', routerId: null }).length, 1);
   assert.equal(L.filterRows(rows, { show: 'all', routerId: R2 }).every(r => r.routerId === R2), true);
-  assert.equal(L.cutText({ total: 340, actions: new Array(200) }), 'Angezeigt werden die neuesten 200 von 340 Datensätzen.');
-  assert.equal(L.cutText({ total: 2, actions: rows }), null);
+  const cut = { total: 340, limit: 200, offset: 0, actions: new Array(200), received: 200, unreadable: 0 };
+  assert.equal(L.cutText(cut), 'Angezeigt werden die neuesten 200 von 340 Datensätzen.');
+  assert.equal(L.cutText({ ...cut, total: 2, actions: rows, received: 2 }), null);
 });
 
 test('router names are the panel standard (the routes send ids only)', () => {
@@ -269,4 +270,133 @@ test('times are local with the date; durations in words', () => {
   assert.equal(L.durationText(86400 * 3), '3 Tage');
   assert.equal(L.scoreText(0.67), '67 von 100');
   assert.equal(L.pointsText(-10), '-10');
+});
+
+// ── Review round of PR #84: truth, unknown or an error; never a calm state ──
+
+const isBroken = field => e => e instanceof L.ShApiError && e.code === 'invalid_body' && e.details.field === field;
+
+test('P2-1: an answer of the wrong shape is an error, never an empty answer', () => {
+  for (const bad of [null, 'x', [], 7]) {
+    assert.throws(() => L.parseOverview(bad), isBroken('body'));
+    assert.throws(() => L.parseActions(bad), isBroken('body'));
+    assert.throws(() => L.parseDetail(bad), isBroken('body'));
+    assert.throws(() => L.parsePlans(bad), isBroken('body'));
+    assert.throws(() => L.parseSettings(bad), isBroken('body'));
+  }
+  assert.throws(() => L.parseOverview({ counts: {} }), isBroken('status'));
+  assert.throws(() => L.parseOverview({ status: 'on' }), isBroken('counts'));
+  for (const actions of [undefined, null, 'x', {}]) assert.throws(() => L.parseActions({ total: 0, actions }), isBroken('actions'));
+  assert.throws(() => L.parsePlans({ plans: {} }), isBroken('plans'));
+  assert.throws(() => L.parseSettings({ limits: {} }), isBroken('settings'));
+  // every recorded 200 answer still parses
+  for (const [k, a] of Object.entries(F)) {
+    if (a.status !== 200) continue;
+    const parse = /overview|not_running/.test(k) ? L.parseOverview : /actions/.test(k) ? L.parseActions
+      : /detail/.test(k) ? L.parseDetail : /plan/.test(k) ? L.parsePlans : L.parseSettings;
+    assert.doesNotThrow(() => parse(a.body), k);
+  }
+  const info = L.errorInfo(L.invalidBody('actions', 200), 'list');
+  assert.equal(info.kind, 'broken');
+  assert.equal(info.retry, true);
+  assert.equal(info.message, 'Die Antwort der Liste war nicht lesbar (Status 200, Teil actions). Es wird nichts daraus angezeigt – auch nicht als leer oder „in Ordnung“.');
+});
+
+test('P2-1: dropped rows are counted, a total that does not fit is said, empty only for 0 and []', () => {
+  const raw = structuredClone(F.actions.body);
+  raw.actions.push({ action_id: 'kaputt' }, 'x');
+  const list = L.parseActions(raw);
+  assert.equal(list.actions.length, 2);
+  assert.equal(list.received, 4);
+  assert.equal(list.unreadable, 2);
+  assert.deepEqual(L.listNotes(list), [
+    '2 Datensätze nicht lesbar (in der Antwort, aber ohne gültige Kennung oder Form; sie werden nicht angezeigt).',
+    'Die Antwort passt nicht zusammen: Der Server meldet 2 Datensätze, geliefert wurden 4.',
+  ]);
+  assert.equal(L.isEmptyList(list), false);
+  const one = L.parseActions({ ...F.actions.body, total: 3, actions: [...F.actions.body.actions, { action_id: 'x' }] });
+  assert.deepEqual(L.listNotes(one), ['1 Datensatz nicht lesbar (in der Antwort, aber ohne gültige Kennung oder Form; er wird nicht angezeigt).']);
+  // an empty list with a total above 0, or without a total, is not "nothing observed"
+  const lost = L.parseActions({ total: 3, limit: 200, offset: 0, actions: [] });
+  assert.equal(L.isEmptyList(lost), false);
+  assert.deepEqual(L.listNotes(lost), ['Die Antwort passt nicht zusammen: Der Server meldet 3 Datensätze, geliefert wurden 0.']);
+  const noTotal = L.parseActions({ actions: [] });
+  assert.equal(L.isEmptyList(noTotal), false);
+  assert.deepEqual(L.listNotes(noTotal), ['Die Antwort nennt keine Gesamtzahl der Datensätze – ob es weitere gibt, ist unbekannt.']);
+  assert.equal(L.isEmptyList(L.parseActions(F.empty_actions.body)), true);
+  assert.deepEqual(L.listNotes(L.parseActions(F.actions.body)), []);
+  // a cut by the limit is no mismatch
+  const cut = L.parseActions({ total: 340, limit: 2, offset: 0, actions: F.actions.body.actions });
+  assert.deepEqual(L.listNotes(cut), []);
+  assert.equal(L.cutText(cut), 'Angezeigt werden die neuesten 2 von 340 Datensätzen.');
+});
+
+test('P3-1: a state the tab does not know is listed raw with its count, also a 0', () => {
+  const body = structuredClone(F.overview.body);
+  body.counts.by_state.brand_new_state = 2;
+  body.counts.by_state.other_new = 0;
+  const ov = L.parseOverview(body);
+  assert.deepEqual(L.unknownStates(ov), [{ state: 'brand_new_state', n: 2 }, { state: 'other_new', n: 0 }]);
+  assert.deepEqual(L.unknownStates(L.parseOverview(F.overview.body)), []);
+});
+
+test('P3-2: the note above an answer from before says it is old and from when', () => {
+  assert.equal(L.staleText(1_790_001_920, new TypeError('x')),
+    'Aktualisieren fehlgeschlagen (keine Antwort vom Server). Die Werte unten sind vom 21.09.2026, 16:45:20 und können veraltet sein.');
+  assert.equal(L.staleText(null, L.invalidBody('json', 200)),
+    'Aktualisieren fehlgeschlagen (Antwort nicht lesbar). Die Werte unten stammen aus einer früheren Antwort (Stand unbekannt) und können veraltet sein.');
+  assert.match(L.staleText(1, new L.ShApiError(null, 'timeout')), /\(keine Antwort in 30 s\)/);
+  assert.doesNotMatch(L.staleText(1_790_001_920, new TypeError('x')), /nichts als „in Ordnung“/);
+});
+
+test('P3-3: a missing key is unknown (undefined), only an explicit null is "none" (null)', () => {
+  const full = L.parseDetail(F.detail_open.body);
+  assert.equal(full.routerHold, null);
+  assert.equal(full.action.playbookId, null);
+  assert.equal(full.action.backupVersionId, null);
+  assert.equal(full.action.backupReason, null);
+  assert.equal(full.action.verificationResult, null);
+  assert.deepEqual(full.action.plannedChanges, []);
+  assert.deepEqual(full.action.components, []);
+  const body = structuredClone(F.detail_open.body);
+  delete body.router_hold;
+  for (const k of ['playbook_id', 'backup_ref', 'verification', 'planned_changes', 'components']) delete body.action[k];
+  const gone = L.parseDetail(body);
+  assert.equal(gone.routerHold, undefined);
+  assert.equal(gone.action.playbookId, undefined);
+  assert.equal(gone.action.backupVersionId, undefined);
+  assert.equal(gone.action.backupReason, undefined);
+  assert.equal(gone.action.verificationResult, undefined);
+  assert.equal(gone.action.plannedChanges, undefined);
+  assert.equal(gone.action.components, undefined);
+  // inside a present object a missing key is unknown too; a malformed value is unknown, not "none"
+  const half = structuredClone(F.detail_open.body);
+  half.action.backup_ref = { version_id: null };
+  half.action.verification = {};
+  half.action.playbook_id = 42;
+  half.action.planned_changes = 'x';
+  const h = L.parseDetail(half);
+  assert.equal(h.action.backupVersionId, null);
+  assert.equal(h.action.backupReason, undefined);
+  assert.equal(h.action.verificationResult, undefined);
+  assert.equal(h.action.playbookId, undefined);
+  assert.equal(h.action.plannedChanges, undefined);
+});
+
+test('P3-4: a detail without a valid action is an error, never an empty record', () => {
+  assert.throws(() => L.parseDetail({ generated_at: 1 }), isBroken('action'));
+  assert.throws(() => L.parseDetail({ action: { state: 'proposed' } }), isBroken('action'));
+  assert.throws(() => L.parseDetail({ action: { action_id: 'rem_123' } }), isBroken('action'));
+});
+
+test('P3-6 / P3-10: an unknown overview status and any mode other than observe are flagged', () => {
+  assert.equal(L.unknownStatus(L.parseOverview(F.overview.body)), null);
+  assert.equal(L.unknownStatus(L.parseOverview(F.disabled_overview.body)), null);
+  assert.equal(L.unknownStatus(L.parseOverview({ ...F.overview.body, status: 'maintenance' })), 'maintenance');
+  assert.equal(L.needsModeNote('observe'), false);
+  assert.equal(L.needsModeNote(null), false);
+  for (const m of ['approval', 'auto_heal', 'brand_new_mode']) assert.equal(L.needsModeNote(m), true, m);
+  assert.equal(L.MODE_NOTE, 'In dieser Version wird trotzdem nichts ausgeführt.');
+  assert.deepEqual(L.OUTCOME_HOLDS, ['outcome_unknown', 'outcome_escalated']);
+  assert.equal(L.REQUEST_TIMEOUT_MS, 30_000);
 });

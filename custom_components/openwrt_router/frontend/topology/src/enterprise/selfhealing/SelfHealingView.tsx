@@ -30,17 +30,21 @@ import configCSS from '../config/config.css?inline';
 import wifiCSS from '../wifi/wifi.css?inline';
 import shCSS from './selfhealing.css?inline';
 import {
-  CANDIDATE_LABEL, CANDIDATE_NOTE, DEFAULT_LIST_FILTERS, EMPTY_TEXT, EMPTY_TITLE, LOADING_TEXT, MASKED_TEXT,
-  NO_CANDIDATE_TEXT, OBSERVE_TEXT, OBSERVE_TITLE, OFF_HOW, OFF_TITLE, POLL_MIN_MS, ROLLBACK_LINE, TAB_TITLE, UNKNOWN,
+  CANDIDATE_LABEL, CANDIDATE_NOTE, DEFAULT_LIST_FILTERS, EMPTY_TEXT, EMPTY_TITLE, HOLD_OUTCOME_NOTE, LOADING_TEXT,
+  MASKED_TEXT, MODE_NOTE, NO_CANDIDATE_TEXT, OBSERVE_TEXT, OBSERVE_TITLE, OFF_HOW, OFF_TITLE, OUTCOME_HOLDS, POLL_MIN_MS,
+  ROLLBACK_LINE, ROUTERS_MISSING_TEXT, STALE_LABEL, TAB_TITLE, UNKNOWN,
   actionText, actorText, approvalText, causeLevelText, causeStatusText, causeText, changeText, checkText, componentText,
   countText, cutText, durationText, errorInfo, factText, familyText, filterRows, holdText, impactLines, incidentText,
-  isoUtc, modeText, modeWhy, outcomeView, permissionText, playbookText, pointsText, reasonText, riskView,
-  rollbackMechanismText, rollbackStatusText, routerIdsOf, routerText, scoreText, shouldPoll, standText, stateCounts,
-  stateText, stateView, tiles, timeText, verificationText, whyCodes, yesNo,
+  isEmptyList, isoUtc, listNotes, modeText, modeWhy, needsModeNote, outcomeView, permissionText, playbookText,
+  pointsText, reasonText, riskView, rollbackMechanismText, rollbackStatusText, routerIdsOf, routerText, scoreText,
+  shouldPoll, standText, staleText, stateCounts, stateText, stateView, tiles, timeText, unknownStates, unknownStatus,
+  verificationText, whyCodes, yesNo,
   type ListFilter, type ListFilters, type Tone,
 } from './shLogic.ts';
+import { createShLoader, type LoadHow, type LoadResult, type ShLoader } from './shLoader.ts';
 import type {
-  ActionList, ActionRow, Candidate, Detail, Explanation, Gate, Overview, Plan, Policy, RouterRow, Settings, ShApi,
+  ActionList, ActionRow, Candidate, Change, Detail, Explanation, Gate, Hold, Opt, Overview, Plan, Policy, RouterRow,
+  Settings, ShApi,
 } from './shTypes';
 
 const CHECK_MS = Math.min(15_000, POLL_MIN_MS);
@@ -94,6 +98,63 @@ function Reasons({ codes, empty }: { codes: readonly string[]; empty: string }) 
       {codes.map((c, i) => <li key={`${c}-${i}`} data-code={c}>{reasonText(c)}</li>)}
     </ul>
   );
+}
+
+/**
+ * An answer kept from before a failed refresh: marked as outdated (dashed
+ * amber frame, the word "Veraltet") with the time it is from, never as current.
+ */
+function Stale({ error, ts, onRetry, children }: {
+  error: unknown; ts: number | null | undefined; onRetry?: () => void; children: React.ReactNode;
+}) {
+  if (error === null) return <>{children}</>;
+  return (
+    <div className="sh-stale" data-stale="true">
+      <div className="cfg-notice cfg-notice--warn sh-error sh-stale__note" role="alert">
+        <strong className="sh-stale__label">{STALE_LABEL}</strong>
+        <span>{staleText(ts, error)}</span>
+        {onRetry && errorInfo(error).retry && <button type="button" className="diag-btn cfg-btn" onClick={onRetry}>Erneut versuchen</button>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** A mode; any other than "observe" says next to it that nothing runs anyway. */
+function ModeValue({ mode, strong }: { mode: string | null | undefined; strong?: boolean }) {
+  if (!mode) return <Unknown />;
+  return (
+    <>
+      {strong ? <strong>{modeText(mode)}</strong> : modeText(mode)}
+      {needsModeNote(mode) && <span className="sh-note" data-note="mode"> – {MODE_NOTE}</span>}
+    </>
+  );
+}
+
+/** A hold; a reason that speaks of an action's outcome gets one line that this version ran none. */
+function HoldValue({ hold, prefix = '' }: { hold: Hold; prefix?: string }) {
+  return (
+    <>
+      <span className="sh-warn">{prefix}{holdText(hold)}</span>
+      {hold.reason !== null && OUTCOME_HOLDS.includes(hold.reason) && (
+        <span className="sh-note sh-note--line" data-note="hold">{HOLD_OUTCOME_NOTE}</span>
+      )}
+    </>
+  );
+}
+
+/** A list the server may leave out (undefined: unknown) or send empty ("none"). */
+function Changes({ changes, none }: { changes: Change[] | undefined; none: string }) {
+  if (changes === undefined) return <Unknown why="nicht in der Antwort" />;
+  if (!changes.length) return <span className="sh-muted">{none}</span>;
+  return <ul className="sh-reasons">{changes.map((c, i) => <li key={i}>{changeText(c)}</li>)}</ul>;
+}
+
+/** An optional code: missing is unknown, an explicit null is `none`. */
+function OptText({ value, none, text }: { value: Opt<string>; none: string; text: (c: string) => string }) {
+  if (value === undefined) return <Unknown why="nicht in der Antwort" />;
+  if (value === null) return <>{none}</>;
+  return <>{text(value)}</>;
 }
 
 function Fact({ name, children }: { name: string; children: React.ReactNode }) {
@@ -158,6 +219,7 @@ export function OffBox() {
 
 export function OverviewSection({ ov, masked }: { ov: Overview; masked: boolean }) {
   const counts = stateCounts(ov);
+  const odd = unknownStates(ov);
   return (
     <section className="cfg-section sh-section" aria-labelledby="sh-overview">
       <h3 className="cfg-section__title" id="sh-overview">Übersicht</h3>
@@ -181,9 +243,14 @@ export function OverviewSection({ ov, masked }: { ov: Overview; masked: boolean 
         <Fact name="Nach Zustand">
           {Object.keys(ov.counts.byState).length === 0
             ? <Unknown why="Zahl vom Server nicht geliefert" />
-            : counts.length === 0
+            : counts.length === 0 && odd.every(o => o.n === 0)
               ? <span className="sh-muted">in keinem Zustand ein Datensatz</span>
-              : <span>{counts.map(c => `${stateText(c.state)}: ${c.n}`).join(' · ')} <span className="sh-muted">(alle anderen: 0)</span></span>}
+              : counts.length > 0 && <span>{counts.map(c => `${stateText(c.state)}: ${c.n}`).join(' · ')} <span className="sh-muted">(alle anderen: 0)</span></span>}
+          {odd.length > 0 && (
+            <span className="sh-warn sh-note--line" data-note="unknown-states">
+              Zustände, die dieser Tab nicht kennt (roh vom Server): {odd.map(o => `${o.state}: ${o.n}`).join(' · ')}
+            </span>
+          )}
         </Fact>
       </dl>
       <div className="cfg-hint sh-rollback" role="note">
@@ -203,14 +270,14 @@ function RouterCard({ r, ov, settings }: { r: RouterRow; ov: Overview; settings:
     <li className="sh-card" data-router={r.routerId}>
       <h4 className="sh-card__title" title={r.routerId}>{routerText(r.routerId)}</h4>
       <dl className="sh-facts">
-        <Fact name="Eingestellt">{r.configuredMode ? modeText(r.configuredMode) : <Unknown />}</Fact>
+        <Fact name="Eingestellt"><ModeValue mode={r.configuredMode} /></Fact>
         <Fact name="Gilt jetzt">
-          {r.effectiveMode ? <strong>{modeText(r.effectiveMode)}</strong> : <Unknown />}
+          <ModeValue mode={r.effectiveMode} strong />
           {why && <span className="sh-muted"> ({why})</span>}
         </Fact>
         <Fact name="Gesperrt">
           {r.held === null ? <Unknown /> : r.held
-            ? <span className="sh-warn">{r.hold ? holdText(r.hold) : 'ja (Sperre der Flotte)'}</span>
+            ? (r.hold ? <HoldValue hold={r.hold} /> : <span className="sh-warn">ja (Sperre der Flotte)</span>)
             : 'nein'}
         </Fact>
         <Fact name="Geladen">{r.loaded === null ? <Unknown /> : r.loaded ? 'ja' : 'nein (nur gespeicherte Datensätze)'}</Fact>
@@ -224,7 +291,7 @@ function RouterCard({ r, ov, settings }: { r: RouterRow; ov: Overview; settings:
 }
 
 export function RoutersSection({ ov, settings }: { ov: Overview; settings: Settings | null }) {
-  const routers = ov.routers ?? [];
+  const routers = ov.routers;
   const f = ov.fleet;
   return (
     <section className="cfg-section sh-section" aria-labelledby="sh-routers">
@@ -239,11 +306,13 @@ export function RoutersSection({ ov, settings }: { ov: Overview; settings: Setti
         </Fact>
         <Fact name="Flotte gesperrt">
           {f.held === null ? <Unknown /> : f.held
-            ? <span className="sh-warn">{f.hold ? `ja – ${holdText(f.hold)}` : 'ja'}</span>
+            ? (f.hold ? <HoldValue hold={f.hold} prefix="ja – " /> : <span className="sh-warn">ja</span>)
             : 'nein'}
         </Fact>
       </dl>
-      {routers.length === 0
+      {routers === null
+        ? <div className="cfg-notice cfg-notice--warn sh-error" role="alert" data-missing="routers">{ROUTERS_MISSING_TEXT}</div>
+        : routers.length === 0
         ? <div className="cfg-hint">Kein Router in Self-Healing bekannt.</div>
         : <ul className="sh-cards">{routers.map(r => <RouterCard key={r.routerId} r={r} ov={ov} settings={settings} />)}</ul>}
     </section>
@@ -308,12 +377,18 @@ export function RecordsSection({ list, listError, ov, filters, selected, onFilte
   const rows = list ? filterRows(list.actions, filters) : [];
   const routers = list ? routerIdsOf(list.actions, ov) : [];
   const cut = list ? cutText(list) : null;
+  const notes = list ? listNotes(list) : [];
+  const noteBox = notes.length > 0 && (
+    <div className="cfg-notice cfg-notice--warn sh-error" role="alert" data-notes="list">
+      {notes.map(n => <span key={n}>{n}</span>)}
+    </div>
+  );
   const body = (() => {
     if (list === null) {
       if (listError !== null) return <ErrorBox error={listError} of="list" onRetry={onRetry} />;
       return <Spinner text={LOADING_TEXT} />;
     }
-    if (list.actions.length === 0) {
+    if (isEmptyList(list)) {
       return (
         <div className="cfg-empty sh-empty" role="status">
           <strong>{EMPTY_TITLE}</strong>
@@ -321,8 +396,18 @@ export function RecordsSection({ list, listError, ov, filters, selected, onFilte
         </div>
       );
     }
+    if (list.actions.length === 0) {
+      // no readable row, but the answer is not "nothing there": never the calm empty state
+      return (
+        <div className="cfg-notice cfg-notice--warn sh-error" role="alert" data-empty="unreadable">
+          <strong>Keine lesbaren Datensätze in der Antwort.</strong>
+          {notes.map(n => <span key={n}>{n}</span>)}
+        </div>
+      );
+    }
     return (
       <>
+        {noteBox}
         {rows.length === 0
           ? <div className="cfg-empty sh-empty">Keine Datensätze mit diesem Filter.</div>
           : (
@@ -343,24 +428,26 @@ export function RecordsSection({ list, listError, ov, filters, selected, onFilte
     <section className="cfg-section sh-section" aria-labelledby="sh-records">
       <h3 className="cfg-section__title" id="sh-records">Datensätze</h3>
       <div className="cfg-hint">Ein Datensatz je Wurzelvorfall und Router, neueste zuerst. Offene stehen bei „Vorgeschlagen“ und gehen in dieser Version nie weiter.</div>
-      {list !== null && list.actions.length > 0 && (
-        <div className="sh-filters" role="group" aria-label="Filter der Datensätze">
-          <div className="sh-chips">
-            {SHOW.map(s => <Chip key={s.id} on={filters.show === s.id} onClick={() => onFilters({ ...filters, show: s.id })}>{s.label}</Chip>)}
+      {/* the filters and the rows are one block: marked as outdated together after a failed refresh */}
+      <Stale error={list !== null ? listError : null} ts={list?.generatedAt} onRetry={onRetry}>
+        {list !== null && list.actions.length > 0 && (
+          <div className="sh-filters" role="group" aria-label="Filter der Datensätze">
+            <div className="sh-chips">
+              {SHOW.map(s => <Chip key={s.id} on={filters.show === s.id} onClick={() => onFilters({ ...filters, show: s.id })}>{s.label}</Chip>)}
+            </div>
+            {routers.length > 1 && (
+              <label className="sh-field">
+                <span className="sh-field__name">Router</span>
+                <select value={filters.routerId ?? ''} onChange={e => onFilters({ ...filters, routerId: e.target.value || null })}>
+                  <option value="">Alle Router</option>
+                  {routers.map(id => <option key={id} value={id}>{routerText(id)}</option>)}
+                </select>
+              </label>
+            )}
           </div>
-          {routers.length > 1 && (
-            <label className="sh-field">
-              <span className="sh-field__name">Router</span>
-              <select value={filters.routerId ?? ''} onChange={e => onFilters({ ...filters, routerId: e.target.value || null })}>
-                <option value="">Alle Router</option>
-                {routers.map(id => <option key={id} value={id}>{routerText(id)}</option>)}
-              </select>
-            </label>
-          )}
-        </div>
-      )}
-      {list !== null && listError !== null && <ErrorBox error={listError} of="list" onRetry={onRetry} />}
-      {body}
+        )}
+        {body}
+      </Stale>
     </section>
   );
 }
@@ -372,7 +459,7 @@ function GateBlock({ gate }: { gate: Gate | null }) {
   return (
     <>
       <Fact name="Erlaubnis">{permissionText(gate.permission)}</Fact>
-      <Fact name="Geltender Modus">{modeText(gate.effectiveMode)}</Fact>
+      <Fact name="Geltender Modus"><ModeValue mode={gate.effectiveMode} /></Fact>
       <Fact name="Ausführbar jetzt">{gate.executableNow === true ? 'ja' : gate.executableNow === false ? 'nein' : <Unknown />}</Fact>
       <Fact name="Gründe des Gates"><Reasons codes={gate.reasons} empty="keine genannt" /></Fact>
     </>
@@ -426,7 +513,16 @@ function PolicyBlock({ policy }: { policy: Policy }) {
   );
 }
 
-export function CandidateBlock({ candidate }: { candidate: Candidate | null }) {
+/** `candidate`: null when the plan's explanation names none; `unknownWhy`: the plan or its explanation is missing. */
+export function CandidateBlock({ candidate, unknownWhy }: { candidate: Candidate | null; unknownWhy?: string }) {
+  if (unknownWhy) {
+    return (
+      <div className="sh-candidate sh-candidate--none" data-candidate="unknown">
+        <h5 className="sh-sub">{CANDIDATE_LABEL}</h5>
+        <p className="sh-p"><Unknown why={unknownWhy} /></p>
+      </div>
+    );
+  }
   if (!candidate) {
     return (
       <div className="sh-candidate sh-candidate--none" data-candidate="none">
@@ -447,14 +543,11 @@ export function CandidateBlock({ candidate }: { candidate: Candidate | null }) {
       ) : (
         <dl className="sh-facts">
           <Fact name="Playbook">
-            {candidate.playbookId ? `${playbookText(candidate.playbookId)}${candidate.playbookVersion !== null ? ` (Fassung ${candidate.playbookVersion})` : ''}` : <Unknown why="keines genannt" />}
+            <OptText value={candidate.playbookId} none="keines"
+              text={id => `${playbookText(id)}${candidate.playbookVersion !== null ? ` (Fassung ${candidate.playbookVersion})` : ''}`} />
           </Fact>
           {candidate.policy ? <PolicyBlock policy={candidate.policy} /> : <Fact name="Ergebnis">{outcomeView(candidate.outcome).label}</Fact>}
-          <Fact name="Geplante Änderung (nicht ausgeführt)">
-            {candidate.plannedChanges.length
-              ? <ul className="sh-reasons">{candidate.plannedChanges.map((c, i) => <li key={i}>{changeText(c)}</li>)}</ul>
-              : <span className="sh-muted">keine</span>}
-          </Fact>
+          <Fact name="Geplante Änderung (nicht ausgeführt)"><Changes changes={candidate.plannedChanges} none="keine" /></Fact>
           <GateBlock gate={candidate.gate} />
           {candidate.facts && candidate.facts.unknown.length > 0 && (
             <Fact name="Nicht bekannte Fakten">{candidate.facts.unknown.map(factText).join(', ')}</Fact>
@@ -471,8 +564,7 @@ export function CandidateBlock({ candidate }: { candidate: Candidate | null }) {
   );
 }
 
-function Blockers({ plan }: { plan: Plan | null; }) {
-  if (!plan) return <Unknown why="kein Plan vom Server" />;
+function Blockers({ plan }: { plan: Plan }) {
   return (
     <>
       <p className="sh-p">
@@ -499,10 +591,14 @@ function ExplanationBlock({ explanation }: { explanation: Explanation | null }) 
   );
 }
 
+export const PLAN_MISSING_TEXT = 'kein Plan in der Antwort – Erklärung, Kandidat und Blocker sind nicht verfügbar';
+export const PLAN_LOADING_TEXT = 'Plan wird geladen …';
+
 export interface DetailProps {
   detail: Detail | null;
   detailError: unknown;
-  plan: Plan | null;
+  /** undefined: not loaded yet; null: the server listed no plan for this record. */
+  plan: Plan | null | undefined;
   planError: unknown;
   loading: boolean;
   onRetry: () => void;
@@ -520,9 +616,14 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
   const d = a.decisionDetail;
   const risk = riskView(a.risk?.riskClass ?? null);
   const explanation = plan?.explanation ?? null;
+  // what the plan blocks show: an error, loading, no plan, no explanation, or the plan
+  const planGap = planError !== null ? 'Plan nicht geladen'
+    : plan === undefined ? null
+    : plan === null ? PLAN_MISSING_TEXT
+    : null;
   return (
     <div className="sh-detail" aria-busy={loading || undefined}>
-      {detailError !== null && <ErrorBox error={detailError} of="record" onRetry={onRetry} />}
+      <Stale error={detailError} ts={detail.generatedAt} onRetry={onRetry}>
 
       <div className="sh-block">
         <h4 className="sh-block__title">Vorfall und Ursache</h4>
@@ -539,8 +640,10 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
             ) : 'keine Ursache gemeldet'}
           </Fact>
           <Fact name="Zustand"><Badge tone={stateView(a.state).tone}>{stateText(a.state)}</Badge></Fact>
-          <Fact name="Geltender Modus">{detail.effectiveMode ? modeText(detail.effectiveMode) : <Unknown />}</Fact>
-          <Fact name="Sperre des Routers">{detail.routerHold ? <span className="sh-warn">{holdText(detail.routerHold)}</span> : 'keine'}</Fact>
+          <Fact name="Geltender Modus"><ModeValue mode={detail.effectiveMode} /></Fact>
+          <Fact name="Sperre des Routers">
+            {detail.routerHold === undefined ? <Unknown why="nicht in der Antwort" /> : detail.routerHold === null ? 'keine' : <HoldValue hold={detail.routerHold} />}
+          </Fact>
           {(a.flags.inMaintenance || a.flags.interrupted) && (
             <Fact name="Markierungen">
               {[a.flags.inMaintenance ? 'in Wartung' : null, a.flags.interrupted ? 'durch Neustart unterbrochen' : null].filter(Boolean).join(', ')}
@@ -570,26 +673,30 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
             </Fact>
           )}
           <Fact name="Risiko"><Badge tone={risk.tone}>{risk.label}</Badge><Reasons codes={a.risk?.reasons ?? []} empty="keine Risikogründe genannt" /></Fact>
-          <Fact name="Geplante Änderung">
-            {a.plannedChanges.length ? <ul className="sh-reasons">{a.plannedChanges.map((c, i) => <li key={i}>{changeText(c)}</li>)}</ul> : 'keine'}
-          </Fact>
+          <Fact name="Geplante Änderung"><Changes changes={a.plannedChanges} none="keine" /></Fact>
         </dl>
       </div>
 
       <div className="sh-block">
         <h4 className="sh-block__title">Erklärung der Richtlinie (mit den Fakten von jetzt)</h4>
-        {planError !== null ? <ErrorBox error={planError} of="record" onRetry={onRetry} /> : <ExplanationBlock explanation={explanation} />}
+        {planError !== null ? <ErrorBox error={planError} of="record" onRetry={onRetry} />
+          : plan === undefined ? <Spinner text={PLAN_LOADING_TEXT} />
+          : plan === null ? <Unknown why={PLAN_MISSING_TEXT} />
+          : <ExplanationBlock explanation={explanation} />}
       </div>
 
       <div className="sh-block">
-        {planError !== null
-          ? <><h4 className="sh-block__title">{CANDIDATE_LABEL}</h4><Unknown why="Plan nicht geladen" /></>
-          : <CandidateBlock candidate={explanation?.candidate ?? null} />}
+        {plan === undefined && planError === null
+          ? <><h4 className="sh-block__title">{CANDIDATE_LABEL}</h4><Spinner text={PLAN_LOADING_TEXT} /></>
+          : <CandidateBlock candidate={explanation?.candidate ?? null}
+              unknownWhy={planGap ?? (explanation === null ? 'der Plan enthält keine Erklärung' : undefined)} />}
       </div>
 
       <div className="sh-block">
         <h4 className="sh-block__title">Was würde blockieren</h4>
-        {planError !== null ? <Unknown why="Plan nicht geladen" /> : <Blockers plan={plan} />}
+        {planGap !== null ? <Unknown why={planGap} />
+          : plan === undefined || plan === null ? <Spinner text={PLAN_LOADING_TEXT} />
+          : <Blockers plan={plan} />}
         <h5 className="sh-sub">Vorabprüfungen des Datensatzes</h5>
         {a.preflight === null
           ? <Unknown why="vom Server nicht geliefert" />
@@ -642,13 +749,16 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
       <div className="sh-block">
         <h4 className="sh-block__title">Weitere Angaben</h4>
         <dl className="sh-facts">
-          <Fact name="Playbook">{a.playbookId ? playbookText(a.playbookId) : 'keines'}</Fact>
+          <Fact name="Playbook"><OptText value={a.playbookId} none="keines" text={playbookText} /></Fact>
           <Fact name="Freigabe">{approvalText(a.approvalStatus)}</Fact>
           <Fact name="Sicherung">
-            {a.backupVersionId ? a.backupVersionId : a.backupReason ? reasonText(a.backupReason) : 'keine Sicherung verknüpft'}
+            {typeof a.backupVersionId === 'string' ? a.backupVersionId
+              : typeof a.backupReason === 'string' ? reasonText(a.backupReason)
+              : a.backupVersionId === null && a.backupReason === null ? 'keine Sicherung verknüpft'
+              : <Unknown why="nicht in der Antwort" />}
           </Fact>
           <Fact name="Ausführung">{a.executionAttempt === 0 ? 'nie ausgeführt' : a.executionAttempt === null ? <Unknown /> : `Versuch ${a.executionAttempt}`}</Fact>
-          <Fact name="Nachprüfung">{a.verificationResult ? verificationText(a.verificationResult) : 'keine Nachprüfung'}</Fact>
+          <Fact name="Nachprüfung"><OptText value={a.verificationResult} none="keine Nachprüfung" text={verificationText} /></Fact>
           <Fact name="Rollback">
             {rollbackStatusText(a.rollbackStatus)} <span className="sh-muted">(Mechanismus: {rollbackMechanismText(a.rollbackMechanism)}{a.rollbackStatement ? `; ${reasonText(a.rollbackStatement)}` : ''})</span>
           </Fact>
@@ -658,11 +768,14 @@ export function DetailPanel({ detail, detailError, plan, planError, loading, onR
               : <ul className="sh-reasons">{impactLines(a.expectedImpact).map(l => <li key={l.key}>{l.label}: {l.value === UNKNOWN ? <Unknown /> : l.value}</li>)}</ul>}
           </Fact>
           <Fact name="Bauteile">
-            {a.components.length ? a.components.map(c => `${componentText(c.kind)} ${c.name ?? ''}`.trim()).join(', ') : 'keine (der Router selbst)'}
+            {a.components === undefined ? <Unknown why="nicht in der Antwort" />
+              : a.components.length ? a.components.map(c => `${componentText(c.kind)} ${c.name ?? ''}`.trim()).join(', ')
+              : 'keine (der Router selbst)'}
           </Fact>
           <Fact name="Angelegt / geändert"><Time ts={a.createdAt} /> / <Time ts={a.updatedAt} /></Fact>
         </dl>
       </div>
+      </Stale>
     </div>
   );
 }
@@ -673,8 +786,9 @@ export function SettingsSection({ settings, error }: { settings: Settings | null
   return (
     <section className="cfg-section sh-section" aria-labelledby="sh-settings">
       <h3 className="cfg-section__title" id="sh-settings">Einstellungen (nur Anzeige)</h3>
-      {error !== null && <ErrorBox error={error} of="list" />}
+      {settings === null && error !== null && <ErrorBox error={error} of="list" />}
       {settings === null ? (error === null ? <Spinner text={LOADING_TEXT} /> : null) : (
+        <Stale error={error} ts={settings.generatedAt}>
         <dl className="sh-facts">
           <Fact name="Schalter in den Optionen">{settings.moduleSwitch === null ? <Unknown /> : settings.moduleSwitch ? 'an' : 'aus'}</Fact>
           <Fact name="Modul im Speicher">{settings.enabled === null ? <Unknown /> : settings.enabled ? 'an' : 'aus'}</Fact>
@@ -684,6 +798,7 @@ export function SettingsSection({ settings, error }: { settings: Settings | null
           <Fact name="Aufbewahrung abgeschlossener Datensätze">{durationText(settings.retentionS)}</Fact>
           <Fact name="Höchstens gespeichert">{countText(settings.maxActions)}</Fact>
         </dl>
+        </Stale>
       )}
     </section>
   );
@@ -701,13 +816,15 @@ export interface ShState {
   detail: Detail | null;
   detailError: unknown;
   plan: Plan | null;
+  /** The record the plan answer is for (null: no plan answer yet); `plan` null then means "no plan listed". */
+  planFor: string | null;
   planError: unknown;
   loading: boolean;
 }
 
 export const SH_INIT: ShState = {
   overview: null, overviewError: null, list: null, listError: null, settings: null, settingsError: null,
-  detail: null, detailError: null, plan: null, planError: null, loading: false,
+  detail: null, detailError: null, plan: null, planFor: null, planError: null, loading: false,
 };
 
 export interface ScreenProps {
@@ -742,21 +859,28 @@ export function SelfHealingScreen({ state, isAdmin, filters, selected, onRefresh
       if (state.overviewError !== null) return <ErrorBox error={state.overviewError} of="overview" onRetry={onRefresh} />;
       return <Spinner text={LOADING_TEXT} />;
     }
-    // an answer from before stays on screen, the failed refresh is said above it
-    const stale = state.overviewError !== null && <ErrorBox error={state.overviewError} of="overview" onRetry={onRefresh} />;
-    const masked = !isAdmin || ov.routers === null;
-    if (masked) {
-      return <>{stale}<OverviewSection ov={ov} masked /></>;
+    // an answer from before stays on screen, marked as outdated with its time (Stale)
+    const odd = unknownStatus(ov);
+    const status = odd !== null && (
+      <div className="cfg-notice cfg-notice--warn sh-error" role="alert" data-status={odd}>
+        Der Server meldet den Zustand „{odd}“, den dieser Tab nicht kennt. Die Werte unten stehen so, wie sie kommen.
+      </div>
+    );
+    // the server decides what a reader sees; the tab hides the rest from non-admins (an admin is never told otherwise)
+    if (!isAdmin) {
+      return <>{status}<Stale error={state.overviewError} ts={ov.generatedAt} onRetry={onRefresh}><OverviewSection ov={ov} masked /></Stale></>;
     }
     const detail = selected ? (
       <DetailPanel detail={state.detail?.action.actionId === selected ? state.detail : null} detailError={state.detailError}
-        plan={state.plan?.actionId === selected ? state.plan : null} planError={state.planError} loading={state.loading} onRetry={onRefresh} />
+        plan={state.planFor === selected ? state.plan : undefined} planError={state.planError} loading={state.loading} onRetry={onRefresh} />
     ) : null;
     return (
       <>
-        {stale}
-        <OverviewSection ov={ov} masked={false} />
-        <RoutersSection ov={ov} settings={state.settings} />
+        {status}
+        <Stale error={state.overviewError} ts={ov.generatedAt} onRetry={onRefresh}>
+          <OverviewSection ov={ov} masked={false} />
+          <RoutersSection ov={ov} settings={state.settings} />
+        </Stale>
         <RecordsSection list={state.list} listError={state.listError} ov={ov} filters={filters} selected={selected}
           onFilters={onFilters} onSelect={onSelect} onRetry={onRefresh} detail={detail} />
         <SettingsSection settings={state.settings} error={state.settingsError} />
@@ -773,17 +897,8 @@ export function SelfHealingScreen({ state, isAdmin, filters, selected, onRefresh
 
 // ── Container (fetching and polling; GET only, through ShApi) ────────────
 
-type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
-
-function settle<T>(p: Promise<T>): Promise<Settled<T>> {
-  return p.then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
-}
-
 /** Merge one load into the state: a new answer replaces, a failure keeps the last answer and says so. */
-export function applyLoad(prev: ShState, r: {
-  overview: Settled<Overview>; list?: Settled<ActionList>; settings?: Settled<Settings>;
-  detail?: Settled<Detail>; plan?: Settled<Plan | null>; selected: string | null;
-}): ShState {
+export function applyLoad(prev: ShState, r: LoadResult): ShState {
   const next: ShState = { ...prev, loading: false };
   if (r.overview.ok) { next.overview = r.overview.value; next.overviewError = null; } else {
     next.overviewError = r.overview.error;
@@ -794,7 +909,7 @@ export function applyLoad(prev: ShState, r: {
   if (r.list) { if (r.list.ok) { next.list = r.list.value; next.listError = null; } else next.listError = r.list.error; }
   if (r.settings) { if (r.settings.ok) { next.settings = r.settings.value; next.settingsError = null; } else next.settingsError = r.settings.error; }
   if (r.selected === null) {
-    next.detail = null; next.detailError = null; next.plan = null; next.planError = null;
+    next.detail = null; next.detailError = null; next.plan = null; next.planFor = null; next.planError = null;
   } else {
     if (r.detail) {
       if (r.detail.ok) { next.detail = r.detail.value; next.detailError = null; } else {
@@ -803,9 +918,9 @@ export function applyLoad(prev: ShState, r: {
       }
     }
     if (r.plan) {
-      if (r.plan.ok) { next.plan = r.plan.value; next.planError = null; } else {
+      if (r.plan.ok) { next.plan = r.plan.value; next.planFor = r.selected; next.planError = null; } else {
         next.planError = r.plan.error;
-        if (prev.plan?.actionId !== r.selected) next.plan = null;
+        if (prev.planFor !== r.selected) { next.plan = null; next.planFor = null; }
       }
     }
   }
@@ -820,39 +935,41 @@ export function SelfHealingView({ api, isAdmin = false }: { api: ShApi; isAdmin?
   stateRef.current = state;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
-  const seq = useRef(0);
   const lastMs = useRef<number | null>(null);
+  const loader = useRef<ShLoader | null>(null);
 
-  const load = useCallback(() => {
-    const n = ++seq.current;
-    const sel = selectedRef.current;
-    lastMs.current = Date.now();
-    setState(s => ({ ...s, loading: true }));
-    const overview = settle(api.overview());
-    const admin = isAdmin;
-    const list = admin ? settle(api.actions()) : undefined;
-    const settings = admin ? settle(api.settings()) : undefined;
-    const detail = admin && sel ? settle(api.action(sel)) : undefined;
-    const plan = admin && sel ? settle(api.plan(sel)) : undefined;
-    void Promise.all([overview, list, settings, detail, plan]).then(([o, l, st, d, p]) => {
-      if (n !== seq.current) return; // a newer load is on its way
-      setState(prev => applyLoad(prev, { overview: o, list: l, settings: st, detail: d, plan: p, selected: sel }));
+  // one loader per api: it aborts the running load on unmount (dispose) and before a load asked for by hand
+  useEffect(() => {
+    const l = createShLoader({
+      api, isAdmin,
+      onStart: () => setState(s => ({ ...s, loading: true })),
+      onResult: r => setState(prev => applyLoad(prev, r)),
     });
+    loader.current = l;
+    return () => {
+      l.dispose();
+      if (loader.current === l) loader.current = null;
+    };
   }, [api, isAdmin]);
+
+  const load = useCallback((how: LoadHow) => {
+    if (loader.current?.load(selectedRef.current, how)) lastMs.current = Date.now();
+  }, [api, isAdmin]); // a new loader (new api or role) is a new load
+  const refresh = useCallback(() => load('now'), [load]);
 
   // open: load now; a new selection loads its record (and everything else) at once
   useEffect(() => {
-    if (pageVisible()) load();
+    if (pageVisible()) load('now');
     else lastMs.current = null;
   }, [load, selected]);
 
-  // at most every 60 s while visible; nothing while off, forbidden or gone
+  // at most every 60 s while visible, never two at once; nothing while off, forbidden or gone
   useEffect(() => {
     const check = () => {
       const s = stateRef.current;
       const kind = s.overview === null && s.overviewError !== null ? errorInfo(s.overviewError).kind : null;
       const stopped = kind === 'forbidden' || kind === 'gone' || kind === 'off' || s.overview?.status === 'module_disabled';
-      if (shouldPoll({ visible: pageVisible(), lastMs: lastMs.current, nowMs: Date.now(), stopped })) load();
+      if (shouldPoll({ visible: pageVisible(), lastMs: lastMs.current, nowMs: Date.now(), stopped })) load('poll');
     };
     const id = setInterval(check, CHECK_MS);
     document.addEventListener('visibilitychange', check);
@@ -865,6 +982,6 @@ export function SelfHealingView({ api, isAdmin = false }: { api: ShApi; isAdmin?
   const onSelect = useCallback((id: string | null) => setSelected(id), []);
   return (
     <SelfHealingScreen state={state} isAdmin={isAdmin} filters={filters} selected={selected}
-      onRefresh={load} onFilters={setFilters} onSelect={onSelect} />
+      onRefresh={refresh} onFilters={setFilters} onSelect={onSelect} />
   );
 }

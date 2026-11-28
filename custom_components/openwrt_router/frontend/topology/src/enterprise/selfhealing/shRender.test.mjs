@@ -34,7 +34,7 @@ before(async () => {
     stdin: {
       contents: [
         "export * from './shLogic.ts';",
-        "export { SelfHealingScreen, SelfHealingView, SH_INIT, applyLoad, isOff } from './SelfHealingView';",
+        "export { PLAN_LOADING_TEXT, PLAN_MISSING_TEXT, SelfHealingScreen, SelfHealingView, SH_INIT, applyLoad, isOff } from './SelfHealingView';",
         "export { createMockShApi, mockHass } from './shMock.ts';",
         "export { getEnterpriseTabs } from '../registry';",
         "export { bindDiagnosticsHass } from '../diagnostics/register';",
@@ -78,6 +78,7 @@ function state(keys = {}) {
   if (keys.plan) {
     const [plans, err] = take(keys.plan, M.parsePlans);
     s.plan = plans ? plans.find(p => p.actionId === keys.selected) ?? null : null;
+    s.planFor = plans ? keys.selected : null;
     s.planError = err;
   }
   return { ...s, ...(keys.extra ?? {}) };
@@ -113,6 +114,57 @@ const ALL_STATES = () => [
   ['off', screen(state({ overview: 'disabled_overview' }))],
   ['notrunning', screen(state({ overview: 'not_running' }))],
   ['error', screen({ ...M.SH_INIT, overviewError: new TypeError('Failed to fetch') })],
+];
+
+// ── States of the review round (PR #84): broken, partial and outdated answers ──
+
+const ok = v => ({ ok: true, value: v });
+const bad = e => ({ ok: false, error: e });
+const broken = field => new M.ShApiError(200, 'invalid_body', { field });
+const ID_X = `rem_${'f'.repeat(32)}`;
+
+/** A good first load, then a refresh where every request fails (the old answers stay). */
+function staleState(selected = null) {
+  const first = M.applyLoad(M.SH_INIT, {
+    overview: ok(M.parseOverview(F.overview.body)), list: ok(M.parseActions(F.actions.body)),
+    settings: ok(M.parseSettings(F.settings.body)),
+    detail: selected ? ok(M.parseDetail(F.detail_open.body)) : undefined,
+    plan: selected ? ok(M.parsePlans(F.plan_open.body).find(p => p.actionId === selected) ?? null) : undefined,
+    selected,
+  });
+  const e = new TypeError('Failed to fetch');
+  return M.applyLoad(first, {
+    overview: bad(e), list: bad(e), settings: bad(e),
+    detail: selected ? bad(e) : undefined, plan: selected ? bad(e) : undefined, selected,
+  });
+}
+function listState(raw) {
+  return { ...state(FULL), list: M.parseActions(raw) };
+}
+const PARTIAL = (() => {
+  const raw = structuredClone(F.actions.body);
+  raw.actions.push({ action_id: 'kaputt', state: 'proposed' });
+  raw.total = 4;
+  return raw;
+})();
+const NO_ROUTERS = (() => {
+  const b = structuredClone(F.overview.body);
+  delete b.routers;
+  return b;
+})();
+const REVIEW_STATES = () => [
+  ['stale', screen(staleState())],
+  ['stale-detail', screen(staleState(ID_OPEN), { selected: ID_OPEN })],
+  ['invalid-overview', screen({ ...M.SH_INIT, overviewError: broken('json') })],
+  ['invalid-list', screen({ ...state(FULL), list: null, listError: broken('actions') })],
+  ['partial-list', screen(listState(PARTIAL))],
+  ['unreadable-only', screen(listState({ ...F.actions.body, total: 1, actions: [{ action_id: 'x' }] }))],
+  ['invalid-detail', screen({ ...state(FULL), detailError: broken('action') }, { selected: ID_OPEN })],
+  ['no-plan', screen({ ...state({ ...FULL, detail: 'detail_open' }), plan: null, planFor: ID_OPEN }, { selected: ID_OPEN })],
+  ['plan-loading', screen(state({ ...FULL, detail: 'detail_open' }), { selected: ID_OPEN })],
+  ['admin-no-routers', screen({ ...state(FULL), overview: M.parseOverview(NO_ROUTERS) })],
+  ['odd-status', screen({ ...state(FULL), overview: M.parseOverview({ ...F.overview.body, status: 'maintenance' }) })],
+  ['timeout', screen({ ...M.SH_INIT, overviewError: new M.ShApiError(null, 'timeout') })],
 ];
 
 const PRIVATE = /(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|\b\d{1,3}(?:\.\d{1,3}){3}\b|\b(?:wlan|phy|eth|br-|lan\d)\S*/i;
@@ -340,4 +392,171 @@ test('the dev mock serves every scenario from the recorded answers', async () =>
   assert.ok(plan.explanation.candidate);
   await assert.rejects(M.createMockShApi('notrunning').overview(), e => e.status === 503);
   assert.equal(M.mockHass('user').user.is_admin, false);
+  // the review scenarios: a 200 without JSON, a partial list, answers that go stale
+  await assert.rejects(M.createMockShApi('invalid').overview(), e => e.status === 200 && e.code === 'invalid_body');
+  const partial = await M.createMockShApi('partial').actions();
+  assert.equal(partial.unreadable, 1);
+  assert.equal(M.listNotes(partial).length, 2);
+  const stale = M.createMockShApi('stale');
+  assert.equal((await stale.overview()).status, 'on');
+  await new Promise(r => setTimeout(r, 600));
+  await assert.rejects(stale.overview());
+});
+
+// ── Review round of PR #84 ───────────────────────────────────────────────
+
+test('P2-1: a broken list answer is an error, never "Noch nichts beobachtet"', () => {
+  const t = text(screen({ ...state(FULL), list: null, listError: broken('actions') }));
+  assert.match(t, /Die Antwort der Liste war nicht lesbar \(Status 200, Teil actions\)/);
+  assert.ok(!t.includes(M.EMPTY_TITLE) && !t.includes('das ist kein Fehler'));
+  assert.ok(buttons(screen({ ...state(FULL), list: null, listError: broken('actions') })).includes('Erneut versuchen'));
+});
+
+test('P2-1: a broken overview is an error for an admin, never "only administrators" or a page of "unbekannt"', () => {
+  const html = screen({ ...M.SH_INIT, overviewError: broken('json') });
+  const t = text(html);
+  assert.match(t, /Die Antwort von Self-Healing war nicht lesbar \(Status 200, Teil json\)/);
+  assert.match(body(html), /cfg-notice--error/);
+  assert.ok(!t.includes(M.MASKED_TEXT) && !t.includes('Übersicht'));
+  assert.ok(buttons(html).includes('Erneut versuchen'));
+});
+
+test('P2-1: dropped rows and a total that does not match are said; empty only for 0 and []', () => {
+  const t = text(screen(listState(PARTIAL)));
+  assert.match(t, /1 Datensatz nicht lesbar/);
+  assert.match(t, /Die Antwort passt nicht zusammen: Der Server meldet 4 Datensätze, geliefert wurden 3\./);
+  assert.equal((screen(listState(PARTIAL)).match(/class="sh-record"/g) ?? []).length, 2);
+  const only = text(screen(listState({ ...F.actions.body, total: 1, actions: [{ action_id: 'x' }] })));
+  assert.match(only, /Keine lesbaren Datensätze in der Antwort\. 1 Datensatz nicht lesbar/);
+  assert.ok(!only.includes(M.EMPTY_TITLE));
+  const lost = text(screen(listState({ ...F.actions.body, total: 3, actions: [] })));
+  assert.ok(!lost.includes(M.EMPTY_TITLE));
+  assert.match(lost, /Der Server meldet 3 Datensätze, geliefert wurden 0\./);
+  const noTotal = text(screen(listState({ actions: [] })));
+  assert.ok(!noTotal.includes(M.EMPTY_TITLE));
+  assert.match(noTotal, /nennt keine Gesamtzahl/);
+  assert.ok(text(screen(listState(F.empty_actions.body))).includes(M.EMPTY_TITLE));
+});
+
+test('P3-1: unknown by_state keys are listed with raw code and count', () => {
+  const b = structuredClone(F.overview.body);
+  b.counts.by_state.brand_new_state = 3;
+  const t = text(screen({ ...state(FULL), overview: M.parseOverview(b) }));
+  assert.match(t, /Zustände, die dieser Tab nicht kennt \(roh vom Server\): brand_new_state: 3/);
+  // only unknown states counted: not "in keinem Zustand ein Datensatz"
+  const z = structuredClone(F.empty_overview.body);
+  z.counts.by_state.brand_new_state = 1;
+  const tz = text(screen({ ...state({ overview: 'empty_overview', list: 'empty_actions', settings: 'settings' }), overview: M.parseOverview(z) }));
+  assert.ok(!tz.includes('in keinem Zustand ein Datensatz'));
+  assert.match(tz, /brand_new_state: 1/);
+});
+
+test('P3-2: after a failed refresh the old values are marked outdated with their time', () => {
+  const html = screen(staleState());
+  const t = text(html);
+  assert.ok(t.includes('Aktualisieren fehlgeschlagen (keine Antwort vom Server). Die Werte unten sind vom 21.09.2026, 16:45:20 und können veraltet sein.'));
+  assert.ok(!t.includes('Es wird nichts als „in Ordnung“ angezeigt'));
+  // overview + routers, the list and the settings: each its own outdated block, with the word "Veraltet"
+  assert.equal((body(html).match(/class="sh-stale" data-stale="true"/g) ?? []).length, 3);
+  assert.equal((t.match(/Veraltet Aktualisieren fehlgeschlagen/g) ?? []).length, 3);
+  const at = body(html).indexOf('data-stale');
+  assert.ok(at < body(html).indexOf('id="sh-overview"') && at < body(html).indexOf('id="sh-routers"'));
+  // the open record too
+  const d = screen(staleState(ID_OPEN), { selected: ID_OPEN });
+  assert.equal((body(d).match(/data-stale="true"/g) ?? []).length, 4);
+  assert.match(text(d), /Veraltet Aktualisieren fehlgeschlagen \(keine Antwort vom Server\)\. Die Werte unten sind vom 21\.09\.2026, 16:45:20 und können veraltet sein\. Erneut versuchen Vorfall und Ursache/);
+});
+
+test('P3-3: a missing field reads "unbekannt", only an explicit null "keine"', () => {
+  const raw = structuredClone(F.detail_open.body);
+  delete raw.router_hold;
+  for (const k of ['playbook_id', 'backup_ref', 'verification', 'planned_changes', 'components']) delete raw.action[k];
+  const s = { ...state({ ...FULL, plan: 'plan_open', selected: ID_OPEN }), detail: M.parseDetail(raw) };
+  const t = text(screen(s, { selected: ID_OPEN }));
+  for (const name of ['Sperre des Routers', 'Geplante Änderung', 'Playbook', 'Sicherung', 'Nachprüfung', 'Bauteile']) {
+    assert.ok(t.includes(`${name} unbekannt – nicht in der Antwort`), name);
+  }
+  const full = text(screen(state({ ...FULL, detail: 'detail_open', plan: 'plan_open', selected: ID_OPEN }), { selected: ID_OPEN }));
+  for (const line of ['Sperre des Routers keine', 'Geplante Änderung keine', 'Playbook keines', 'Sicherung keine Sicherung verknüpft',
+    'Nachprüfung keine Nachprüfung', 'Bauteile keine (der Router selbst)']) {
+    assert.ok(full.includes(line), line);
+  }
+});
+
+test('P3-4: a detail answer without a valid action shows an error, not "loading" forever', () => {
+  const t = text(screen({ ...state(FULL), detailError: broken('action') }, { selected: ID_OPEN }));
+  assert.match(t, /Die Antwort zum Datensatz war nicht lesbar \(Status 200, Teil action\)/);
+  assert.ok(!t.includes('Datensatz wird geladen'));
+});
+
+test('P3-5: no plan in the answer is not "no candidate"; "no candidate" needs a plan that names none', () => {
+  const none = text(screen({ ...state({ ...FULL, detail: 'detail_open' }), plan: null, planFor: ID_OPEN }, { selected: ID_OPEN }));
+  assert.ok(!none.includes(M.NO_CANDIDATE_TEXT));
+  assert.ok(none.includes(`${M.CANDIDATE_LABEL} unbekannt – ${M.PLAN_MISSING_TEXT}`));
+  assert.ok(none.includes(`Was würde blockieren unbekannt – ${M.PLAN_MISSING_TEXT}`));
+  // not loaded yet: loading, never "no candidate"
+  const wait = text(screen(state({ ...FULL, detail: 'detail_open' }), { selected: ID_OPEN }));
+  assert.ok(!wait.includes(M.NO_CANDIDATE_TEXT));
+  assert.ok(wait.includes(`${M.CANDIDATE_LABEL} ${M.PLAN_LOADING_TEXT}`));
+  // a plan without an explanation: the candidate is unknown
+  const plan = { ...M.parsePlans(F.plan_open.body)[0], explanation: null };
+  const noExp = text(screen({ ...state({ ...FULL, detail: 'detail_open' }), plan, planFor: ID_OPEN }, { selected: ID_OPEN }));
+  assert.ok(noExp.includes(`${M.CANDIDATE_LABEL} unbekannt – der Plan enthält keine Erklärung`));
+  // a plan whose explanation names none: now it says so
+  const named = text(screen(state({ ...FULL, detail: 'detail_open', plan: 'plan_open', selected: ID_OPEN }), { selected: ID_OPEN }));
+  assert.ok(named.includes(`${M.CANDIDATE_LABEL} ${M.NO_CANDIDATE_TEXT}`));
+});
+
+test('P3-6: an unknown overview status is shown raw', () => {
+  const html = screen({ ...state(FULL), overview: M.parseOverview({ ...F.overview.body, status: 'maintenance' }) });
+  assert.match(text(html), /Der Server meldet den Zustand „maintenance“, den dieser Tab nicht kennt\./);
+  assert.match(body(html), /data-status="maintenance"/);
+  assert.doesNotMatch(text(screen(state(FULL))), /meldet den Zustand/);
+});
+
+test('P3-7: an admin whose overview has no routers is told the list is missing, not "only administrators"', () => {
+  const html = screen({ ...state(FULL), overview: M.parseOverview(NO_ROUTERS) });
+  const t = text(html);
+  assert.ok(t.includes(M.ROUTERS_MISSING_TEXT));
+  assert.ok(!t.includes(M.MASKED_TEXT));
+  assert.match(body(html), /id="sh-routers"/);
+  assert.match(body(html), /id="sh-records"/);
+  // a non-admin still sees the counts only
+  assert.ok(text(screen(state({ overview: 'user_overview' }), { isAdmin: false })).includes(M.MASKED_TEXT));
+});
+
+test('P3-8: the container loads through the loader, aborts on unmount and polls with "poll"', () => {
+  const tsx = readFileSync(join(here, 'SelfHealingView.tsx'), 'utf8');
+  assert.match(tsx, /const l = createShLoader\(\{/);
+  assert.match(tsx, /return \(\) => \{\n\s+l\.dispose\(\);/);
+  assert.match(tsx, /\) load\('poll'\);/);
+  assert.match(tsx, /if \(pageVisible\(\)\) load\('now'\);/);
+  assert.doesNotMatch(tsx, /api\.(overview|actions|action|plan|settings)\(/, 'requests only through the loader');
+});
+
+test('P3-9: every clickable element of every state is on a pinned list', () => {
+  const BUTTONS = ['Abgeschlossen', 'Aktualisieren', 'Alle', 'Details anzeigen', 'Details schließen', 'Erneut versuchen', 'Offen'];
+  const OPTIONS = ['Alle Router', 'Router 111111', 'Router 222222'];
+  const seenButtons = new Set();
+  const seenOptions = new Set();
+  for (const [name, html] of [...ALL_STATES(), ...REVIEW_STATES()]) {
+    const b = body(html);
+    for (const x of buttons(b)) seenButtons.add(x);
+    for (const m of b.matchAll(/<option[^>]*>([\s\S]*?)<\/option>/g)) seenOptions.add(text(m[1]));
+    assert.equal((b.match(/<select\b/g) ?? []).length <= 1, true, `${name}: one select at most`);
+    // nothing else is clickable: no link, no role=button, no tabindex, no summary, no input, no form
+    assert.doesNotMatch(b, /<(a|input|textarea|form|summary|details)\b|role="(button|link|menuitem|switch|checkbox)"|tabindex=|contenteditable/i, name);
+  }
+  assert.deepEqual([...seenButtons].sort(), BUTTONS);
+  assert.deepEqual([...seenOptions].sort(), OPTIONS);
+});
+
+test('P3-10: holds and modes read plainly: nothing ran, nothing runs', () => {
+  const t = text(screen(state(HELD)));
+  assert.ok(t.includes(`Gesperrt ${M.reasonText('outcome_unknown')} – ohne Ende – nur ein Administrator hebt sie auf ${M.HOLD_OUTCOME_NOTE}`));
+  assert.match(t, new RegExp(`Router 222222 Eingestellt ${M.modeText('auto_heal')} – ${M.MODE_NOTE}`));
+  assert.doesNotMatch(t, new RegExp(`${M.modeText('observe')} – ${M.MODE_NOTE}`));
+  // the record's hold in the detail too
+  const d = text(screen(state({ ...HELD, detail: 'held_detail', plan: 'held_plan', selected: ID_OPEN }), { selected: ID_OPEN }));
+  assert.ok(d.includes(`Sperre des Routers ${M.reasonText('outcome_unknown')} – ohne Ende – nur ein Administrator hebt sie auf ${M.HOLD_OUTCOME_NOTE}`));
 });

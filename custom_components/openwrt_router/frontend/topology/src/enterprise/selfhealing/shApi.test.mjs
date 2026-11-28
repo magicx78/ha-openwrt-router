@@ -93,6 +93,56 @@ test('an id that is not a record id never reaches a URL', async () => {
   assert.equal(w.calls.length, 0);
 });
 
+test('P2-1: a 200 without JSON or with the wrong shape is ShApiError(200, invalid_body)', async () => {
+  const hass = { callApi: async () => ({}), auth: { data: { access_token: 'tok' } } };
+  const answers = {
+    overview: { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } },
+    [`actions?limit=${LIST_LIMIT}`]: response(200, { total: 2, actions: 'x' }),
+    [`actions/${ID_OPEN}`]: response(200, { action: { ...F.detail_open.body.action, action_id: `rem_${'f'.repeat(32)}` } }),
+    [`plans?action_id=${ID_OPEN}`]: response(200, { plans: null }),
+    settings: response(200, 'not an object'),
+  };
+  const api = createShApi(() => hass, { fetch: async url => answers[url.slice(SH_BASE.length + 1)] });
+  const broken = field => e => e instanceof ShApiError && e.status === 200 && e.code === 'invalid_body' && e.details.field === field;
+  await assert.rejects(api.overview(), broken('json'));
+  await assert.rejects(api.actions(), broken('actions'));
+  // an answer about another record is no answer about this one
+  await assert.rejects(api.action(ID_OPEN), broken('action_id'));
+  await assert.rejects(api.plan(ID_OPEN), broken('plans'));
+  await assert.rejects(api.settings(), broken('body'));
+  // through hass.callApi (no token) the status is unknown, the error the same
+  const viaCall = createShApi(() => ({ callApi: async () => ({ actions: {} }) }));
+  await assert.rejects(viaCall.actions(), e => e instanceof ShApiError && e.status === null && e.code === 'invalid_body');
+});
+
+test('P3-8: every request carries an AbortSignal, stops on abort and ends after the deadline', async () => {
+  const hass = { callApi: async () => ({}), auth: { data: { access_token: 'tok' } } };
+  const seen = [];
+  const hang = (url, init) => { seen.push(init.signal); return new Promise(() => {}); };
+  const slow = createShApi(() => hass, { fetch: hang, timeoutMs: 20 });
+  await assert.rejects(slow.overview(), e => e instanceof ShApiError && e.status === null && e.code === 'timeout');
+  assert.ok(seen[0] instanceof AbortSignal && seen[0].aborted, 'the request itself is aborted at the deadline');
+  const api = createShApi(() => hass, { fetch: hang });
+  const ctrl = new AbortController();
+  const p = api.actions(ctrl.signal);
+  ctrl.abort();
+  await assert.rejects(p, e => e instanceof ShApiError && e.code === 'aborted');
+  assert.ok(seen[1].aborted);
+  // an already aborted signal sends nothing
+  await assert.rejects(api.settings(ctrl.signal), e => e.code === 'aborted');
+  assert.equal(seen.length, 2);
+  // hass.callApi cannot be stopped: its late answer is dropped, the caller gets the timeout
+  const viaCall = createShApi(() => ({ callApi: () => new Promise(() => {}) }), { timeoutMs: 20 });
+  await assert.rejects(viaCall.overview(), e => e.code === 'timeout');
+});
+
+test('P3-8: the default deadline is 30 s (no other tab has one: DECIDED)', async () => {
+  const src = readFileSync(join(here, 'shApi.ts'), 'utf8');
+  assert.match(src, /const timeoutMs = deps\.timeoutMs \?\? REQUEST_TIMEOUT_MS;/);
+  const { REQUEST_TIMEOUT_MS } = await import('./shLogic.ts');
+  assert.equal(REQUEST_TIMEOUT_MS, 30_000);
+});
+
 // ── Source scan: the whole tab only reads ────────────────────────────────
 
 const SOURCES = readdirSync(here).filter(f => /\.(ts|tsx)$/.test(f));
@@ -120,6 +170,37 @@ test('only shApi.ts talks to the network, and only to the read routes', () => {
   const paths = [...api.matchAll(/get\(\s*[`'"]([^`'"]+)[`'"]/g)].map(m => m[1]);
   assert.deepEqual(paths, ['overview', 'actions?limit=${LIST_LIMIT}', 'actions/${checkedId(id)}', 'plans?action_id=${checkedId(id)}', 'settings']);
   assert.doesNotMatch(api, /approve|execute|release|pause|resume|\/mode|reject|acknowledge/i);
+});
+
+// P3-9: the shared modules the tab imports (transitively, outside its folder) only read too
+function importsOf(file) {
+  const text = readFileSync(file, 'utf8');
+  return [...code(text).matchAll(/^\s*import\s+(?!type\b)[^'"]*['"](\.{1,2}\/[^'"]+)['"]/gm)]
+    .map(m => m[1]).filter(p => !/\.(css|json)(\?inline)?$/.test(p))
+    .map(p => {
+      const base = join(dirname(file), p);
+      for (const cand of [base, `${base}.ts`, `${base}.tsx`]) { try { readFileSync(cand); return cand; } catch { /* next */ } }
+      throw new Error(`unresolved ${p} in ${file}`);
+    });
+}
+
+test('P3-9: the shared modules the tab imports name no writing method and no network call', () => {
+  const seen = new Set();
+  const queue = SOURCES.filter(f => !/\.test\./.test(f)).map(f => join(here, f));
+  while (queue.length) {
+    const f = queue.shift();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    queue.push(...importsOf(f));
+  }
+  const shared = [...seen].filter(f => !f.startsWith(here)).map(f => f.slice(join(here, '../..').length + 1)).sort();
+  // pinned: if the tab starts to import another module, it has to be looked at (and added here)
+  assert.deepEqual(shared, ['enterprise/registry.ts', 'enterprise/wifi/wifiLogic.ts', 'utils/format.ts']);
+  for (const rel of shared) {
+    const text = code(readFileSync(join(here, '../..', rel), 'utf8'));
+    assert.doesNotMatch(text, /\b(POST|PUT|DELETE|PATCH)\b/, rel);
+    assert.doesNotMatch(text, /\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket|callApi|callService|callWS|sendMessage/, rel);
+  }
 });
 
 test('the markup has no control that changes anything', () => {

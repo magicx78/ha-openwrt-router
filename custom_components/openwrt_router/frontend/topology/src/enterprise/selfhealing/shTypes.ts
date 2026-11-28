@@ -4,7 +4,15 @@
  * value the server may leave out or send in an unexpected form is `null`
  * here ("unknown"), never a guessed default; codes stay raw strings (the
  * texts come from shTexts.ts).
+ *
+ * Where the difference matters (`Opt<T>`), a key missing from the answer is
+ * `undefined` (shown as "unbekannt") and only an explicit null of the server
+ * is `null` (shown as "keine"). An answer of the wrong shape is never parsed
+ * into empty values: the parser throws ShApiError(status, 'invalid_body').
  */
+
+/** undefined: the key is missing (unknown); null: the server said "none"; else the value. */
+export type Opt<T> = T | null | undefined;
 
 export interface ShHass {
   callApi<T>(method: 'GET', path: string): Promise<T>;
@@ -97,7 +105,12 @@ export interface ActionList {
   total: number | null;
   limit: number | null;
   offset: number | null;
+  /** The readable rows (a row without a valid id or form is dropped and counted in `unreadable`). */
   actions: ActionRow[];
+  /** How many rows the answer had (readable or not). */
+  received: number;
+  /** Rows of the answer that could not be read. */
+  unreadable: number;
 }
 
 export interface HistoryEntry {
@@ -157,27 +170,29 @@ export interface RecordDetail extends ActionRow {
   history: HistoryEntry[];
   preflight: Check[] | null;
   approvalStatus: string | null;
-  backupVersionId: string | null;
-  backupReason: string | null;
+  backupVersionId: Opt<string>;
+  backupReason: Opt<string>;
   expectedImpact: Impact | null;
-  verificationResult: string | null;
+  verificationResult: Opt<string>;
   verificationChecks: Check[] | null;
   rollbackMechanism: string | null;
   rollbackStatement: string | null;
   rollbackStatus: string | null;
   executionAttempt: number | null;
   callResult: string | null;
-  components: { kind: string | null; name: string | null }[];
-  plannedChanges: Change[];
+  /** undefined: not in the answer; []: none (the router itself). */
+  components: { kind: string | null; name: string | null }[] | undefined;
+  /** undefined: not in the answer; [] (or null from the server): none. */
+  plannedChanges: Change[] | undefined;
   prerequisites: string[];
-  playbookId: string | null;
+  playbookId: Opt<string>;
   playbookVersion: number | null;
 }
 
 export interface Detail {
   generatedAt: number | null;
   action: RecordDetail;
-  routerHold: Hold | null;
+  routerHold: Opt<Hold>;
   effectiveMode: string | null;
 }
 
@@ -229,7 +244,7 @@ export interface Facts {
 /** A facts source's candidate: decided, explained, NEVER executed (label "candidate"). */
 export interface Candidate {
   actionType: string | null;
-  playbookId: string | null;
+  playbookId: Opt<string>;
   playbookVersion: number | null;
   outcome: string | null;
   /** `candidate_failed`: the evaluation of the candidate failed. */
@@ -237,7 +252,7 @@ export interface Candidate {
   policy: Policy | null;
   gate: Gate | null;
   facts: Facts | null;
-  plannedChanges: Change[];
+  plannedChanges: Change[] | undefined;
 }
 
 export interface Explanation {
@@ -256,7 +271,7 @@ export interface Plan {
   decision: Decision | null;
   risk: Risk | null;
   proposedActionType: string | null;
-  plannedChanges: Change[];
+  plannedChanges: Change[] | undefined;
   explanation: Explanation | null;
 }
 
@@ -275,12 +290,16 @@ export interface Settings {
   routers: Readonly<Record<string, RouterSetting>>;
 }
 
-/** The tab's only network access: GET requests to the read routes of heal_views.py. */
+/**
+ * The tab's only network access: GET requests to the read routes of
+ * heal_views.py. `signal` cancels a request (the loader aborts a load on
+ * unmount and before the next one); every request also ends after 30 s.
+ */
 export interface ShApi {
-  overview(): Promise<Overview>;
-  actions(): Promise<ActionList>;
-  action(actionId: string): Promise<Detail>;
+  overview(signal?: AbortSignal): Promise<Overview>;
+  actions(signal?: AbortSignal): Promise<ActionList>;
+  action(actionId: string, signal?: AbortSignal): Promise<Detail>;
   /** The plan of one record (null: the server listed none for it). */
-  plan(actionId: string): Promise<Plan | null>;
-  settings(): Promise<Settings>;
+  plan(actionId: string, signal?: AbortSignal): Promise<Plan | null>;
+  settings(signal?: AbortSignal): Promise<Settings>;
 }

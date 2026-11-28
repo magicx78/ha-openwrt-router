@@ -6,7 +6,9 @@
  * Rule "truth or unknown": a value the server did not send, or sent in an
  * unexpected form, is null and shown as "unbekannt" (with the reason where
  * there is one), never as 0, "aus" or OK. A code without a German text is
- * shown as the raw code.
+ * shown as the raw code. An answer of the wrong shape (no JSON, a list that
+ * is not a list, a record without its id) is an error (ShApiError
+ * 'invalid_body'), never an empty or calm state.
  */
 
 import { DASH, POLL_MIN_MS, routerLabel, shouldFetch } from '../wifi/wifiLogic.ts';
@@ -17,8 +19,8 @@ import {
 } from './shTexts.ts';
 import type {
   ActionList, ActionRow, Candidate, Cause, Change, Check, Contribution, Counts, Decision, Detail, Explanation, Facts,
-  Factor, Flags, Gate, HistoryEntry, Hold, Impact, Overview, Plan, Policy, RecordDetail, Risk, RouterRow, RouterSetting,
-  Rule, Settings,
+  Factor, Flags, Gate, HistoryEntry, Hold, Impact, Opt, Overview, Plan, Policy, RecordDetail, Risk, RouterRow,
+  RouterSetting, Rule, Settings,
 } from './shTypes';
 
 export { DASH, POLL_MIN_MS };
@@ -54,6 +56,20 @@ export const NO_CANDIDATE_TEXT =
 export const CANDIDATE_LABEL = 'Kandidat – nicht ausgeführt';
 export const CANDIDATE_NOTE =
   'Nur zur Erklärung: So würde die Richtlinie über diese Aktion entscheiden. Sie ist nicht die Entscheidung des Datensatzes und wird in dieser Version nie ausgeführt.';
+/** The line under a hold whose reason speaks of an action's outcome (the tab never ran one). */
+export const HOLD_OUTCOME_NOTE =
+  'Diese Version hat keine Aktion ausgeführt und führt keine aus; die Sperre steht so im gespeicherten Zustand von Self-Healing und bleibt, bis ein Administrator sie aufhebt.';
+/** Hold reasons that speak of an action's outcome (heal_model.HoldReason). */
+export const OUTCOME_HOLDS: readonly string[] = ['outcome_unknown', 'outcome_escalated'];
+/** Next to every mode other than "observe". */
+export const MODE_NOTE = 'In dieser Version wird trotzdem nichts ausgeführt.';
+export const ROUTERS_MISSING_TEXT =
+  'Die Router-Liste fehlt in der Antwort des Servers – welche Router Self-Healing kennt und in welchem Modus, ist unbekannt.';
+export const STALE_LABEL = 'Veraltet';
+/** The overview states this tab knows; any other is shown raw. */
+export const KNOWN_STATUS: readonly string[] = ['on', 'module_disabled'];
+/** Every request of the tab ends after this (no other tab has a timeout; DECIDED: 30 s). */
+export const REQUEST_TIMEOUT_MS = 30_000;
 export const BLOCKED_RISKY_UNKNOWN =
   'Keine der lesenden Routen liefert diese Zahl in 1.53.0 (Vorabprüfungen sind nicht angebunden).';
 
@@ -94,48 +110,86 @@ export class ShApiError extends Error {
   }
 }
 
-export type ErrorKind = 'failed' | 'forbidden' | 'gone' | 'off' | 'missing' | 'invalid';
+export type ErrorKind = 'failed' | 'forbidden' | 'gone' | 'off' | 'missing' | 'invalid' | 'broken' | 'timeout';
 export interface ErrorInfo {
   kind: ErrorKind;
   message: string;
+  /** A few words for the "outdated" note above an answer from before. */
+  short: string;
   retry: boolean;
 }
 
-/** What a failed request means. `of`: the overview (the tab's first answer) or one record. */
+/** The answer had status 2xx but no JSON or the wrong shape (`field`: what was wrong). */
+export function invalidBody(field: string, status: number | null = null): ShApiError {
+  return new ShApiError(status, 'invalid_body', { field });
+}
+
+/** What a failed request means. `of`: the overview (the tab's first answer), the list or one record. */
 export function errorInfo(err: unknown, of: 'overview' | 'list' | 'record' = 'overview'): ErrorInfo {
   const failed = of === 'record'
     ? 'Der Datensatz konnte nicht geladen werden. Was angezeigt war, ist eventuell nicht mehr aktuell.'
     : 'Self-Healing konnte nicht geladen werden. Es wird nichts als „in Ordnung“ angezeigt, solange keine Antwort da ist.';
-  if (!(err instanceof ShApiError)) return { kind: 'failed', message: failed, retry: true };
+  const what = of === 'record' ? 'zum Datensatz' : of === 'list' ? 'der Liste' : 'von Self-Healing';
+  if (!(err instanceof ShApiError)) return { kind: 'failed', message: failed, short: 'keine Antwort vom Server', retry: true };
+  if (err.code === 'invalid_body') {
+    const field = err.details.field && CODE_RE.test(err.details.field) ? err.details.field : null;
+    return {
+      kind: 'broken',
+      message: `Die Antwort ${what} war nicht lesbar (Status ${err.status ?? UNKNOWN}${field ? `, Teil ${field}` : ''}). Es wird nichts daraus angezeigt – auch nicht als leer oder „in Ordnung“.`,
+      short: 'Antwort nicht lesbar',
+      retry: true,
+    };
+  }
+  if (err.code === 'timeout') {
+    return {
+      kind: 'timeout',
+      message: `Keine Antwort ${what} innerhalb von ${REQUEST_TIMEOUT_MS / 1000} s. Es wird nichts als „in Ordnung“ angezeigt, solange keine Antwort da ist.`,
+      short: `keine Antwort in ${REQUEST_TIMEOUT_MS / 1000} s`,
+      retry: true,
+    };
+  }
   switch (err.status) {
     case 401:
-      return { kind: 'forbidden', message: 'Die Anmeldung ist abgelaufen. Bitte die Seite neu laden.', retry: false };
+      return { kind: 'forbidden', message: 'Die Anmeldung ist abgelaufen. Bitte die Seite neu laden.', short: 'Anmeldung abgelaufen', retry: false };
     case 403:
       return {
         kind: 'forbidden',
         message: of === 'overview'
           ? 'Nur für Administratoren. Ein Administrator kann das Panel in den Optionen („Topologie-Panel allen Benutzern anzeigen“) freigeben; dann sind die Zahlen für alle sichtbar.'
           : 'Nur für Administratoren.',
+        short: 'nur für Administratoren',
         retry: false,
       };
     case 404:
       if (err.code === 'unknown_action') {
-        return { kind: 'missing', message: 'Diesen Datensatz gibt es nicht mehr (aufgeräumt oder der Speicher wurde neu angelegt).', retry: false };
+        return { kind: 'missing', message: 'Diesen Datensatz gibt es nicht mehr (aufgeräumt oder der Speicher wurde neu angelegt).', short: 'Datensatz nicht mehr vorhanden', retry: false };
       }
       // no route: the module was off when Home Assistant started (routes are registered with the first start)
-      return { kind: 'off', message: NOT_RUNNING_TEXT, retry: true };
+      return { kind: 'off', message: NOT_RUNNING_TEXT, short: 'Self-Healing läuft nicht', retry: true };
     case 410:
-      return { kind: 'gone', message: 'Die Integration wurde entladen.', retry: false };
+      return { kind: 'gone', message: 'Die Integration wurde entladen.', short: 'Integration entladen', retry: false };
     case 503:
-      if (err.code === 'not_running') return { kind: 'off', message: NOT_RUNNING_TEXT, retry: true };
-      return { kind: 'failed', message: failed, retry: true };
+      if (err.code === 'not_running') return { kind: 'off', message: NOT_RUNNING_TEXT, short: 'Self-Healing läuft nicht', retry: true };
+      return { kind: 'failed', message: failed, short: 'Server nicht bereit', retry: true };
     case 400: {
       const field = err.details.field && CODE_RE.test(err.details.field) ? err.details.field : null;
-      return { kind: 'invalid', message: `Ungültige Anfrage${field ? ` (Feld ${field})` : ''}.`, retry: false };
+      return { kind: 'invalid', message: `Ungültige Anfrage${field ? ` (Feld ${field})` : ''}.`, short: 'ungültige Anfrage', retry: false };
     }
     default:
-      return { kind: 'failed', message: failed, retry: true };
+      return { kind: 'failed', message: failed, short: err.status !== null ? `Fehler ${err.status}` : 'keine Antwort vom Server', retry: true };
   }
+}
+
+/**
+ * The note above an answer kept from before a failed refresh: it says the
+ * values are old and from when, never that nothing is shown.
+ */
+export function staleText(ts: number | null | undefined, err: unknown): string {
+  const why = errorInfo(err).short;
+  const when = timeText(ts);
+  return when === UNKNOWN
+    ? `Aktualisieren fehlgeschlagen (${why}). Die Werte unten stammen aus einer früheren Antwort (Stand unbekannt) und können veraltet sein.`
+    : `Aktualisieren fehlgeschlagen (${why}). Die Werte unten sind vom ${when} und können veraltet sein.`;
 }
 
 // ── Reading values (unknown stays null) ─────────────────────────────────
@@ -170,6 +224,21 @@ function routerId(v: unknown): string | null {
 }
 function actionId(v: unknown): string | null {
   return typeof v === 'string' && ACTION_ID_RE.test(v) ? v : null;
+}
+/** A key that may be missing (undefined), explicitly null (null), or a value; a malformed value is unknown. */
+function opt<T>(o: Obj | null, key: string, read: (v: unknown) => T | null): Opt<T> {
+  if (!o || !Object.prototype.hasOwnProperty.call(o, key)) return undefined;
+  const v = o[key];
+  if (v === null) return null;
+  const r = read(v);
+  return r === null ? undefined : r;
+}
+/** A list that may be missing (undefined: unknown); an explicit null is "none" ([]). */
+function optList<T>(o: Obj | null, key: string, read: (x: unknown) => T): T[] | undefined {
+  if (!o || !Object.prototype.hasOwnProperty.call(o, key)) return undefined;
+  const v = o[key];
+  if (v === null) return [];
+  return Array.isArray(v) ? v.map(read) : undefined;
 }
 
 export function parseHold(v: unknown): Hold | null {
@@ -211,13 +280,17 @@ function parseCounts(v: unknown): Counts {
 }
 
 export function parseOverview(body: unknown): Overview {
-  const b = obj(body) ?? {};
+  const b = obj(body);
+  if (!b) throw invalidBody('body');
+  if (typeof b.status !== 'string') throw invalidBody('status');
+  if (!obj(b.counts)) throw invalidBody('counts');
   const f = obj(b.fleet) ?? {};
   const routers = Array.isArray(b.routers)
     ? b.routers.map(parseRouter).filter((r): r is RouterRow => r !== null)
     : null;
   return {
-    status: code(b.status),
+    // the raw status, also one this tab does not know (an odd one is cut to 64 characters, never dropped)
+    status: code(b.status) ?? b.status.slice(0, 64),
     generatedAt: num(b.generated_at),
     releaseMode: code(b.release_mode),
     writePath: bool(b.write_path),
@@ -272,13 +345,18 @@ function parseRow(v: unknown): ActionRow | null {
 }
 
 export function parseActions(body: unknown): ActionList {
-  const b = obj(body) ?? {};
+  const b = obj(body);
+  if (!b) throw invalidBody('body');
+  if (!Array.isArray(b.actions)) throw invalidBody('actions');
+  const actions = b.actions.map(parseRow).filter((r): r is ActionRow => r !== null);
   return {
     generatedAt: num(b.generated_at),
     total: int(b.total),
     limit: int(b.limit),
     offset: int(b.offset),
-    actions: arr(b.actions).map(parseRow).filter((r): r is ActionRow => r !== null),
+    actions,
+    received: b.actions.length,
+    unreadable: b.actions.length - actions.length,
   };
 }
 
@@ -320,11 +398,9 @@ function parseChecks(v: unknown): Check[] | null {
   });
 }
 
-function parseChanges(v: unknown): Change[] {
-  return arr(v).map((x): Change => {
-    const c = obj(x) ?? {};
-    return { kind: code(c.kind), target: code(c.target), effect: code(c.effect) };
-  });
+function parseChange(x: unknown): Change {
+  const c = obj(x) ?? {};
+  return { kind: code(c.kind), target: code(c.target), effect: code(c.effect) };
 }
 
 function parseImpact(v: unknown): Impact | null {
@@ -340,15 +416,14 @@ function parseImpact(v: unknown): Impact | null {
 }
 
 export function parseDetail(body: unknown): Detail {
-  const b = obj(body) ?? {};
-  const a = obj(b.action) ?? {};
-  const row = parseRow(a) ?? {
-    actionId: '', routerId: null, state: null, terminal: null, createdAt: null, updatedAt: null, actionType: null,
-    incidentId: null, incidentType: null, incidentReopen: null, causeCode: null, causeLevel: null, decision: null,
-    riskClass: null, flags: parseFlags(null),
-  };
-  const backup = obj(a.backup_ref);
-  const verification = obj(a.verification);
+  const b = obj(body);
+  if (!b) throw invalidBody('body');
+  const a = obj(b.action);
+  const row = a ? parseRow(a) : null;
+  if (!a || !row) throw invalidBody('action');
+  // backup_ref / verification: missing is unknown, an explicit null is "none"
+  const backup = opt(a, 'backup_ref', obj);
+  const verification = opt(a, 'verification', obj);
   const rollback = obj(a.rollback);
   const execution = obj(a.execution);
   const action: RecordDetail = {
@@ -362,26 +437,26 @@ export function parseDetail(body: unknown): Detail {
     }),
     preflight: parseChecks(a.preflight),
     approvalStatus: code(obj(a.approval)?.status),
-    backupVersionId: backup ? code(backup.version_id) : null,
-    backupReason: backup ? code(backup.reason) : null,
+    backupVersionId: backup ? opt(backup, 'version_id', code) : backup,
+    backupReason: backup ? opt(backup, 'reason', code) : backup,
     expectedImpact: parseImpact(a.expected_impact),
-    verificationResult: verification ? code(verification.result) : null,
+    verificationResult: verification ? opt(verification, 'result', code) : verification,
     verificationChecks: verification ? parseChecks(verification.checks) : null,
     rollbackMechanism: rollback ? code(rollback.mechanism) : null,
     rollbackStatement: rollback ? code(rollback.statement) : null,
     rollbackStatus: rollback ? code(rollback.status) : null,
     executionAttempt: execution ? int(execution.attempt_no) : null,
     callResult: execution ? code(execution.call_result) : null,
-    components: arr(a.components).map(x => {
+    components: optList(a, 'components', x => {
       const c = obj(x) ?? {};
       return { kind: code(c.kind), name: code(c.name) };
     }),
-    plannedChanges: parseChanges(a.planned_changes),
+    plannedChanges: optList(a, 'planned_changes', parseChange),
     prerequisites: codes(a.prerequisites),
-    playbookId: code(a.playbook_id),
+    playbookId: opt(a, 'playbook_id', code),
     playbookVersion: int(a.playbook_version),
   };
-  return { generatedAt: num(b.generated_at), action, routerHold: parseHold(b.router_hold), effectiveMode: code(b.effective_mode) };
+  return { generatedAt: num(b.generated_at), action, routerHold: opt(b, 'router_hold', parseHold), effectiveMode: code(b.effective_mode) };
 }
 
 function parseGate(v: unknown): Gate | null {
@@ -435,14 +510,14 @@ function parseCandidate(v: unknown): Candidate | null {
   if (!c || c.label !== 'candidate') return null;
   return {
     actionType: code(c.action_type),
-    playbookId: code(c.playbook_id),
+    playbookId: opt(c, 'playbook_id', code),
     playbookVersion: int(c.playbook_version),
     outcome: code(c.outcome),
     error: code(c.error),
     policy: parsePolicy(c.policy),
     gate: parseGate(c.gate),
     facts: parseFacts(c.facts),
-    plannedChanges: parseChanges(c.planned_changes),
+    plannedChanges: optList(c, 'planned_changes', parseChange),
   };
 }
 
@@ -453,8 +528,10 @@ function parseExplanation(v: unknown): Explanation | null {
 }
 
 export function parsePlans(body: unknown): Plan[] {
-  const b = obj(body) ?? {};
-  return arr(b.plans).map((x): Plan => {
+  const b = obj(body);
+  if (!b) throw invalidBody('body');
+  if (!Array.isArray(b.plans)) throw invalidBody('plans');
+  return b.plans.map((x): Plan => {
     const p = obj(x) ?? {};
     return {
       actionId: actionId(p.action_id),
@@ -464,15 +541,17 @@ export function parsePlans(body: unknown): Plan[] {
       decision: parseDecision(p.decision),
       risk: parseRisk(p.risk),
       proposedActionType: code(p.proposed_action_type),
-      plannedChanges: parseChanges(p.planned_changes),
+      plannedChanges: optList(p, 'planned_changes', parseChange),
       explanation: parseExplanation(p.explanation),
     };
   });
 }
 
 export function parseSettings(body: unknown): Settings {
-  const b = obj(body) ?? {};
-  const s = obj(b.settings) ?? {};
+  const b = obj(body);
+  if (!b) throw invalidBody('body');
+  const s = obj(b.settings);
+  if (!s) throw invalidBody('settings');
   const fixed = obj(b.limits) ?? {};
   const limits: Record<string, number> = {};
   for (const [k, v] of Object.entries(obj(s.limits) ?? {})) {
@@ -681,6 +760,24 @@ export function stateCounts(ov: Overview): { state: string; n: number }[] {
   return ALL_STATES.filter(s => (ov.counts.byState[s] ?? 0) > 0).map(s => ({ state: s, n: ov.counts.byState[s] }));
 }
 
+/** States the server counted that this tab does not know: raw code and count, also a 0 (never dropped). */
+export function unknownStates(ov: Overview): { state: string; n: number }[] {
+  return Object.entries(ov.counts.byState)
+    .filter(([s]) => !ALL_STATES.includes(s))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([state, n]) => ({ state, n }));
+}
+
+/** An overview status this tab does not know ('on', 'module_disabled'): shown raw. */
+export function unknownStatus(ov: Overview): string | null {
+  return ov.status !== null && !KNOWN_STATUS.includes(ov.status) ? ov.status : null;
+}
+
+/** A mode other than "observe" (an unknown one too): the tab says nothing runs anyway. */
+export function needsModeNote(mode: string | null | undefined): boolean {
+  return !!mode && mode !== 'observe';
+}
+
 // ── Records: filters and the list ────────────────────────────────────────
 
 export type ListFilter = 'open' | 'closed' | 'all';
@@ -713,10 +810,37 @@ export function routerIdsOf(rows: readonly ActionRow[], ov: Overview | null): st
   return [...ids].sort((a, b) => routerText(a).localeCompare(routerText(b), 'de') || a.localeCompare(b));
 }
 
-/** "Die neuesten 200 von 340." when the server holds more than it sent. */
+/** "Die neuesten 200 von 340." when the server holds more than it sent (and the numbers fit together). */
 export function cutText(list: ActionList): string | null {
-  if (list.total === null || list.total <= list.actions.length) return null;
+  if (list.total === null || list.total <= list.actions.length || listMismatch(list)) return null;
   return `Angezeigt werden die neuesten ${list.actions.length} von ${list.total} Datensätzen.`;
+}
+
+/** The empty state ("Noch nichts beobachtet") only for a total of 0 and no row at all. */
+export function isEmptyList(list: ActionList): boolean {
+  return list.total === 0 && list.received === 0;
+}
+
+function listMismatch(list: ActionList): boolean {
+  if (list.total === null) return false;
+  const expected = Math.max(0, Math.min(list.total - (list.offset ?? 0), list.limit ?? Number.POSITIVE_INFINITY));
+  return list.received !== expected;
+}
+
+/** What does not fit in a list answer, said plainly (dropped rows, a total that does not match the rows). */
+export function listNotes(list: ActionList): string[] {
+  const notes: string[] = [];
+  if (list.unreadable > 0) {
+    notes.push(list.unreadable === 1
+      ? '1 Datensatz nicht lesbar (in der Antwort, aber ohne gültige Kennung oder Form; er wird nicht angezeigt).'
+      : `${list.unreadable} Datensätze nicht lesbar (in der Antwort, aber ohne gültige Kennung oder Form; sie werden nicht angezeigt).`);
+  }
+  if (list.total === null) {
+    notes.push('Die Antwort nennt keine Gesamtzahl der Datensätze – ob es weitere gibt, ist unbekannt.');
+  } else if (listMismatch(list)) {
+    notes.push(`Die Antwort passt nicht zusammen: Der Server meldet ${list.total} Datensätze, geliefert wurden ${list.received}.`);
+  }
+  return notes;
 }
 
 // ── Explanation helpers ──────────────────────────────────────────────────
