@@ -617,6 +617,76 @@ Abschnitt 7.2.
   grünem Stand: 115 Mutationen (je eine für jede in den beiden Reviews geänderte Regel, auch
   die, die `no_change_seen` wieder zu „nein“ macht), alle scheitern.
 
+### Self-Healing, Paket K2 (Knöpfe und Schalter: Sperre und Audit)
+
+Entscheidung des Eigentümers zu Q4: **„Sperre und Audit“**. Die vorhandenen Knöpfe und Schalter,
+die einen Dienst neu starten, starten oder stoppen, das WLAN neu laden oder schalten oder den
+Router neu starten, beachten jetzt die Router-Sperre von Self-Healing und schreiben je Druck
+einen Audit-Eintrag. Sonst arbeiten sie genau wie vorher: **dieselben Router-Aufrufe in derselben
+Reihenfolge**, kein zusätzlicher Aufruf, keine geänderte unique_id, kein geänderter Name, keine
+geänderte Verfügbarkeit. Neu ist nur der Audit-Eintrag (auch bei ausgeschaltetem Self-Healing,
+sobald der Core läuft). Neu: `heal_guard.py`; geändert: `button.py`, `switch.py`, die
+Übersetzungen. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 10.3.
+
+- **Betroffen:** Knopf „WLAN neu laden“, Knopf „Neustart“, die Knöpfe „Restart: <Dienst>“, die
+  Schalter „Service: <Dienst>“ (dnsmasq, dropbear, firewall, network, uhttpd, wpad, soweit auf
+  dem Router vorhanden) und die WLAN-Schalter je SSID. Nicht betroffen: der Wartungsschalter
+  und „Nach Updates suchen“; dieser lädt nur die Paketlisten neu, ändert keinen Dienst, keine
+  Konfiguration und kein WLAN, hat schon eine eigene Sperre und darf bis 180 s laufen, so
+  lange soll er Self-Healing nicht aussperren.
+- **Abgelehnt, solange eine Reparatur läuft:** hält eine Aktion der Self-Healing-Engine die
+  Sperre des Routers, wird der Druck mit einer übersetzten Fehlermeldung abgelehnt („Auf diesem
+  Router läuft gerade eine Self-Healing-Reparatur …“); der Router wird nicht aufgerufen. **In
+  1.53.0 führt die Engine nie aus, dieser Fall tritt im Betrieb also noch nicht ein.** Eine
+  Reparatur, die ein HA-Neustart unterbrochen hat, sperrt nicht: der Druck läuft, auch der
+  Neustart des Routers, und der Audit-Eintrag vermerkt `interrupted_repair`.
+- **Hold blockiert nicht:** ein Router, der nach einem unklaren Ausgang auf einen Administrator
+  wartet, bleibt bedienbar; der Audit-Eintrag vermerkt den Hold.
+- **Sperre für die Dauer des Drucks:** sonst hält der Druck die Router-Sperre, solange er läuft
+  (gleichzeitige Drücke teilen sich eine), damit Self-Healing nicht mittendrin beginnt; sie wird
+  bei jedem Ausgang freigegeben, auch bei Fehler, Zeitüberschreitung und Abbruch. Scheitert die
+  Freigabe zweimal, nimmt der Wächter seine eigene Sperre selbst weg.
+- **Kein Warten vor dem Aufruf:** der Router wird sofort aufgerufen; der Core wird nur benutzt,
+  wenn er schon geladen ist, und der Benutzer für den Audit-Eintrag wird erst danach gesucht
+  (höchstens 2 s, ohne Sperre).
+- **Audit:** ein Eintrag `self_healing.manual.action` im Audit des Core mit Benutzer (aus dem
+  Dienstaufruf), Router-Kennung des Core, Aktion, Ziel (Dienstname, `wifi` oder `system`),
+  Ergebnis (`ok`, `refused_busy`, `failed`), Hold und Art der Sperre. Keine Adressen,
+  Hostnamen, SSIDs, UCI-Abschnitte, Client-Namen oder Geheimnisse.
+- **Modul aus:** ohne laufendes Self-Healing keine Sperre und keine Ablehnung, dieselben
+  Router-Aufrufe, dasselbe Ergebnis und dieselbe Entität wie vorher; der Audit-Eintrag wird
+  trotzdem geschrieben, wenn der Core läuft (das ist der einzige Unterschied). Ein Fehler im
+  Audit lässt einen Druck nie scheitern.
+- **Für Paket K:** der Audit-Präfix `self_healing.manual.` (Modul `self_healing`) wird von
+  `heal_guard.py` beim ersten Eintrag registriert; die Konstanten stehen dort und sind mit den
+  Präfix-Konstanten in `core_models.py` abzugleichen.
+- **Tests:** `tests/test_heal_guard_buttons_v1530.py` (102 Tests): die aufgezeichneten
+  Router-Aufrufe jedes Knopfes und Schalters sind die von main (1.52.3), ohne `hass`, mit Core
+  und mit Core und Engine; Ablehnung für jeden der 19 Drücke mit einem Stellvertreter-Halter;
+  Hold, geteilte Sperre, Freigabe bei Fehler, Zeitüberschreitung und Abbruch; Felder des
+  Eintrags; Modul aus; kaputtes oder langsames Audit; Quelltextprüfung. Mit den Knöpfen und Schaltern
+  von main scheitern 55 davon (die übrigen 10 prüfen, was auch auf main gilt, oder den Wächter
+  allein). `tests/test_unique_ids_snapshot_v1494.py` unverändert grün.
+  Mutationsprüfung auf grünem Stand: 42 Lockerungen (je eine Regel entfernt oder gelockert,
+  etwa keine Ablehnung, Hold blockiert, Sperre nie genommen oder nie freigegeben, keine Freigabe
+  bei Ausnahme, Beitritt zu einer fremden Sperre, Ergebnis immer `ok`, offene Zielmenge,
+  Benutzer oder Router-Kennung fehlt, unbegrenzte Suche nach dem Core, Audit-Fehler lässt den
+  Druck scheitern, falsche Aktion oder fehlender Kontext in einem Knopf oder Schalter). Im
+  ersten Lauf überlebten drei (Beitritt zu einer fremden Sperre, Löschen des Anteils eines
+  anderen Drucks, Ziel außerhalb der Menge); drei neue Tests töten sie, im zweiten Lauf
+  scheitern alle 42.
+- **Review von PR #85:** ein Test fiel zufällig (er suchte „GW“ im ganzen Eintrag, zufällige
+  Kennungen enthalten das manchmal; vorher 2 von 200 Läufen rot, jetzt 200 von 200 grün). Eine
+  unterbrochene Reparatur sperrte nach einem Neustart jeden Druck; vor dem Aufruf wurde bis zu
+  2 × 2 s gewartet und das Laden des Core konnte abgebrochen werden; eine scheiternde Freigabe
+  ließ die Sperre bis zum Neustart stehen; ein Fehler im Wächter nach genommener Sperre gab sie
+  nicht zurück. Alles behoben, je mit Test: 39 neue Tests (zwei alte ersetzt), 22 geänderte;
+  mit dem Wächter vor dem Review scheitern 33 davon (11 an den behobenen Fehlern, 22 nur am neuen
+  Feld `interrupted_repair`). Die Aufzeichnung des Reviewers (420 Drücke in sechs Umgebungen und
+  fünf Router-Verhalten) ist auf main und hier gleich. Mutationsprüfung auf grünem Stand:
+  82 Mutationen (die 42 angepasst, die neun Überlebenden des Reviewers neu ausgedrückt, seine
+  übrigen und eine je neuer Regel), alle scheitern.
+
 ## [1.52.3] - 2026-11-27
 
 WiFi RF: Der Funkverlauf (Verlaufsdiagramme der Radios und die Funkdaten der Time Machine)

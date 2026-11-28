@@ -2,6 +2,11 @@
 
 Creates one switch per detected WiFi SSID/interface.
 The switch name is the SSID itself (e.g. "HomeNet", "HomeNet-5G", "Guest").
+
+Turning a WiFi or service switch on or off runs through
+``heal_guard.async_manual_action`` (Self-Healing, package K2): refused while
+a Self-Healing repair holds the router's lock, otherwise unchanged, with
+the lock held for the call and one Core audit entry.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from .const import (
     url_scheme_for,
 )
 from .coordinator import OpenWrtCoordinator
+from .heal_guard import TARGET_WIFI, ManualAction, async_manual_action
 from .net_entities import async_setup_switches as async_setup_intel_switches
 
 _LOGGER = logging.getLogger(__name__)
@@ -223,7 +229,16 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
                 "Cannot enable WiFi: UCI section unknown for %s", self._ifname
             )
             return
-        await self._api.set_wifi_state(self._uci_section, enabled=True)
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.WIFI_ENABLE,
+            TARGET_WIFI,
+            self._context,
+        ) as outcome:
+            outcome.report(
+                await self._api.set_wifi_state(self._uci_section, enabled=True)
+            )
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -236,7 +251,16 @@ class OpenWrtWifiSwitchEntity(CoordinatorEntity[OpenWrtCoordinator], SwitchEntit
                 "Cannot disable WiFi: UCI section unknown for %s", self._ifname
             )
             return
-        await self._api.set_wifi_state(self._uci_section, enabled=False)
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.WIFI_DISABLE,
+            TARGET_WIFI,
+            self._context,
+        ) as outcome:
+            outcome.report(
+                await self._api.set_wifi_state(self._uci_section, enabled=False)
+            )
         await self.coordinator.async_request_refresh()
 
     # ------------------------------------------------------------------
@@ -413,12 +437,26 @@ class OpenWrtServiceSwitch(CoordinatorEntity[OpenWrtCoordinator], SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.debug("Starting service %s", self._service_name)
-        await self._api.control_service(self._service_name, "start")
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.SERVICE_START,
+            self._service_name,
+            self._context,
+        ) as outcome:
+            outcome.report(await self._api.control_service(self._service_name, "start"))
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Stopping service %s", self._service_name)
-        await self._api.control_service(self._service_name, "stop")
+        async with async_manual_action(
+            self.hass,
+            self._entry.entry_id,
+            ManualAction.SERVICE_STOP,
+            self._service_name,
+            self._context,
+        ) as outcome:
+            outcome.report(await self._api.control_service(self._service_name, "stop"))
         await self.coordinator.async_request_refresh()
 
     def _get_service(self) -> dict[str, Any] | None:

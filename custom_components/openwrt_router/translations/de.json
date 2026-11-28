@@ -465,6 +465,9 @@
     "update_check_failed": {
       "message": "Die Suche nach Paket-Updates ist fehlgeschlagen: {error}"
     },
+    "repair_running": {
+      "message": "Auf diesem Router läuft gerade eine Self-Healing-Reparatur. Die Aktion wurde nicht ausgeführt; bitte nach dem Ende der Reparatur erneut versuchen."
+    },
     "update_check_running": {
       "message": "Auf diesem Router läuft bereits eine Update-Suche. Bitte warte auf ihr Ergebnis."
     },
