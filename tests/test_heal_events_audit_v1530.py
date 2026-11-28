@@ -16,7 +16,7 @@ import dataclasses
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from config_manager_kit import cm_env, drain, stop
@@ -438,6 +438,79 @@ async def test_a_close_writes_one_entry_and_fires_no_event(world: World) -> None
     assert len(remediation_events(world.hass)) == fired == 1
 
 
+async def test_a_tick_journals_what_it_closed_at_once(world: World) -> None:
+    """A record the tick closes (incident gone from NI without an
+    announcement) is audited by that tick, not by a later sweep."""
+    _engine, audit = await journaled(world)
+    world.open("inc-2", router=E2)
+    del world.ni.incidents["inc-2"]
+    world.tick()
+    assert audit.types()[3:] == ["self_healing.action_cancelled"]
+    assert audit.emitted[3][1]["data"]["reason"] == "incident_gone"
+
+
+async def test_a_start_journals_what_its_reconcile_changed(world: World) -> None:
+    """The restart's reconcile closes a record whose incident went while
+    HA was down; ``async_start`` alone already audits that."""
+    engine, _audit = await journaled(world)
+    world.open("inc-2", router=E2)
+    await engine.async_stop()
+    del world.ni.incidents["inc-2"]
+    world.clock.now += 60
+    world.clock.real += 60
+    audit = FakeAudit(world.registry)
+    journal = hj.HealJournal(world.hass, clock=world.clock, monotonic=world.clock.mono)
+    again = he.HealEngine(
+        world.hass, clock=world.clock, monotonic=world.clock.mono, journal=journal
+    )
+    with patch.object(
+        config_api, "async_get_configuration_api", AsyncMock(return_value=audit)
+    ):
+        await again.async_start()
+    assert audit.types() == ["self_healing.action_cancelled"]
+    assert audit.emitted[0][1]["data"]["reason"] == "incident_gone"
+    await again.async_stop()
+
+
+async def test_added_routers_are_journaled_by_the_add(world: World) -> None:
+    """An incident that waited for its router gets its record when the
+    router is added; that call audits it, not a later tick."""
+    audit = FakeAudit(world.registry)
+    journal = hj.HealJournal(world.hass, clock=world.clock, monotonic=world.clock.mono)
+    engine = he.HealEngine(
+        world.hass, clock=world.clock, monotonic=world.clock.mono, journal=journal
+    )
+    with patch.object(
+        config_api, "async_get_configuration_api", AsyncMock(return_value=audit)
+    ):
+        await engine.async_start()
+        world.engine = engine
+        world.open("inc-1", router=E1)  # E1 is not added yet: it waits
+        assert world.records() == [] and audit.emitted == []
+        await engine.async_add_entries([E1])
+    assert audit.types() == [
+        "self_healing.action_detected",
+        "self_healing.action_analyzed",
+        "self_healing.action_proposed",
+    ]
+    await engine.async_stop()
+
+
+async def test_a_stop_journals_what_is_still_unseen(world: World) -> None:
+    """The stop sweeps before it closes: a transition no earlier sweep saw
+    still gets its entry."""
+    engine, audit = await journaled(world)
+    rec = record([S.ANALYZED, S.PROPOSED])
+    engine.store.actions[rec.action_id] = rec  # changed without a sweep
+    await engine.async_stop()
+    assert audit.types() == [
+        "self_healing.action_detected",
+        "self_healing.action_analyzed",
+        "self_healing.action_proposed",
+    ]
+    assert audit.removed == ["mandatory", "prefix"]
+
+
 async def test_the_engine_without_a_journal_writes_and_fires_nothing(
     world: World,
 ) -> None:
@@ -645,6 +718,38 @@ def test_forgotten_records_are_dropped_from_memory() -> None:
     assert journal.stats()["records_seen"] == 1
     journal.sweep({})
     assert journal.stats()["records_seen"] == 0
+
+
+def test_a_sweep_with_a_change_signals_the_entities_once() -> None:
+    journal, hass, _mono, _wall = unit_journal()
+    rec = record([S.ANALYZED, S.PROPOSED])
+    with patch.object(hj, "async_dispatcher_send") as send:
+        assert journal.sweep({rec.action_id: rec}) == 3
+        assert send.call_args_list == [call(hass, hj.SIGNAL_SELF_HEALING)]
+        assert journal.version == 1
+        assert journal.sweep({rec.action_id: rec}) == 0  # nothing new: no signal
+        assert send.call_count == 1
+        journal.close()
+        journal.signal()
+        assert send.call_count == 1  # closed: never again
+    assert journal.counters["signals"] == 1
+
+
+def test_an_incident_id_the_core_refuses_is_left_out() -> None:
+    """The model takes ``a..b``; the core's reference token does not (it
+    would refuse the whole entry), so the entry names no incident."""
+    journal, hass, _mono, _wall = unit_journal()
+    audit = FakeAudit(None)
+    journal.bind(audit)
+    rec = dataclasses.replace(record([S.ANALYZED, S.PROPOSED]), incident_id="inc..1")
+    assert journal.sweep({rec.action_id: rec}) == 3
+    assert [kw["incident_ref"] for _t, kw in audit.emitted] == [None, None, None]
+    assert [kw["data"]["incident_id"] for _t, kw in audit.emitted] == [None] * 3
+    assert [d["incident_id"] for d in remediation_events(hass)] == [None]
+    # an id the core accepts is kept
+    good = record([S.ANALYZED])
+    journal.sweep({good.action_id: good})
+    assert audit.emitted[-1][1]["incident_ref"] == "inc-1"
 
 
 def test_entries_are_written_in_time_order_across_records() -> None:
@@ -905,37 +1010,180 @@ async def test_the_real_core_keeps_the_entries_and_the_time_machine_shows_them(
     await drain(env.hass)
 
 
-async def test_the_core_keeps_its_share_with_a_seventh_module(
+def test_the_ring_fits_seven_module_shares_and_the_core() -> None:
+    """With Self-Healing seven modules write to the general ring. The ring
+    grew by one module share, so no owner's guaranteed share got smaller
+    (before 1.53.0: 1000 entries, six modules, core 400, module 100)."""
+    from custom_components.openwrt_router import core_models as cm
+
+    assert cm.AUDIT_MAX_EVENTS == 1100
+    assert cm.AUDIT_SHARED_MODULES == 7
+    assert cm.AUDIT_MODULE_SHARE == 100
+    assert cm.AUDIT_CORE_SHARE == 400
+    assert cm.AUDIT_CORE_SHARE + cm.AUDIT_SHARED_MODULES * cm.AUDIT_MODULE_SHARE == (
+        cm.AUDIT_MAX_EVENTS
+    )
+    assert cm.SECURITY_AUDIT_MAX_EVENTS == 500  # the security ring is unchanged
+    assert cm.SECURITY_MODULE_QUOTA == 100
+    assert cm.SECURITY_MODULE_MAX_EVENTS == 500
+
+
+# The six modules that wrote to the general ring before 1.53.0, with the
+# prefixes they register (``register_event_prefix`` in each module).
+OTHER_MODULES = (
+    ("config_manager", "config_manager."),
+    ("net_diagnostics", "net_diagnostics."),
+    ("security_center", "security_center."),
+    ("time_machine", "time_machine."),
+    ("traffic_analytics", "traffic_analytics."),
+    ("wifi_rf", "wifi_rf."),
+)
+
+
+async def test_every_owner_keeps_its_full_share_with_self_healing(
     core_disks: FakeDisks, tmp_path: Any
 ) -> None:
-    """Self-Healing is the seventh module writing to the general ring; the
-    core's own share (400 of 1000) stays protected (``core_models``)."""
+    """All seven modules and the core at their share fill the ring exactly;
+    more Self-Healing entries then cost only Self-Healing's own oldest."""
     from custom_components.openwrt_router import core_audit
     from custom_components.openwrt_router.core_models import (
         AUDIT_MAX_EVENTS,
         AuditRing,
+        CoreEventType,
     )
 
     env = await cm_env(core_disks, tmp_path, routers=1, options={})
-    journal = hj.HealJournal(env.hass)
-    journal.start({})
-    journal.bind(env.api)
     audit = env.core.audit
     with patch.object(core_audit, "utcnow", env.clock.utc):
-        for i in range(400):
-            audit.emit("core.test_marker", data={"i": i})
+        baseline = audit.summary()
+        free_core = 400 - baseline["general_core_entries"]
+        for i in range(free_core):
+            audit.emit(
+                CoreEventType.ROUTER_REGISTERED, router_id=env.rid, data={"i": i}
+            )
+        for module, prefix in OTHER_MODULES:
+            if module not in baseline["general_module_entries"]:
+                audit.register_event_prefix(prefix, module=module)
+            have = baseline["general_module_entries"].get(module, 0)
+            for i in range(100 - have):
+                audit.emit(f"{prefix}sample", source=module, data={"i": i})
+        journal = hj.HealJournal(env.hass)
+        journal.start({})
+        journal.bind(env.api)
         records = {}
-        for i in range(400):
-            rec = record([S.ANALYZED, S.PROPOSED], ts0=T0 + i, router_id=env.rid)
+        for i in range(50):  # 50 records of two entries: exactly 100
+            rec = record([S.ANALYZED], ts0=T0 + i, router_id=env.rid)
             records[rec.action_id] = rec
         journal.sweep(records)
-    stored = env.api.events(ring=AuditRing.GENERAL, limit=5000)
-    assert len(stored) <= AUDIT_MAX_EVENTS
-    core_own = [e for e in stored if e.source == "core"]
-    assert len(core_own) >= 400
-    assert journal.counters["audit_written"] == 1200
+        assert audit.ring_size(AuditRing.GENERAL) == AUDIT_MAX_EVENTS
+        assert audit.stats["evicted_general"] == 0  # exactly full: nothing went
+        summary = audit.summary()
+        assert summary["general_core_entries"] == 400
+        assert summary["general_module_entries"] == {
+            **{module: 100 for module, _prefix in OTHER_MODULES},
+            "self_healing": 100,
+        }
+        # three more Self-Healing entries: only its own three oldest go
+        more = record([S.ANALYZED, S.PROPOSED], ts0=T0 + 100, router_id=env.rid)
+        journal.sweep({**records, more.action_id: more})
+        summary = audit.summary()
+        assert summary["general_evicted"] == {"self_healing": 3}
+        assert summary["general_core_entries"] == 400
+        assert summary["general_module_entries"]["self_healing"] == 100
+        for module, _prefix in OTHER_MODULES:
+            assert summary["general_module_entries"][module] == 100
+    assert journal.counters["audit_written"] == 103
     journal.close()
     await stop(env)
+
+
+async def test_k2_manual_actions_share_the_module_and_coexist(
+    core_disks: FakeDisks, tmp_path: Any
+) -> None:
+    """Package K2 (``heal_guard``, not on main yet) registers
+    ``self_healing.manual.`` for the same module ``self_healing`` and writes
+    ``self_healing.manual.action``. The journal's broader prefix
+    ``self_healing.`` coexists with it in either order, neither remover
+    takes the other's away, both count as one module, and the Time Machine
+    shows both as audit marks at their audit time (administrators only)."""
+    from custom_components.openwrt_router import core_audit
+    from custom_components.openwrt_router import tm_sources as src
+    from custom_components.openwrt_router.core_models import AuditRing
+
+    manual = "self_healing.manual.action"  # literal: heal_guard is not imported
+    assert not any(
+        t.startswith("self_healing.manual.") for t in hj.AUDIT_TYPES.values()
+    )
+    assert not any(t.startswith("self_healing.manual.") for t in hj.MANDATORY_TYPES)
+    env = await cm_env(core_disks, tmp_path, routers=1, options={})
+    now = env.clock.utc().timestamp()
+    audit = env.core.audit
+    with patch.object(core_audit, "utcnow", env.clock.utc):
+        # K2 first (its first manual entry on this core), then the journal
+        k2_remove = env.api.register_event_prefix(
+            "self_healing.manual.", module="self_healing"
+        )
+        journal = hj.HealJournal(env.hass, clock=lambda: now)
+        journal.start({})
+        journal.bind(env.api)
+        assert journal.audit_bound is True
+        env.api.emit(manual, source="self_healing", router_id=env.rid)
+        rec = record([S.ANALYZED], ts0=now - 1, router_id=env.rid)
+        journal.sweep({rec.action_id: rec})
+        # the journal stops: K2's prefix stays
+        journal.close()
+        env.api.emit(manual, source="self_healing", router_id=env.rid)
+        with pytest.raises(ValueError):
+            env.api.emit(
+                "self_healing.action_detected", source="self_healing", router_id=env.rid
+            )
+        # the other order: the journal binds again, K2 goes away first
+        again = hj.HealJournal(env.hass, clock=lambda: now)
+        again.start({})
+        again.bind(env.api)
+        k2_remove()
+        other = record([S.ANALYZED], ts0=now - 1, router_id=env.rid)
+        again.sweep({other.action_id: other})
+        assert again.counters["audit_written"] == 2
+        assert again.counters["audit_failed"] == 0
+        # below the journal's prefix a manual entry is still accepted
+        env.api.emit(manual, source="self_healing", router_id=env.rid)
+    stored = env.api.events(ring=AuditRing.GENERAL, limit=5000)
+    mine = [str(e.type) for e in stored if str(e.type).startswith("self_healing.")]
+    assert mine == [
+        manual,
+        "self_healing.action_detected",
+        "self_healing.action_analyzed",
+        manual,
+        "self_healing.action_detected",
+        "self_healing.action_analyzed",
+        manual,
+    ]
+    assert audit.summary()["general_module_entries"]["self_healing"] == 7
+    # named on purpose, not by the fallback: a later catch-all keeps it
+    assert ("self_healing.", "audit_event") in src._MODULE_KINDS
+    assert src.audit_kind(manual) == "audit_event"
+    assert src.audit_kind("self_healing.action_proposed") == "audit_event"
+    req = src.ReadRequest(now - 3600, now + 1, True, now + 1)
+    result = await src.async_read_source(
+        env.hass, "core_audit", req, src.build_router_map(env.hass)
+    )
+    marks = [m for m in result.marks if m["title_key"] == f"core_audit.{manual}"]
+    assert len(marks) == 3
+    for mark in marks:
+        assert mark["kind"] == "audit_event"
+        assert mark["router_id"] == env.rid
+        assert mark["ts"] == pytest.approx(now, abs=1.0)
+    plain = await src.async_read_source(
+        env.hass,
+        "core_audit",
+        src.ReadRequest(now - 3600, now + 1, False, now + 1),
+        src.build_router_map(env.hass),
+    )
+    assert plain.marks == []
+    again.close()
+    await stop(env)
+    await drain(env.hass)
 
 
 # ---------------------------------------------------------------------------

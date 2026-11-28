@@ -342,6 +342,24 @@ async def test_the_fleet_mode_is_unknown_without_routers_or_clock(
     engine.store.loop.clock = kept
 
 
+async def test_one_unknown_router_makes_the_fleet_mode_unknown(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = await world.start()
+    known = hx._mode_in_force
+
+    def r2_unknown(eng: Any, router_id: str) -> Any:
+        return None if router_id == R2 else known(eng, router_id)
+
+    monkeypatch.setattr(hx, "_mode_in_force", r2_unknown)
+    assert hx.router_mode(engine, E1)[0] == "observe"
+    assert hx.fleet_mode(engine) is None  # never the mode of the others
+    assert hx.auto_heal_any(engine) is None
+    set_mode(engine, r1=M.AUTO_HEAL)
+    assert hx.fleet_mode(engine) is None
+    assert hx.auto_heal_any(engine) is True  # one known Auto-Heal is enough
+
+
 async def test_auto_heal_any_router(world: World) -> None:
     engine = await world.start()
     assert hx.auto_heal_any(engine) is False
@@ -383,6 +401,12 @@ async def test_active_and_pending_counts(world: World) -> None:
     assert (hx.active_count(engine), hx.pending_count(engine)) == (2, 1)
     world.resolve("inc-1")
     assert (hx.active_count(engine), hx.pending_count(engine)) == (1, 1)
+    # approved is open but no longer waiting for an approval
+    put(
+        engine,
+        record([S.ANALYZED, S.PROPOSED, S.PREFLIGHT, S.WAITING_APPROVAL, S.APPROVED]),
+    )
+    assert (hx.active_count(engine), hx.pending_count(engine)) == (2, 1)
 
 
 async def test_the_30_day_window(world: World) -> None:
@@ -414,6 +438,18 @@ async def test_the_window_is_unknown_after_an_eviction_it_cannot_rule_out(
     # a kept record older than the window: every evicted one is older still
     put(engine, ended(S.CANCELLED, now - 40 * DAY, executed=False))
     assert hx.window(engine, now) == hx._Window(1, 0)
+
+
+async def test_unreadable_store_counters_count_as_an_eviction(world: World) -> None:
+    engine = await world.start()
+    now = T0 + 100 * DAY
+    put(engine, ended(S.RESOLVED, now - DAY, executed=True))
+    kept = engine.store.counters
+    engine.store.counters = None  # type: ignore[assignment]
+    assert hx.window(engine, now) == hx._Window(None, None)
+    put(engine, ended(S.CANCELLED, now - 40 * DAY, executed=False))
+    assert hx.window(engine, now) == hx._Window(1, 0)
+    engine.store.counters = kept
 
 
 async def test_the_last_result(world: World) -> None:
@@ -481,6 +517,13 @@ async def test_entities_read_the_engine_and_are_unavailable_without_it(
     assert router.device_info == {"identifiers": {(DOMAIN, E1)}}
     assert router.unique_id == "e1_self_healing_mode"
     assert router.entity_category is EntityCategory.DIAGNOSTIC
+    # an engine that has not finished loading is not read
+    engine.loaded = False
+    assert hx._engine(hass) is None
+    for entity in everything:
+        assert entity.available is False
+    assert [e.native_value for e in fleet.values()] == [None] * 6
+    engine.loaded = True
     await engine.async_stop()
     for entity in everything:
         assert entity.available is False
@@ -627,7 +670,7 @@ async def test_on_but_not_running_yet_nothing_is_removed(world: World) -> None:
     assert all(a.added == [] for a, _b in adders.values())
 
 
-async def test_no_registry_is_never_created(world: World) -> None:
+async def test_a_missing_registry_is_never_created(world: World) -> None:
     hass = world.hass
     hass.entries[0].options[OPTION_SELF_HEALING_ENABLED] = False
     offer(hass)
@@ -652,6 +695,34 @@ async def test_the_fleet_moves_when_its_host_unloads(world: World) -> None:
     await he.async_release_self_healing(hass, E1)
     await he.async_release_self_healing(hass, E2)
     assert hx.DATA_HEAL_ENTITIES not in hass.data
+
+
+async def test_a_host_reloaded_while_the_engine_is_away_hosts_the_fleet_again(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host entry unloads while no engine runs (no move then) and comes
+    back with a new platform: the next sync hosts the fleet on that new
+    platform, never on the gone one."""
+    hass = world.hass
+    offer(hass)
+    for entry in hass.entries:
+        await he.async_setup_self_healing(hass, entry)
+    hosts = hass.data[hx.DATA_HEAL_ENTITIES]
+    assert hosts.sensor.anchor == E1 and hosts.binary.anchor == E1
+    running = hx._engine
+    monkeypatch.setattr(hx, "_engine", lambda _hass: None)
+    hx.async_entry_unloaded(hass, E1, last=False)
+    assert hosts.sensor.anchor is None and hosts.binary.anchor is None
+    s1, b1 = Adder(), Adder()
+    hx.async_setup_heal_sensors(hass, hass.entries[0], s1)
+    hx.async_setup_heal_binary_sensors(hass, hass.entries[0], b1)
+    assert s1.added == [] and b1.added == []  # no engine: nothing yet
+    monkeypatch.setattr(hx, "_engine", running)
+    hx.async_sync_heal_entities(hass)
+    assert s1.uids() == [*FLEET_SENSOR_UIDS, "e1_self_healing_mode"]
+    assert b1.uids() == FLEET_BINARY_UIDS
+    await he.async_release_self_healing(hass, E1)
+    await he.async_release_self_healing(hass, E2)
 
 
 async def test_an_unload_without_an_engine_keeps_the_others_offers(
