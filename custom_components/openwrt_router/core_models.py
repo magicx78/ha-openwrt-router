@@ -226,7 +226,9 @@ ROUTER_LOCK_TIMEOUT: Final = timedelta(minutes=5)
 FLEET_BACKUP_CONCURRENCY: Final = 1
 # Fixed window: a repeat of the same dedup scope inside it is not published.
 FAILURE_EVENT_COOLDOWN: Final = timedelta(hours=24)
-AUDIT_MAX_EVENTS: Final = 1000
+# 1100 since 1.53.0 (Self-Healing, package K1): a seventh module share of
+# 100, so no owner's guaranteed share got smaller (before: 1000, six modules).
+AUDIT_MAX_EVENTS: Final = 1100
 # Core entries of the security ring (only core entries evict them).
 SECURITY_AUDIT_MAX_EVENTS: Final = 500
 # Security-relevant module entries (review M2 of PR #56): a separate quota,
@@ -239,13 +241,14 @@ AUDIT_RETENTION_DAYS: Final = 90
 # not a cap: while the ring has room anyone may write more. Only when it is
 # full does the oldest entry of an owner above its share go, so a loud module
 # never pushes out entries of an owner below its share. 100 per module equals
-# SECURITY_MODULE_QUOTA and covers six modules (config_manager,
-# net_diagnostics, security_center, wifi_rf, traffic_analytics and one more);
-# the core keeps the rest (400): its fleet-wide entries (routers, backups,
-# approvals, configuration) are the trail diagnostics rely on. The shares add
-# up to AUDIT_MAX_EVENTS, which stays the hard limit of the ring.
+# SECURITY_MODULE_QUOTA and covers seven modules (config_manager,
+# net_diagnostics, security_center, wifi_rf, traffic_analytics, time_machine
+# and, since 1.53.0, self_healing); the core keeps the rest (400): its
+# fleet-wide entries (routers, backups, approvals, configuration) are the
+# trail diagnostics rely on. The shares add up to AUDIT_MAX_EVENTS, which
+# stays the hard limit of the ring.
 AUDIT_MODULE_SHARE: Final = 100
-AUDIT_SHARED_MODULES: Final = 6
+AUDIT_SHARED_MODULES: Final = 7
 AUDIT_CORE_SHARE: Final = AUDIT_MAX_EVENTS - AUDIT_SHARED_MODULES * AUDIT_MODULE_SHARE
 DEFAULT_LIST_LIMIT: Final = 50
 MAX_LIST_LIMIT: Final = 500
