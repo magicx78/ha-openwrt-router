@@ -2221,9 +2221,16 @@ vergleicht sie mit den Python-Quellen); ein unbekannter Code wird roh gezeigt. D
 höchstens alle 60 s, nur solange die Seite sichtbar ist; ein anderer Tab ist nicht eingehängt
 und fragt nichts. Das Panel ist nur dunkel; ein helles Design gibt es nicht.
 
-Nicht gezeigt, weil keine Route es liefert: Anzeigenamen der Router, Zahl blockierter
-riskanter Aktionen, Versuche je Router in 24 h und Restzeit der Abklingzeit, ein Verlauf mit
-eigenen Filtern über alle Datensätze.
+**Bekannte Lücken der lesenden Routen** (der Tab zeigt sie als „unbekannt“ oder gar nicht;
+geplant für ein späteres Paket): Anzeigenamen der Router, Zahl blockierter riskanter
+Aktionen, Versuche je Router in 24 h, Restzeit der Abklingzeit, ein Verlauf mit eigenen
+Filtern über alle Datensätze.
+
+Die Beispielantworten der Frontend-Tests (`shFixture.json`) erzeugt und prüft
+`tests/test_sh_panel_fixture_v1530.py` aus den echten Routen gegen eine Test-Engine
+(`SH_WRITE_FIXTURE=1` erzeugt sie neu). Die Konfidenz eines Datensatzes ist die seiner
+Entscheidung; die Erklärung in `plans` bewertet mit den Fakten von jetzt und kann davon
+abweichen – der Tab beschriftet beides so.
 
 ## 14. Bedrohungsmodell
 

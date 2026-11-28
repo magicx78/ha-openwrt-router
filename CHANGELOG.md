@@ -644,8 +644,11 @@ sich nichts. Entwicklerdoku: `docs/self-healing.md`, Abschnitt 13.
 - **Abruf** beim Öffnen und danach höchstens alle 60 s, nur solange die Seite sichtbar und der
   Tab offen ist. Schmale Ansicht bis 360 px ohne seitliches Scrollen, Bedienelemente 40 px.
 - `_PANEL_VERSION` `20261127-selfhealing1`; das Bundle ist neu gebaut.
-- **Tests:** 50 Frontend-Tests in `src/enterprise/selfhealing/` (Logik, Client, Darstellung,
-  schmale Ansicht) auf echten Antworten der Routen. Darunter: jede Anfrage ist GET ohne Rumpf,
+- **Tests:** 52 Frontend-Tests in `src/enterprise/selfhealing/` (Logik, Client, Darstellung,
+  schmale Ansicht) auf echten Antworten der Routen; `tests/test_sh_panel_fixture_v1530.py`
+  erzeugt diese Antworten aus den fünf Routen und vergleicht sie mit `shFixture.json`.
+  `tests/test_tm_panel_texts_v1520.py` hält jetzt sieben Tabs fest; Self-Healing ist
+  ausdrücklich kein Sprungziel der Time Machine. Darunter: jede Anfrage ist GET ohne Rumpf,
   keine Datei des Tabs nennt eine schreibende Methode oder einen schreibenden Pfad, keine
   Ansicht hat einen anderen Knopf als Aktualisieren, Details, Erneut versuchen und die
   Filter; die Grundtabelle stimmt Text für Text mit `heal_policy.REASON_TEXT_DE`, und jeder
