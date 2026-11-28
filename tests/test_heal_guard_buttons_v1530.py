@@ -13,7 +13,9 @@ here (docs/self-healing.md §10.3):
 * case 1: an engine action holds the router's lock (a stand-in: a real
   store whose action is in EXECUTING) -> HomeAssistantError
   ``repair_running``, no router call, no refresh, one audit entry
-  ``refused_busy``, the engine lock untouched;
+  ``refused_busy``, the engine lock untouched; an action a restart
+  interrupted (VERIFYING, ``flags.interrupted``, its lock rebuilt at load)
+  is not running and never refuses (audit ``interrupted_repair``);
 * case 2: a router on hold is not blocked, its audit entry says so;
 * case 3: the press holds the router's lock while it runs (the engine's
   durable step is refused ``router_locked`` meanwhile), presses share one
@@ -25,6 +27,10 @@ here (docs/self-healing.md §10.3):
 * case 5: module off (no engine, engine not loaded, settings switch off)
   -> no lock, no refusal; the audit still written with the Core running,
   skipped without it; a broken or slow audit never fails a press;
+* timing: nothing is awaited before the router call (a Core still loading
+  is not used and not waited for; the user lookup runs after the call,
+  without the lock, capped at ``AUDIT_LOOKUP_TIMEOUT_S``); a release that
+  fails is tried once more, then the guard's own lock is dropped;
 * a source scan: every router write of button.py and switch.py sits inside
   ``async_manual_action``.
 
@@ -36,8 +42,11 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
 import inspect
 import json
+import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -56,7 +65,15 @@ from core_testkit import (
 )
 from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError
-from test_heal_store_v1530 import T0, Clock, disks, execute, new_action, to_approved
+from test_heal_store_v1530 import (
+    T0,
+    Clock,
+    disks,
+    execute,
+    new_action,
+    svc,
+    to_approved,
+)
 from test_wifi_switch_ids_v1492 import ENTRY
 
 from custom_components.openwrt_router import OpenWrtRuntimeData
@@ -68,12 +85,18 @@ from custom_components.openwrt_router import heal_store as hs
 from custom_components.openwrt_router import switch as switch_platform
 from custom_components.openwrt_router.config_api import async_get_configuration_api
 from custom_components.openwrt_router.const import DATA_SELF_HEALING_ENGINE, DOMAIN
+from custom_components.openwrt_router.core_models import async_actor_from_context
+from custom_components.openwrt_router.enterprise_core import async_get_core
 
 __all__ = ["disks"]  # fixture used here
 
 S = hm.ActionState
 PKG = Path(__file__).resolve().parents[1] / "custom_components" / "openwrt_router"
 REFRESH = ("<refresh>", "", {})
+TITLE = "gw-title"
+# a press of a button or switch reaches the router call within this bound
+# (nothing is awaited before it; the old code waited up to 2 x 2 s)
+CALL_START_BOUND_S = 0.05
 
 # Router writes the test router accepts (the kit answers every unknown call
 # with "method not found"; these are the writes of the guarded entities).
@@ -114,7 +137,9 @@ class Gateway:
         )
         entry = MagicMock()
         entry.entry_id = ENTRY
-        entry.title = "GW"
+        # lowercase with a dash: no id (ULIDs are upper case, router and lock
+        # ids lower-case hex) can contain it by chance
+        entry.title = TITLE
         entry.options = {}
         entry.data = {"host": "192.0.2.1", "port": 80}
         entry.runtime_data = OpenWrtRuntimeData(
@@ -385,6 +410,7 @@ async def test_recorded_calls_with_a_running_engine_are_the_main_ones(
             "lock": "taken",
             "on_hold": False,
             "hold_reason": None,
+            "interrupted_repair": False,
         }
         assert event.router_id == world.rid
         assert event.entry_id == ENTRY
@@ -423,8 +449,12 @@ async def test_refused_while_an_engine_action_holds_the_lock(
         "on_hold": False,
         "hold_reason": None,
         "lock": "none",
+        "interrupted_repair": False,
     }
     assert str(event.result) == "denied"
+    # a live action, not one a restart interrupted
+    assert world.store.get(action_id).state is S.EXECUTING
+    assert world.store.get(action_id).flags.interrupted is False
     assert str(event.severity) == "warning"
 
 
@@ -718,11 +748,12 @@ async def test_the_audit_names_the_user_and_the_router_and_nothing_else(
             "on_hold",
             "hold_reason",
             "lock",
+            "interrupted_repair",
         }
-        text = json.dumps(event.to_dict())
+        text = json.dumps(event.to_dict(), ensure_ascii=False)
         for secret in (
             "192.0.2.1",
-            "GW",
+            TITLE,
             "Home",
             "IoT",
             "lan_5g",
@@ -785,9 +816,34 @@ async def test_without_core_and_engine_the_press_is_as_on_main(disks: Any) -> No
 async def test_an_engine_without_core_takes_no_lock(disks: Any) -> None:
     world = await World().start(core=False)
     gw = await world.gateway()
-    taken = MagicMock(side_effect=AssertionError("no lock without a router id"))
+    # a MagicMock, not a raising one: the guard catches every error, so an
+    # AssertionError raised in here would never fail the test
+    taken = MagicMock(return_value=None)
     world.store.try_external_lock = taken  # type: ignore[method-assign]
     assert await record(gw) == EXPECTED_MAIN
+    assert taken.call_count == 0
+    assert world.audits() == []  # no Core, no audit
+    assert world.store.loop.external_writes == []
+
+
+async def test_an_engine_the_core_does_not_bind_takes_no_lock(disks: Any) -> None:
+    """The Core runs, the engine has no link to it: the engine does not know
+    the router, so no lock and no made-up router id; the audit takes the
+    router id from the Core and says ``lock: none``."""
+    world = await World().start()
+    world.engine._api = None
+    assert world.engine.router_id_for_entry(ENTRY) is None
+    gw = await world.gateway()
+    taken = MagicMock(return_value=None)
+    world.store.try_external_lock = taken  # type: ignore[method-assign]
+    assert await record(gw) == EXPECTED_MAIN
+    assert taken.call_count == 0
+    assert world.store.loop.locks == {}
+    assert world.store.loop.external_writes == []
+    events = world.audits()
+    assert len(events) == len(ACTIONS)
+    assert {_data(e)["lock"] for e in events} == {"none"}
+    assert {e.router_id for e in events} == {world.rid}
 
 
 @pytest.mark.parametrize("off", ["not_loaded", "settings_off", "closed", "no_engine"])
@@ -838,42 +894,186 @@ async def test_a_refused_prefix_never_fails_the_press(disks: Any) -> None:
     assert world.audits() == []
 
 
-async def test_a_slow_core_never_holds_the_press_up(disks: Any) -> None:
-    world = await World().start(engine=False)
+async def _never(*_a: Any, **_k: Any) -> Any:
+    await asyncio.Event().wait()
+
+
+def _timed(gw: Gateway, api_method: str, seen: list[Any], probe: Any = None) -> None:
+    """Note when the router call ``api_method`` starts (and ``probe()``)."""
+    real = getattr(gw.api, api_method)
+
+    async def call(*args: Any, **kwargs: Any) -> Any:
+        seen.append(time.perf_counter())
+        if probe is not None:
+            seen.append(probe())
+        return await real(*args, **kwargs)
+
+    setattr(gw.api, api_method, call)
+
+
+def test_the_user_lookup_cap_is_two_seconds() -> None:
+    assert hg.AUDIT_LOOKUP_TIMEOUT_S == 2.0
+
+
+async def test_a_core_still_loading_is_neither_waited_for_nor_used(
+    disks: Any,
+) -> None:
+    """The Core is not loaded yet and its load never ends: the router call
+    starts at once (no wait, the load is not started or cancelled), the
+    engine still locks the router, and no audit entry is written."""
+    world = await World().start()
     gw = await world.gateway()
-
-    async def never(*_a: Any, **_k: Any) -> Any:
-        await asyncio.Event().wait()
-
-    with (
-        patch.object(hg, "AUDIT_LOOKUP_TIMEOUT_S", 0.01),
-        patch(
-            "custom_components.openwrt_router.config_api.async_get_configuration_api",
-            never,
-        ),
-    ):
-        assert await record(gw, ACTIONS[:2]) == {
-            name: EXPECTED_MAIN[name] for name, _k, _m in ACTIONS[:2]
-        }
+    core = async_get_core(world.hass)
+    core.loaded = False
+    load = AsyncMock(side_effect=_never)
+    core.async_load = load
+    gw.entities["reboot"]._context = Context(user_id=ADMIN_ID)
+    lookup = AsyncMock(return_value=None)
+    world.hass.auth.async_get_user = lookup
+    seen: list[Any] = []
+    _timed(gw, "reboot", seen, lambda: world.store.loop.lock_holder(world.rid))
+    start = time.perf_counter()
+    async with asyncio.timeout(5):
+        await gw.entities["reboot"].async_press()
+    assert seen[0] - start < CALL_START_BOUND_S
+    held = seen[1]
+    assert held is not None and held.source == "button.reboot"  # lock w/o audit
+    assert world.store.loop.lock_holder(world.rid) is None
+    assert load.await_count == 0
+    assert lookup.await_count == 0  # no Core: no user lookup
+    assert core.loaded is False
+    assert len(world.store.loop.external_writes) == 1
+    core.loaded = True  # read the ring
     assert world.audits() == []
 
 
-async def test_a_slow_actor_lookup_never_holds_the_press_up(disks: Any) -> None:
+async def test_without_a_core_the_user_is_never_looked_up(disks: Any) -> None:
+    world = await World().start(core=False)
+    gw = await world.gateway()
+    lookup = AsyncMock(return_value=None)
+    world.hass.auth.async_get_user = lookup
+    for _name, key, _method in ACTIONS:
+        gw.entities[key]._context = Context(user_id=ADMIN_ID)
+    assert await record(gw) == EXPECTED_MAIN
+    assert lookup.await_count == 0
+
+
+async def test_a_slow_user_lookup_waits_after_the_call_without_the_lock(
+    disks: Any,
+) -> None:
+    """The user lookup never ends: the router call starts at once, the
+    lookup runs only after it with the lock already released, it is cut
+    off at the cap, and the audit keeps the user and context ids."""
     world = await World().start()
     gw = await world.gateway()
-    gw.entities["reboot"]._context = Context(user_id=ADMIN_ID)
+    context = Context(user_id=ADMIN_ID)
+    gw.entities["reboot"]._context = context
+    at_lookup: list[Any] = []
 
-    async def never(*_a: Any, **_k: Any) -> Any:
+    async def never(_user_id: str) -> Any:
+        at_lookup.append((list(gw.calls), world.store.loop.lock_holder(world.rid)))
         await asyncio.Event().wait()
 
     world.hass.auth.async_get_user = never
-    with patch.object(hg, "AUDIT_LOOKUP_TIMEOUT_S", 0.01):
-        assert await record(gw, ACTIONS[1:2]) == {
-            "button.reboot": EXPECTED_MAIN["button.reboot"]
-        }
+    seen: list[Any] = []
+    _timed(gw, "reboot", seen)
+    start = time.perf_counter()
+    with patch.object(hg, "AUDIT_LOOKUP_TIMEOUT_S", 0.05):
+        async with asyncio.timeout(5):
+            await gw.entities["reboot"].async_press()
+    assert seen[0] - start < CALL_START_BOUND_S
+    assert at_lookup == [([("system", "reboot", {})], None)]
+    [event] = world.audits()
+    assert event.actor.user_id == ADMIN_ID
+    assert event.actor.context_id == context.id
+    assert event.actor.is_admin is False  # not verified: the lookup was cut off
+    assert _data(event)["result"] == "ok"
+
+
+async def test_a_found_user_is_named_admin_in_the_audit(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    gw.entities["reboot"]._context = Context(user_id=ADMIN_ID)
+    await record(gw, ACTIONS[1:2])
+    [event] = world.audits()
+    assert event.actor.user_id == ADMIN_ID
+    assert event.actor.is_admin is True
+
+
+async def test_the_immediate_actor_matches_the_cores_one() -> None:
+    hass = make_hass()
+    add_user(hass, ADMIN_ID, admin=True)
+    for context in (
+        None,
+        Context(),
+        Context(parent_id="01AUTOMATION"),
+        Context(user_id=ADMIN_ID, parent_id="01PARENT"),
+    ):
+        core = await async_actor_from_context(hass, context)
+        now = hg._actor_now(context)
+        assert now == dataclasses.replace(core, is_admin=False)
+
+
+async def test_a_cancelled_call_never_waits_for_the_user_lookup(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    gw.entities["reboot"]._context = Context(user_id=ADMIN_ID)
+    lookup = AsyncMock(side_effect=_never)
+    world.hass.auth.async_get_user = lookup
+    entered = asyncio.Event()
+
+    async def hang(*_a: Any, **_k: Any) -> bool:
+        entered.set()
+        await asyncio.Event().wait()
+        return True
+
+    gw.api.reboot = hang
+    task = asyncio.create_task(gw.entities["reboot"].async_press())
+    await until(entered.is_set, "reboot call entered")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(1):
+            await task
+    assert task.cancelled()
+    assert lookup.await_count == 0
+    [event] = world.audits()
+    assert _data(event)["result"] == "failed"
+    assert event.actor.user_id == ADMIN_ID
+
+
+async def test_a_broken_context_never_fails_the_press(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    object.__setattr__(gw.entities["reload_wifi"], "_context", object())
+    assert await record(gw, ACTIONS[:1]) == {
+        "button.reload_wifi": EXPECTED_MAIN["button.reload_wifi"]
+    }
     [event] = world.audits()
     assert event.actor is None
+    assert _data(event)["result"] == "ok"
+
+
+async def test_a_cancel_during_the_user_lookup_still_audits(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    gw.entities["reboot"]._context = Context(user_id=ADMIN_ID)
+    in_lookup = asyncio.Event()
+
+    async def never(_user_id: str) -> Any:
+        in_lookup.set()
+        await asyncio.Event().wait()
+
+    world.hass.auth.async_get_user = never
+    task = asyncio.create_task(gw.entities["reboot"].async_press())
+    await until(in_lookup.is_set, "user lookup started")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert gw.calls == [("system", "reboot", {})]
     assert world.store.loop.lock_holder(world.rid) is None
+    [event] = world.audits()
+    assert _data(event)["result"] == "ok"
+    assert event.actor.user_id == ADMIN_ID
 
 
 async def test_a_guard_error_falls_back_to_the_main_behaviour(disks: Any) -> None:
@@ -1010,3 +1210,240 @@ async def test_a_target_outside_the_closed_set_is_audited_as_other(
     assert _data(event)["target"] == "other"
     assert [w.target for w in world.store.loop.external_writes] == ["other"]
     assert "Wohnzimmer" not in json.dumps(event.to_dict())
+
+
+# --- review of PR #85 ------------------------------------------------------------------------
+
+
+async def _restarted(world: World) -> str:
+    """An engine action in EXECUTING, then an HA restart: the store loads
+    again, the record is VERIFYING with ``flags.interrupted`` and its engine
+    lock is rebuilt at load (no engine runs it)."""
+    action_id = await world.engine_holds()
+    await world.store.async_flush()
+    store = hs.SelfHealingStore(
+        world.hass, clock=world.clock, monotonic=world.clock.mono
+    )
+    await store.async_load()
+    world.engine.store = store
+    record_ = store.get(action_id)
+    assert record_.state is S.VERIFYING
+    assert record_.flags.interrupted is True
+    held = store.loop.lock_holder(world.rid)
+    assert held.holder is hm.LockHolder.ENGINE and held.action_id == action_id
+    return action_id
+
+
+async def test_an_interrupted_repair_never_blocks_the_reboot(disks: Any) -> None:
+    """The reviewer's scenario: after the restart the reboot runs (one
+    router call) and the audit says the repair was interrupted."""
+    world = await World().start()
+    gw = await world.gateway()
+    action_id = await _restarted(world)
+    with _no_ssh():
+        await gw.entities["reboot"].async_press()
+    assert gw.calls == [("system", "reboot", {})]
+    [event] = world.audits()
+    assert _data(event)["result"] == "ok"
+    assert _data(event)["interrupted_repair"] is True
+    assert _data(event)["lock"] == "none"  # the rebuilt engine lock stays
+    assert world.store.loop.lock_holder(world.rid).action_id == action_id
+    assert len(world.store.loop.external_writes) == 1
+
+
+async def test_an_interrupted_repair_never_blocks_any_press(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    await _restarted(world)
+    assert await record(gw) == EXPECTED_MAIN
+    events = world.audits()
+    assert len(events) == len(ACTIONS)
+    assert {(_data(e)["result"], _data(e)["interrupted_repair"]) for e in events} == {
+        ("ok", True)
+    }
+
+
+async def test_a_live_action_still_refuses_after_an_interrupted_one_ended(
+    disks: Any,
+) -> None:
+    """Only the record's own flag lets a press through: a new action in
+    EXECUTING (no flag) on the same router refuses again."""
+    world = await World().start()
+    gw = await world.gateway()
+    action_id = await _restarted(world)
+    world.store.loop.locks.pop(world.rid)  # the interrupted action ended
+    assert world.store.get(action_id).flags.interrupted is True
+    live = world.store.add(svc(1, router_id=world.rid)).action.action_id
+    to_approved(world.store, live)
+    assert (await execute(world.store, live, ts=T0 + 30)).ok
+    assert world.store.get(live).state is S.EXECUTING
+    assert world.store.get(live).flags.interrupted is False
+    with pytest.raises(HomeAssistantError):
+        await gw.entities["reboot"].async_press()
+    assert gw.calls == []
+    [event] = world.audits()
+    assert _data(event)["interrupted_repair"] is False
+    assert _data(event)["result"] == "refused_busy"
+
+
+def _release_spy(fail: int) -> tuple[list[str], Any]:
+    """release_external_lock that raises the first ``fail`` times."""
+    real = hs.SelfHealingStore.release_external_lock
+    calls: list[str] = []
+
+    def release(store: Any, router_id: str, lock_id: str) -> bool:
+        calls.append(lock_id)
+        if len(calls) <= fail:
+            raise RuntimeError("/secret/path")
+        return real(store, router_id, lock_id)
+
+    return calls, release
+
+
+def _guard_warnings(caplog: Any) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == hg.__name__ and r.levelno >= logging.WARNING
+    ]
+
+
+async def test_a_release_that_fails_once_is_tried_again(
+    disks: Any, caplog: Any
+) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    calls, release = _release_spy(fail=1)
+    with patch.object(hs.SelfHealingStore, "release_external_lock", release):
+        await record(gw, ACTIONS[1:2])
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert world.store.loop.lock_holder(world.rid) is None
+    assert _guard_warnings(caplog) == []
+
+
+async def test_a_release_that_fails_twice_drops_the_guards_own_lock(
+    disks: Any, caplog: Any
+) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    calls, release = _release_spy(fail=2)
+    with patch.object(hs.SelfHealingStore, "release_external_lock", release):
+        await record(gw, ACTIONS[1:2])
+    assert len(calls) == 2
+    assert world.store.loop.lock_holder(world.rid) is None
+    [warning] = _guard_warnings(caplog)
+    assert "RuntimeError" in warning and "secret" not in warning
+    # a later press takes and releases the lock as usual
+    assert await record(gw, ACTIONS[2:3]) == {
+        "button.restart.dnsmasq": EXPECTED_MAIN["button.restart.dnsmasq"]
+    }
+    assert world.store.loop.lock_holder(world.rid) is None
+    assert [_data(e)["lock"] for e in world.audits()] == ["taken", "taken"]
+
+
+async def test_a_forced_drop_never_frees_a_foreign_lock(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    foreign: list[str | None] = []
+
+    def swap() -> None:
+        assert world.store.admin_force_release_lock(world.rid, actor="admin", ts=T0 + 1)
+        foreign.append(world.store.try_external_lock(world.rid, "button.other", T0))
+
+    _timed(gw, "reboot", [], swap)
+    _calls, release = _release_spy(fail=2)
+    with patch.object(hs.SelfHealingStore, "release_external_lock", release):
+        await record(gw, ACTIONS[1:2])
+    assert foreign[0] is not None
+    assert world.store.loop.lock_holder(world.rid).lock_id == foreign[0]
+
+
+class _BrokenShares(dict):
+    """A share table that fails when a new share is stored."""
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        raise RuntimeError("bug")
+
+
+async def test_a_guard_error_after_the_lock_was_taken_releases_it(
+    disks: Any,
+) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    table = _BrokenShares()
+    seen: list[Any] = []
+    _timed(gw, "reboot", seen, lambda: world.store.loop.lock_holder(world.rid))
+    with patch.object(hg, "_shares", lambda _hass: {world.store: table}):
+        assert await record(gw, ACTIONS[1:2]) == {
+            "button.reboot": EXPECTED_MAIN["button.reboot"]
+        }
+    assert seen[1] is None  # the half-taken lock was given back at once
+    assert world.store.loop.lock_holder(world.rid) is None
+    [event] = world.audits()
+    assert _data(event)["lock"] == "none"
+
+
+async def test_a_guard_error_never_refuses_even_with_an_engine_lock(
+    disks: Any,
+) -> None:
+    """A guard bug falls back to the main behaviour (case 5): the press
+    runs, also when the bug hits after a live engine lock was seen."""
+    world = await World().start()
+    gw = await world.gateway()
+    action_id = await world.engine_holds()
+    with patch.object(
+        hs.SelfHealingStore, "router_hold", MagicMock(side_effect=RuntimeError("x"))
+    ):
+        assert await record(gw, ACTIONS[1:2]) == {
+            "button.reboot": EXPECTED_MAIN["button.reboot"]
+        }
+    assert world.store.loop.lock_holder(world.rid).action_id == action_id
+    [event] = world.audits()
+    assert _data(event)["result"] == "ok"
+    assert _data(event)["lock"] == "none"
+    assert world.store.loop.external_writes == []  # no store after the bug
+
+
+async def test_a_guard_error_keeps_what_was_seen_in_the_audit(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    await _restarted(world)
+    with patch.object(
+        hs.SelfHealingStore, "router_hold", MagicMock(side_effect=RuntimeError("x"))
+    ):
+        await record(gw, ACTIONS[1:2])
+    [event] = world.audits()
+    assert _data(event)["interrupted_repair"] is True
+    assert _data(event)["lock"] == "none"
+
+
+@pytest.mark.parametrize(("name", "key", "method"), ACTIONS)
+async def test_every_press_audits_the_user_of_its_service_call(
+    disks: Any, name: str, key: str, method: str
+) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    context = Context(user_id=ADMIN_ID)
+    gw.entities[key]._context = context
+    with _no_ssh():
+        await getattr(gw.entities[key], method)()
+    [event] = world.audits()
+    assert event.actor.user_id == ADMIN_ID
+    assert event.actor.context_id == context.id
+    assert (_data(event)["action"], _data(event)["target"]) == AUDITED[name]
+
+
+async def test_every_refresh_runs_after_the_lock_is_released(disks: Any) -> None:
+    world = await World().start()
+    gw = await world.gateway()
+    at_refresh: list[Any] = []
+
+    def refresh() -> None:
+        at_refresh.append(world.store.loop.lock_holder(world.rid))
+        gw.calls.append(REFRESH)
+
+    gw.coordinator.async_request_refresh = AsyncMock(side_effect=refresh)
+    assert await record(gw) == EXPECTED_MAIN
+    refreshing = sum(REFRESH in calls for calls in EXPECTED_MAIN.values())
+    assert refreshing == len(ACTIONS) - 1  # all but the reboot
+    assert at_refresh == [None] * refreshing

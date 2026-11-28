@@ -2116,8 +2116,10 @@ vorher. Code: `heal_guard.async_manual_action` (asynchroner Kontextmanager), ben
 `button.py` und `switch.py`. `heal_store.py` und `heal_engine.py` sind unverändert; der Wächter
 nimmt nur ihre öffentliche Oberfläche (`async_get_self_healing`, `HealEngine.loaded`,
 `module_enabled()`, `router_id_for_entry()`, `store.loop.repair_active()`,
-`store.loop.lock_holder()`, `store.router_hold()`, `try_external_lock()`,
-`release_external_lock()`, `record_external_write()`, `store.clock`). Er ruft keinen Router auf.
+`store.loop.lock_holder()`, `store.get()` mit `flags.interrupted`, `store.router_hold()`,
+`try_external_lock()`, `release_external_lock()`, `store.loop.release_lock()`,
+`record_external_write()`, `store.clock`), vom Core nur `enterprise_core.async_get_core`,
+`loaded`, `closed` und `manager.api(1)`. Er ruft keinen Router auf.
 
 **Welche Knöpfe und Schalter** (die Liste der Analyse, am Code geprüft, keine weiteren gefunden):
 
@@ -2129,20 +2131,35 @@ nimmt nur ihre öffentliche Oberfläche (`async_get_self_healing`, `HealEngine.l
 | Schalter Dienst an/aus (dieselben sechs) | `{entry}_service_{name}` | `rc init {name, start/stop}` | `service.start` / `service.stop` | Dienstname | `switch.service` |
 | Schalter WLAN je SSID an/aus | `{entry}_wifi_ssid_{section}` | `uci set` → `uci commit` → `network reload` (Auswege wie bisher) | `wifi.enable` / `wifi.disable` | `wifi` (nie SSID oder UCI-Abschnitt) | `switch.wifi` |
 
-Nicht dabei: der Knopf „Nach Updates suchen“ (er startet, stoppt und lädt nichts, schreibt aber
-über SSH den Paketindex; offene Frage an den Eigentümer) und der Wartungsschalter von Network
-Intelligence (kein Router-Aufruf). Ein WLAN-Schalter ohne bekannten UCI-Abschnitt ruft den Router
+Nicht dabei: der Knopf „Nach Updates suchen“ und der Wartungsschalter von Network Intelligence
+(kein Router-Aufruf). **DECIDED (Review PR #85): „Nach Updates suchen“ bleibt ohne Wächter.**
+Er lädt über SSH nur die Paketlisten neu (`apk update` / `opkg update`, ein Zwischenspeicher)
+und listet aktualisierbare Pakete; er startet, stoppt und lädt keinen Dienst, ändert weder
+UCI-Konfiguration noch WLAN oder Netz und berührt nichts, was eine Reparatur ändert oder
+prüft. Er hat schon eine eigene Sperre (`update_check_running`, einer zur Zeit) und darf bis
+180 s laufen (`UPDATE_CHECK_SSH_TIMEOUT`); die Router-Sperre so lange zu halten, hielte die
+Engine minutenlang ohne Grund draußen. Ein WLAN-Schalter ohne bekannten UCI-Abschnitt ruft den Router
 nicht auf (Warnung wie bisher) und läuft daher nicht über den Wächter.
 
 **Die fünf Fälle:**
 
-1. **Eine Aktion der Engine hält die Sperre** des Routers (`repair_active`): der Druck wird
-   abgelehnt mit `HomeAssistantError` (`translation_key` `repair_running`, Text in
-   `strings.json`, `en.json`, `de.json`), die Oberfläche zeigt ihn. Kein Router-Aufruf, auch kein
-   Nachladen der Daten danach. Ein Audit-Eintrag mit Ergebnis `refused_busy`. Die Sperre der
-   Engine bleibt unberührt. **In 1.53.0 führt die Engine nie aus; dieser Fall kann im Betrieb
-   noch nicht eintreten.** Die Tests erreichen ihn mit einem Stellvertreter: einem echten
-   Speicher, dessen Aktion in EXECUTING steht.
+1. **Eine Aktion der Engine hält die Sperre** des Routers (`repair_active`) **und läuft
+   wirklich**: der Druck wird abgelehnt mit `HomeAssistantError` (`translation_key`
+   `repair_running`, Text in `strings.json`, `en.json`, `de.json`), die Oberfläche zeigt ihn.
+   Kein Router-Aufruf, auch kein Nachladen der Daten danach. Ein Audit-Eintrag mit Ergebnis
+   `refused_busy`. Die Sperre der Engine bleibt unberührt. **In 1.53.0 führt die Engine nie
+   aus; dieser Fall kann im Betrieb noch nicht eintreten.** Die Tests erreichen ihn mit einem
+   Stellvertreter: einem echten Speicher, dessen Aktion in EXECUTING steht.
+   **DECIDED (Review PR #85): eine unterbrochene Reparatur sperrt nicht.** Nach einem
+   HA-Neustart steht eine Aktion, die in EXECUTING, VERIFYING oder ROLLING_BACK war, in
+   VERIFYING mit `flags.interrupted` (Abschnitt 5), und der Speicher baut ihre Sperre der Engine
+   beim Laden neu auf; keine Engine führt sie aus. Ohne Ausnahme lehnte der Wächter dann jeden
+   Druck ab, auch den Neustart des Routers. Darum: gehört die Sperre der Engine einer Aktion mit
+   `flags.interrupted` (gelesen über `store.loop.lock_holder(rid).action_id` und
+   `store.get(...)`; nur der Neustart setzt diese Marke), läuft der Druck, ohne eigene Sperre
+   (`lock: none`, die Sperre der Engine bleibt), und das Audit sagt `interrupted_repair: true`.
+   Eine laufende Aktion ohne die Marke lehnt weiter ab. `heal_store.py` und `heal_engine.py`
+   sind dafür unverändert.
 2. **Router im Hold** (Abschnitt 5.1, etwa `outcome_unknown`): kein Hindernis, der Administrator
    muss eingreifen können. Der Audit-Eintrag sagt `on_hold: true` und den Grund.
 3. **Sonst** läuft der Druck wie vorher und hält für seine Dauer die Router-Sperre
@@ -2153,26 +2170,50 @@ nicht auf (Warnung wie bisher) und läuft daher nicht über den Wächter.
    Ausnahme, Zeitüberschreitung, abgebrochene Aufgabe. Hat ein Administrator die Sperre
    inzwischen entfernt (`admin_force_release_lock`), gibt der alte Druck nichts frei, was ihm
    nicht gehört. Hält ein anderer externer Halter die Sperre, läuft der Druck ohne eigene Sperre
-   (`lock: none`); die Engine bleibt trotzdem draußen. Danach hält der Speicher den Schreibzugriff
-   fest (`record_external_write`: Router, Quelle, Ziel, Zeit, Audit-Kennung).
+   (`lock: none`); die Engine bleibt trotzdem draußen. Wirft die Freigabe
+   (`release_external_lock`), versucht der Wächter sie **einmal** neu; scheitert auch das, nimmt
+   er seine eigene Sperre selbst weg (`store.loop.release_lock(rid, lock_id)`, das nur die Sperre
+   mit genau dieser `lock_id` löst, nie eine fremde) und schreibt eine Warnung nur mit dem
+   Fehlertyp. Ein späterer Druck nimmt und gibt die Sperre wieder wie gewohnt. Danach hält der
+   Speicher den Schreibzugriff fest (`record_external_write`: Router, Quelle, Ziel, Zeit,
+   Audit-Kennung).
 4. **Ein Audit-Eintrag je Druck** über das Audit des Core: Typ `self_healing.manual.action`,
    Quelle `self_healing`, `actor` aus dem Kontext des Dienstaufrufs (Benutzerkennung, Kontext-
    und Eltern-Kennung; eine Automation ohne Benutzer heißt `automation`), `router_id` des Core,
    `entry_id`, `result` `success`/`denied`/`failure`, `severity` `info`/`warning`. `data` enthält
    genau: `action` (geschlossene Menge oben), `target` (Dienst aus `DEFAULT_SERVICES`, `wifi`,
    `system`, sonst `other`), `result` (`ok`, `refused_busy`, `failed`), `on_hold`,
-   `hold_reason`, `lock` (`taken`, `joined`, `none`). Nie Adressen, Hostnamen, SSIDs,
+   `hold_reason`, `lock` (`taken`, `joined`, `none`), `interrupted_repair` (wahr nur bei einer
+   unterbrochenen Reparatur, Fall 1). `is_admin` des Akteurs ist nur wahr, wenn die
+   Benutzersuche nach dem Aufruf rechtzeitig fertig wurde, sonst bleibt der Akteur
+   unbestätigt (Benutzer- und Kontext-Kennung stehen trotzdem drin). Nie Adressen, Hostnamen, SSIDs,
    UCI-Abschnitte, Client-Namen oder Geheimnisse. `failed` heißt: der Aufruf warf, oder die api
    meldete `False` (etwa `rc init` abgelehnt). Ohne `dedup_key`, also nie zusammengefasst; allgemeiner
    Ring (Anteil des Moduls `self_healing`).
 5. **Modul aus** (kein laufendes Engine-Objekt, Engine nicht geladen, Schalter in den
-   Einstellungen aus, Engine geschlossen) oder Router dem Core unbekannt: keine Sperre, keine
-   Ablehnung, wie vorher. Das Audit wird geschrieben, wenn der Core läuft, sonst still
-   übersprungen. Ein Fehler im Audit (Core nicht da, langsam, `emit` wirft, Präfix abgelehnt)
-   lässt den Druck nie scheitern; Core und Akteur werden **vor** dem Router-Aufruf höchstens 2 s
-   lang gesucht (`AUDIT_LOOKUP_TIMEOUT_S`), geschrieben wird synchron danach. Ein Fehler im
-   Wächter selbst fällt auf das Verhalten von vorher zurück (keine Sperre, keine Ablehnung,
-   Warnung im Log); abgelehnt wird nur, wenn eine Sperre der Engine wirklich gesehen wurde.
+   Einstellungen aus, Engine geschlossen) oder Router der Engine unbekannt: keine Sperre, keine
+   Ablehnung. **„Genau wie main“ heißt hier: dieselben Router-Aufrufe in derselben Reihenfolge,
+   dasselbe Ergebnis, dieselbe Entität** (unique_id, Name, Verfügbarkeit) – **nicht** dasselbe
+   Audit. Läuft der Core, wird auch mit ausgeschaltetem Modul ein Audit-Eintrag geschrieben
+   (`lock: none`); main schrieb keinen. Ohne geladenen Core wird das Audit still übersprungen.
+   Ein Fehler im Audit (Core nicht geladen, `emit` wirft, Präfix abgelehnt, Benutzersuche
+   langsam) lässt den Druck nie scheitern. Ein Fehler im Wächter selbst fällt auf das Verhalten
+   von vorher zurück (keine Sperre, keine Ablehnung, Warnung im Log; eine schon genommene Sperre
+   gibt er sofort zurück); abgelehnt wird nur, wenn eine laufende Aktion der Engine wirklich
+   gesehen wurde.
+
+**Kein Warten vor dem Router-Aufruf (Review PR #85).** Vor dem Aufruf wird nichts erwartet:
+Prüfung und Sperre sind synchron. Der Core wird nur benutzt, wenn er schon geladen ist
+(`async_get_core`, `loaded`, nicht `closed`); der Wächter lädt ihn nie, wartet nie auf ihn und
+bricht sein Laden nie ab. Core und Akteur werden erst **nach** dem Aufruf bestimmt, die Sperre
+ist dann schon frei: die Kontext-Kennungen sind sofort da, nur die Benutzersuche
+(`hass.auth.async_get_user`, nur mit Core und nur mit Benutzer) darf warten, höchstens
+`AUDIT_LOOKUP_TIMEOUT_S` = 2 s. Nach einer Ablehnung oder einer Ausnahme gilt dasselbe; nach
+einem Abbruch wird nicht gesucht. Wird der Druck während der Suche abgebrochen, wird der
+Eintrag trotzdem geschrieben (unbestätigter Akteur) und der Abbruch weitergegeben. Das Nachladen
+der Daten (`async_request_refresh`) läuft wie auf main nach dem Aufruf, außerhalb der Sperre.
+Ein Test hält fest, dass der Router-Aufruf mit nicht geladenem Core und mit hängender
+Benutzersuche nach weniger als 50 ms beginnt (vorher bis zu 2 × 2 s).
 
 Prüfung und Sperre sind **ein Schritt ohne `await`** dazwischen: die Engine kann die Sperre nicht
 zwischen „frei?“ und „nehmen“ greifen. Die Reihenfolge der Router-Aufrufe ändert sich nicht;
@@ -2285,7 +2326,7 @@ Andere Benutzer sehen eine maskierte Kurzfassung ohne Knöpfe.
 | Eingeschleuste Parameter | geschlossener Katalog, geprüfte Parameter, nie SSH für Schreibzugriffe | **teilweise**: das Modell nimmt nur kurze Wörter, Zahlen und Wahrheitswerte und lehnt geheime Schlüsselnamen und schlüsselartige Werte ab; der Katalog (Paket D) nimmt nur genaue `str` aus geschlossenen Mengen, keine Unterklassen, keine Zusatzschlüssel, und wiederholt abgelehnte Werte nie; nie-Familien (Client, Firewall, VLAN, Management, Routing, Firmware, `network`, `wpad`, UCI, Shell) stehen nicht im Katalog. Kein Schreibweg vorhanden |
 | HA startet mitten in einer Aktion neu | Schreiben vor dem Handeln, „unbekannt“, nie wiederholen | **gebaut**: Rücklesen, Neustartregel, Tests 22 |
 | Router verloren mitten in der Aktion | `inconclusive` → VERIFYING → MANUAL_RECOVERY_REQUIRED, kein Wiederholen | Übergänge vorhanden |
-| Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | **gebaut** (Paket K2, Abschnitt 10.3): abgelehnt, solange die Engine die Sperre hält; sonst Sperre für die Dauer des Drucks und ein Audit-Eintrag; nur-Administrator bleibt offen (Q4 c) |
+| Umgehung über vorhandene Knöpfe und Schalter | Sperre beachten, Audit | **gebaut** (Paket K2, Abschnitt 10.3): abgelehnt, solange eine laufende Aktion der Engine die Sperre hält (eine nach einem Neustart unterbrochene nicht); sonst Sperre für die Dauer des Drucks und ein Audit-Eintrag; nur-Administrator bleibt offen (Q4 c) |
 | Geheimnisse oder Adressen in Logs, Audit, Speicher | nur Kennungen, Zähler, Codes | **gebaut** für den Speicher; Test mit der Maskierung des Core |
 | Speicher manipuliert oder verloren | atomares Schreiben, private Datei; Verlust → Observe, 24 h Flotten-Pause und 24 h Hold der Flotte; kaputter Datensatz → 24 h Hold seines Routers, ohne Ende, wenn er noch eine Ausführung zeigt; Holds aus beendeten Datensätzen werden bei jedem Laden neu gesetzt | **gebaut** |
 
@@ -2771,16 +2812,24 @@ Core mit dem Test-Anbieter und Attrappen der Versionen mit denselben Attributen)
 Paars nach einem echten Sprung der Wanduhr (Grenze oben in 7.2); eine Faktenquelle, die die
 Anbindung wirklich benutzt (gibt es noch nicht); Laufzeit des Vergleichs bei großen Archiven.
 
-- `tests/test_heal_guard_buttons_v1530.py` (Paket K2, 65 Tests): aufgezeichnete Router-Aufrufe
+- `tests/test_heal_guard_buttons_v1530.py` (Paket K2, 101 Tests): aufgezeichnete Router-Aufrufe
   jedes Knopfes und Schalters gleich denen von main (ohne `hass`, mit Core, mit Core und Engine,
   ohne Core mit Engine, Modul aus in vier Formen, Audit kaputt); Ablehnung je Knopf und Schalter
   (19 Fälle) mit Stellvertreter-Halter, kein Aufruf, ein Eintrag `refused_busy`; Hold blockiert
   nicht; Sperre während des Aufrufs (die Engine bekommt `router_locked`), geteilte Sperre, letzte
   Freigabe, von einem Administrator entfernte Sperre (ein alter Druck tritt nie einer fremden Sperre bei und löscht nie den Anteil der aktuellen); Ziel außerhalb der geschlossenen Menge wird `other`; Freigabe nach Ausnahme,
   Zeitüberschreitung, `False` und Abbruch; Felder des Eintrags ohne Adresse, Name, SSID,
-  UCI-Abschnitt, MAC, Passwort; langsamer Core und langsame Benutzersuche; Quelltext-Prüfung, dass
-  jeder Schreibaufruf in `button.py` und `switch.py` im Wächter steht. Mutationsprüfung auf
-  grünem Stand (CHANGELOG, Paket K2).
+  UCI-Abschnitt, MAC, Passwort (der Titel des Eintrags ist klein geschrieben, damit keine
+  zufällige Kennung ihn enthält); Quelltext-Prüfung, dass jeder Schreibaufruf in `button.py` und
+  `switch.py` im Wächter steht. Nach dem Review von PR #85: unterbrochene Reparatur nach einem
+  Neustart (der Neustart-Knopf und alle 19 Drücke laufen, Audit `interrupted_repair`; eine
+  laufende Aktion ohne Marke lehnt weiter ab); Router-Aufruf nach weniger als 50 ms mit nicht
+  geladenem Core und mit hängender Benutzersuche, die Suche erst nach dem Aufruf und ohne Sperre,
+  Obergrenze 2 s festgehalten, Abbruch während der Suche; Freigabe einmal wiederholt, danach die
+  eigene Sperre weg (nie eine fremde), ein späterer Druck sperrt wieder; Fehler im Wächter nach
+  genommener Sperre gibt sie zurück und lehnt nie ab; Benutzer und Kontext für jeden der 19
+  Drücke; jedes Nachladen nach der Freigabe; Engine ohne Core-Bindung nimmt keine Sperre und
+  erfindet keine Router-Kennung. Mutationsprüfung auf grünem Stand (CHANGELOG, Paket K2).
 
 Nicht geprüft: auf Routern (es gibt keinen Router-Aufruf), in einer laufenden HA-Instanz
 (die C1-Tests laufen mit einem nachgebildeten `hass`, dem echten Network-Intelligence-Motor
