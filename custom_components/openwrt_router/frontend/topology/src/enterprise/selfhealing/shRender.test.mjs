@@ -1,8 +1,8 @@
 // Render tests of the "Self-Healing" tab (node:test). The view is bundled
 // once with esbuild (Vite's own bundler, already in node_modules; no new
 // dependency) and rendered with react-dom/server, the Time Machine way. The
-// answers are real route answers from shFixture.json (recorded from
-// heal_views.py against a test engine; invented ids, no address or name).
+// answers are real route answers from shFixture.json (made and checked by
+// tests/test_sh_panel_fixture_v1530.py; invented ids, no address or name).
 process.env.TZ = 'Europe/Berlin';
 
 import { test, before } from 'node:test';

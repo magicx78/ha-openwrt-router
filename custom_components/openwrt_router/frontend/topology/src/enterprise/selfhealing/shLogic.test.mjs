@@ -1,6 +1,6 @@
 // Logic of the "Self-Healing" tab (node:test, no dependencies): parsers on
-// real route answers (shFixture.json, recorded from heal_views.py against a
-// test engine; invented ids), the error mapping, "truth or unknown", and the
+// real route answers (shFixture.json, made and checked by
+// tests/test_sh_panel_fixture_v1530.py from heal_views.py; invented ids), the error mapping, "truth or unknown", and the
 // ONE reason table compared with the backend's own sources.
 process.env.TZ = 'Europe/Berlin';
 

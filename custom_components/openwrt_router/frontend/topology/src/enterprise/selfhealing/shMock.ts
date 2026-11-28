@@ -1,7 +1,7 @@
 /**
  * shMock.ts — DEV ONLY: the Self-Healing tab on recorded route answers
- * (shFixture.json, made by the real heal_views.py routes against a test
- * engine; ids are rtr_1…1 / rtr_2…2, no address or name). main.tsx imports
+ * (shFixture.json, made by the real heal_views.py routes and checked by
+ * tests/test_sh_panel_fixture_v1530.py; ids are invented, no address or name). main.tsx imports
  * this behind import.meta.env.DEV for ?selfhealingmock[=scenario], so the
  * production build drops it and the fixture.
  *
